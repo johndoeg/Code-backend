@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Under Maintenance - {{ app_name }}</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            margin: 0;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: #333;
+        }
+        .container {
+            text-align: center;
+            padding: 2rem;
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 10px 25px rgba(0,0,0,0.1);
+            max-width: 500px;
+            margin: 1rem;
+        }
+        .icon { font-size: 4rem; margin-bottom: 1rem; color: #667eea; }
+        h1 { margin: 0 0 1rem; color: #2d3748; }
+        p { margin: 0.5rem 0; color: #4a5568; }
+        .retry {
+            margin-top: 1.5rem;
+            font-size: 0.9rem;
+            color: #718096;
+        }
+        .progress {
+            width: 100%;
+            height: 4px;
+            background: #edf2f7;
+            border-radius: 2px;
+            margin-top: 1rem;
+            overflow: hidden;
+        }
+        .progress-bar {
+            height: 100%;
+            background: #667eea;
+            border-radius: 2px;
+            animation: progress {{ retry_after }}s linear;
+        }
+        @keyframes progress { from { width: 0; } to { width: 100%; } }
+        .contact {
+            margin-top: 2rem;
+            padding-top: 1rem;
+            border-top: 1px solid #edf2f7;
+            font-size: 0.85rem;
+            color: #718096;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="icon">🔧</div>
+        <h1>Under Maintenance</h1>
+        <p>{{ message or 'We\'re currently performing scheduled maintenance.' }}</p>
+        <p>Our team is working hard to bring you a better experience.</p>
+        
+        {% if retry_after %}
+        <div class="retry">
+            <p>Expected to be back in ~{{ (retry_after / 60) | round }} minutes</p>
+            <div class="progress">
+                <div class="progress-bar"></div>
+            </div>
+        </div>
+        {% endif %}
+        
+        <div class="contact">
+            <p>Need urgent assistance? Contact support@geniefinance.com</p>
+        </div>
+    </div>
+    
+    <script>
+        // Auto-refresh after maintenance window
+        {% if retry_after %}
+        setTimeout(() => {
+            window.location.reload();
+        }, {{ retry_after }} * 1000);
+        {% endif %}
+    </script>
+</body>
+</html>
