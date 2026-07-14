@@ -2,7 +2,6 @@ import React, { useState, useEffect, useCallback } from 'react';
 import api from "../../../api/axiosInstance";
 import { DEFAULT_PAGE_LIMIT } from "../../../constants/DefaultValue"
 import Pagination from '../../../helpers/Pagination';
-
 interface Branch {
 	branchCd: string;
 	cityName: string;
@@ -118,7 +117,6 @@ const ListOfSalesPage: React.FC = () => {
 						<h1 className="text-2xl md:text-3xl font-bold text-gray-800">List of Sales</h1>
 					</div>
 
-					{/* Branch Selection */}
 					<div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
 						<div>
 							<label htmlFor="branch_cd" className="block text-sm font-medium text-gray-700 mb-1">
@@ -167,7 +165,6 @@ const ListOfSalesPage: React.FC = () => {
 						</div>
 					)}
 
-					{/* Results Table */}
 					<div className="overflow-x-auto rounded-lg border border-gray-200">
 						<table className="w-full">
 							<thead className="bg-gradient-to-r from-gray-50 to-gray-100">

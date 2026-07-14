@@ -1,6 +1,7 @@
 import React, { useState, useCallback } from 'react';
 import api from '../../api/axiosInstance';
 import Pagination from '../../helpers/Pagination';
+import AsOfDatePicker from '../../components/AsOfDatePickerComponent';
 import { DEFAULT_PAGE_LIMIT } from '../../constants/DefaultValue';
 
 type CertType =
@@ -42,15 +43,15 @@ const PRINT_ONLY_TYPES = new Set([
 	'fiducia_not_scan',
 ]);
 
-const todayISO = (): string => new Date().toISOString().split('T')[0];
+const toISO = (d: Date | null): string => (d ? d.toISOString().split('T')[0] : '');
 
 const FiduciaReportPage: React.FC = () => {
 	const [certType, setCertType] = useState<CertType>('');
 	const [searchBy, setSearchBy] = useState<SearchBy>('');
-	const [dateBefore, setDateBefore] = useState('');
-	const [dateAfter, setDateAfter] = useState('');
+	const [dateBefore, setDateBefore] = useState<Date | null>(null);
+	const [dateAfter, setDateAfter] = useState<Date | null>(null);
 	const [customerName, setCustomerName] = useState('');
-	const [asOf, setAsOf] = useState('');
+	const [asOf, setAsOf] = useState<Date | null>(null);
 
 	const [contractRows, setContractRows] = useState<string[]>(['']);
 
@@ -85,8 +86,7 @@ const FiduciaReportPage: React.FC = () => {
 		setContractRows(['']);
 		setPage(1);
 
-		if (PRINT_ONLY_TYPES.has(value)) setAsOf(todayISO());
-		else setAsOf('');
+		setAsOf(PRINT_ONLY_TYPES.has(value) ? new Date() : null);
 	};
 
 	const handleSearchByChange = (value: SearchBy) => {
@@ -101,16 +101,26 @@ const FiduciaReportPage: React.FC = () => {
 	const handleCancel = () => {
 		setCertType('');
 		setSearchBy('');
-		setDateBefore('');
-		setDateAfter('');
+		setDateBefore(null);
+		setDateAfter(null);
 		setCustomerName('');
-		setAsOf('');
+		setAsOf(null);
 		setRecords([]);
 		setChecked(new Set());
 		setCheckAll(false);
 		setError(null);
 		setContractRows(['']);
 		setPage(1);
+	};
+
+	const handleDateBeforeChange = (date: Date | null) => {
+		setDateBefore(date);
+		if (date && dateAfter && date > dateAfter) setDateAfter(date);
+	};
+
+	const handleDateAfterChange = (date: Date | null) => {
+		setDateAfter(date);
+		if (date && dateBefore && date < dateBefore) setDateBefore(date);
 	};
 
 	const fetchData = useCallback(async (leaseNo = '') => {
@@ -127,8 +137,8 @@ const FiduciaReportPage: React.FC = () => {
 				search_by: searchBy,
 				lease_no: leaseNo,
 				lessee_nm: customerName,
-				date_before: dateBefore,
-				date_after: dateAfter,
+				date_before: toISO(dateBefore),
+				date_after: toISO(dateAfter),
 			});
 
 			const raw = res.data?.data ?? [];
@@ -261,7 +271,7 @@ const FiduciaReportPage: React.FC = () => {
 		if (!certType || !asOf) { alert('Please fill in all fields'); return; }
 		try {
 			const response = await api.get('/FiduciaReport/api/fiducia-print', {
-				params: { cert_type: certType, asof: asOf },
+				params: { cert_type: certType, asof: toISO(asOf) },
 				responseType: 'blob',
 			});
 			const blob = new Blob([response.data], { type: 'application/pdf' });
@@ -296,17 +306,13 @@ const FiduciaReportPage: React.FC = () => {
 			<div className="max-w-7xl mx-auto">
 				<div className="bg-white rounded-2xl shadow-lg p-6 mb-6">
 
-					{/* Header */}
 					<div className="mb-6">
 						<h1 className="text-2xl md:text-3xl font-bold text-gray-800">
 							Fiducia Report
 						</h1>
 					</div>
 
-					{/* ── Filters ── */}
 					<div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-4">
-
-						{/* Certificate Type */}
 						<div>
 							<label className="block text-sm font-medium text-gray-700 mb-1">
 								Certificate Type
@@ -325,7 +331,6 @@ const FiduciaReportPage: React.FC = () => {
 							</select>
 						</div>
 
-						{/* Search By (only for fidusia / roya_fidusia) */}
 						{isTableMode && (
 							<div>
 								<label className="block text-sm font-medium text-gray-700 mb-1">
@@ -345,35 +350,25 @@ const FiduciaReportPage: React.FC = () => {
 						)}
 					</div>
 
-					{/* Date Range */}
 					{showDateRange && (
 						<div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
-							<div>
-								<label className="block text-sm font-medium text-gray-700 mb-1">
-									Date From
-								</label>
-								<input
-									type="date"
-									value={dateBefore}
-									onChange={e => setDateBefore(e.target.value)}
-									className="w-full px-4 py-3 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-								/>
-							</div>
-							<div>
-								<label className="block text-sm font-medium text-gray-700 mb-1">
-									Date To
-								</label>
-								<input
-									type="date"
-									value={dateAfter}
-									onChange={e => setDateAfter(e.target.value)}
-									className="w-full px-4 py-3 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-								/>
-							</div>
+							<AsOfDatePicker
+								label="Date From"
+								value={dateBefore}
+								onChange={handleDateBeforeChange}
+								maxDate={dateAfter ?? undefined}
+								required
+							/>
+							<AsOfDatePicker
+								label="Date To"
+								value={dateAfter}
+								onChange={handleDateAfterChange}
+								minDate={dateBefore ?? undefined}
+								required
+							/>
 						</div>
 					)}
 
-					{/* Customer Name */}
 					{showCustName && (
 						<div className="mb-4">
 							<label className="block text-sm font-medium text-gray-700 mb-1">
@@ -391,22 +386,17 @@ const FiduciaReportPage: React.FC = () => {
 						</div>
 					)}
 
-					{/* As Of (print-only types) */}
 					{showAsOf && (
-						<div className="mb-4">
-							<label className="block text-sm font-medium text-gray-700 mb-1">
-								As Of
-							</label>
-							<input
-								type="date"
+						<div className="mb-4 md:w-1/3">
+							<AsOfDatePicker
+								label="As Of"
 								value={asOf}
-								onChange={e => setAsOf(e.target.value)}
-								className="w-full md:w-1/3 px-4 py-3 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+								onChange={setAsOf}
+								required
 							/>
 						</div>
 					)}
 
-					{/* Action Buttons */}
 					<div className="flex flex-wrap gap-2 mb-6">
 						<button
 							onClick={handleCancel}
@@ -431,14 +421,12 @@ const FiduciaReportPage: React.FC = () => {
 						)}
 					</div>
 
-					{/* Error Banner */}
 					{error && (
 						<div className="mb-4 p-4 bg-red-50 border border-red-200 rounded-lg text-red-700">
 							{error}
 						</div>
 					)}
 
-					{/* ── Table (only for fidusia / roya_fidusia) ── */}
 					{isTableMode && (
 						<>
 							<div className="overflow-x-auto rounded-lg border border-gray-200">
@@ -465,7 +453,6 @@ const FiduciaReportPage: React.FC = () => {
 									</thead>
 
 									<tbody className="divide-y divide-gray-200">
-										{/* Contract-number input rows */}
 										{showContNum && contractRows.map((val, idx) => (
 											<tr key={`input-${idx}`} className={idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
 												<td className="py-3 px-4 text-sm text-center text-gray-700">{idx + 1}</td>
@@ -513,7 +500,6 @@ const FiduciaReportPage: React.FC = () => {
 											</tr>
 										))}
 
-										{/* Normal search result rows */}
 										{!showContNum && pagedRecords.length === 0 && !loading && (
 											<tr>
 												<td colSpan={6} className="py-10 px-4 text-center text-gray-500">
@@ -586,7 +572,6 @@ const FiduciaReportPage: React.FC = () => {
 								</table>
 							</div>
 
-							{/* Pagination */}
 							{!loading && !showContNum && records.length > 0 && (
 								<Pagination
 									page={page}

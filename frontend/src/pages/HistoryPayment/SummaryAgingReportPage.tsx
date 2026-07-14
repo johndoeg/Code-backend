@@ -3,7 +3,6 @@ import api from '../../api/axiosInstance';
 import AsOfDatePicker from '../../components/AsOfDatePickerComponent';
 
 const toISO = (d: Date): string => d.toISOString().split('T')[0];
-
 interface ComboOption {
 	value: string;
 	label: string;
@@ -70,7 +69,6 @@ const SummaryAgingReportPage: React.FC = () => {
 			<div className="max-w-7xl mx-auto">
 				<div className="bg-white rounded-2xl shadow-lg p-6 mb-6">
 
-					{/* Header */}
 					<div className="mb-6">
 						<h1 className="text-2xl md:text-3xl font-bold text-gray-800">
 							Summary Aging Report
@@ -78,7 +76,6 @@ const SummaryAgingReportPage: React.FC = () => {
 						<p className="text-sm text-gray-500 mt-1">Car Financing Only</p>
 					</div>
 
-					{/* Filters */}
 					<div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-4">
 						<AsOfDatePicker value={asof} onChange={setAsof} format="DD MMM YYYY" />
 						<div>
@@ -100,7 +97,6 @@ const SummaryAgingReportPage: React.FC = () => {
 						</div>
 					</div>
 
-					{/* Exclude JF checkbox */}
 					<div className="mb-6">
 						<label className="flex items-center gap-2 cursor-pointer w-fit">
 							<input
@@ -113,14 +109,12 @@ const SummaryAgingReportPage: React.FC = () => {
 						</label>
 					</div>
 
-					{/* Error banner */}
 					{error && (
 						<div className="mb-4 p-4 bg-red-50 border border-red-200 rounded-lg text-red-700">
 							{error}
 						</div>
 					)}
 
-					{/* Action buttons */}
 					<div className="flex flex-wrap gap-2">
 						<button
 							onClick={() => handleExport('excel')}

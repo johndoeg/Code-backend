@@ -64,16 +64,13 @@ const Pagination: React.FC<PaginationProps> = ({
 
 	return (
 		<div className={`flex items-center justify-between gap-4 ${className}`}>
-			{/* Results count — left side */}
 			<div className="text-sm text-gray-500 shrink-0">
 				Showing <span className="font-semibold text-gray-800">{startIndex}</span> to{' '}
 				<span className="font-semibold text-gray-800">{endIndex}</span> of{' '}
 				<span className="font-semibold text-gray-800">{totalItems}</span> results
 			</div>
 
-			{/* Controls — right side */}
 			<div className="flex items-center gap-2">
-				{/* Jump to page — only shown when there are more than 5 pages */}
 				{totalPages > 5 && (
 					<div className="flex items-center gap-1.5 text-sm text-gray-600 mr-2">
 						<span className="whitespace-nowrap">Go to</span>
@@ -97,23 +94,19 @@ const Pagination: React.FC<PaginationProps> = ({
 					</div>
 				)}
 
-				{/* Page navigation */}
 				<div className="flex items-center space-x-1">
-					{/* First page */}
 					{iconBtn(page === 1, () => onPageChange(1), 'First page', (
 						<svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 							<path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M11 19l-7-7 7-7M18 19l-7-7 7-7" />
 						</svg>
 					))}
 
-					{/* Previous page */}
 					{iconBtn(page === 1, () => onPageChange(Math.max(page - 1, 1)), 'Previous page', (
 						<svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 							<path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 19l-7-7 7-7" />
 						</svg>
 					))}
 
-					{/* Page numbers */}
 					{getPageNumbers().map((pageNum) => (
 						<button
 							key={pageNum}
@@ -127,14 +120,12 @@ const Pagination: React.FC<PaginationProps> = ({
 						</button>
 					))}
 
-					{/* Next page */}
 					{iconBtn(page === totalPages, () => onPageChange(Math.min(page + 1, totalPages)), 'Next page', (
 						<svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 							<path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5l7 7-7 7" />
 						</svg>
 					))}
 
-					{/* Last page */}
 					{iconBtn(page === totalPages, () => onPageChange(totalPages), 'Last page', (
 						<svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 							<path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 5l7 7-7 7M6 5l7 7-7 7" />

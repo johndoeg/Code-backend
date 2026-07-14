@@ -251,7 +251,6 @@ const WatchlistEditPage: React.FC = () => {
 		<div className="min-h-screen bg-gradient-to-br from-gray-50 to-gray-100 p-4 md:p-6">
 			<div className="max-w-6xl mx-auto space-y-5">
 
-				{/* ── page header ── */}
 				<div className="bg-white rounded-2xl shadow-lg px-6 py-5 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
 					<div className="flex items-center gap-3">
 						<button
@@ -303,7 +302,6 @@ const WatchlistEditPage: React.FC = () => {
 					</div>
 				</div>
 
-				{/* success toast */}
 				{saved && (
 					<div className="bg-green-50 border border-green-200 rounded-lg px-4 py-3 flex items-center gap-2 text-green-700 text-sm">
 						<svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -317,17 +315,14 @@ const WatchlistEditPage: React.FC = () => {
 					<ErrorBanner errors={errors} onClose={() => setErrors([])} />
 				)}
 
-				{/* ── main form card ── */}
 				<div className="bg-white rounded-2xl shadow-lg p-6">
 					<div className="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-5">
 
-						{/* ── LEFT COLUMN ── */}
 						<div className="space-y-4">
 							<h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider border-b pb-1">
 								{ctype === 'PR' ? 'Personal Information' : 'Company Information'}
 							</h3>
 
-							{/* Customer Type (display only on edit — can't change after creation) */}
 							<Field label="Customer Type">
 								<div className="flex gap-6 mt-1">
 									{(['PR', 'PT'] as CustomerType[]).map(t => (
@@ -365,7 +360,6 @@ const WatchlistEditPage: React.FC = () => {
 									className={inputCls(isReadonly || locked)} />
 							</Field>
 
-							{/* PR-only */}
 							{ctype === 'PR' && (<>
 								<Field label="ID Card No." required>
 									<input type="text" value={form.id_card ?? ''} readOnly={isReadonly || locked}
@@ -394,7 +388,6 @@ const WatchlistEditPage: React.FC = () => {
 								</Field>
 							</>)}
 
-							{/* PT-only */}
 							{ctype === 'PT' && (<>
 								<Field label="NPWP" required>
 									<input type="text" value={form.npwp ?? ''} readOnly={isReadonly || locked}
@@ -433,7 +426,7 @@ const WatchlistEditPage: React.FC = () => {
 										</Field>
 									</div>
 								</div>
-								{/* BOD/BOC trigger */}
+
 								{!locked && (
 									<Field label="Composition BOD / BOC">
 										<button type="button" onClick={openBodModal}
@@ -445,7 +438,6 @@ const WatchlistEditPage: React.FC = () => {
 							</>)}
 						</div>
 
-						{/* ── RIGHT COLUMN ── */}
 						<div className="space-y-4">
 							<h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider border-b pb-1">
 								Case Information
@@ -480,7 +472,6 @@ const WatchlistEditPage: React.FC = () => {
 									className={`${inputCls(isReadonly)} resize-none`} />
 							</Field>
 
-							{/* Meta fields */}
 							<div className="grid grid-cols-2 gap-3">
 								<Field label="Create By">
 									<input type="text" value={data.create_user} readOnly className={inputCls(true)} />
@@ -501,7 +492,6 @@ const WatchlistEditPage: React.FC = () => {
 								</div>
 							)}
 
-							{/* ── PPATK Attachments (reason_category=8 only) ── */}
 							{locked && (
 								<div className="pt-2">
 									<p className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3 border-b pb-1">
@@ -513,7 +503,7 @@ const WatchlistEditPage: React.FC = () => {
 											<span className="truncate text-gray-700 font-mono text-xs">{fname}</span>
 											<div className="flex gap-2 flex-shrink-0 ml-2">
 												<a
-													href={'/MasterData/ppatk/view?fname=${encodeURIComponent(fname)}'}
+													href={`/MasterData/ppatk/view?fname=${encodeURIComponent(fname)}`}
 													target="_blank" rel="noreferrer"
 													className="text-amber-600 hover:underline text-xs font-medium"
 												>View</a>
@@ -555,12 +545,10 @@ const WatchlistEditPage: React.FC = () => {
 				</div>
 			</div>
 
-			{/* ═══ BOD / BOC Modal ═════════════════════════════════════════════════ */}
 			{bodOpen && (
 				<div className="fixed inset-0 bg-black bg-opacity-50 flex items-start justify-center z-50 p-4 overflow-y-auto">
 					<div className="bg-white rounded-2xl shadow-2xl w-full max-w-5xl my-8">
 
-						{/* header */}
 						<div className="flex justify-between items-center px-6 py-5 border-b">
 							<div>
 								<h2 className="text-lg font-bold text-gray-800">
@@ -578,7 +566,6 @@ const WatchlistEditPage: React.FC = () => {
 								</div>
 							) : mgmtData ? (<>
 
-								{/* Directors table */}
 								<div>
 									<h3 className="text-sm font-semibold text-gray-600 mb-3">Directors &amp; Commissioners</h3>
 									<div className="overflow-x-auto rounded-xl border border-gray-200">
@@ -619,7 +606,6 @@ const WatchlistEditPage: React.FC = () => {
 									</div>
 								</div>
 
-								{/* Management Detail table */}
 								<div>
 									<h3 className="text-sm font-semibold text-gray-600 mb-3">Management Detail Information</h3>
 									<div className="overflow-x-auto rounded-xl border border-gray-200">

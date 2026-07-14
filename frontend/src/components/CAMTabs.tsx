@@ -20,7 +20,6 @@ export default function CAMTabs() {
     const location = useLocation();
     const params = useParams();
 
-    // Main tabs
     const mainTabs: Tab[] = [
         { id: 'customer', label: 'Customer', path: '/cam/customer/detail' },
         { id: 'equipment', label: 'Equipment', path: '/cam/equipment' },
@@ -35,7 +34,6 @@ export default function CAMTabs() {
         { id: 'approval', label: 'Approval', path: '/cam/approval' }
     ];
 
-    // Sub-tabs based on main tab
     const getSubTabs = (mainTabId: string): SubTab[] => {
         switch (mainTabId) {
             case 'customer':
@@ -80,20 +78,16 @@ export default function CAMTabs() {
         }
     };
 
-    // Determine active main tab
     const [activeMainTab, setActiveMainTab] = useState<string>('');
     const [activeSubTab, setActiveSubTab] = useState<string>('');
 
     useEffect(() => {
-        // Determine active tab based on current URL
         const path = location.pathname;
 
-        // Find active main tab
         const mainTab = mainTabs.find(tab => path.startsWith(tab.path));
         if (mainTab) {
             setActiveMainTab(mainTab.id);
 
-            // Find active sub-tab
             const subTabs = getSubTabs(mainTab.id);
             const subTab = subTabs.find(tab => path === tab.path || path.startsWith(`${tab.path}/`));
             if (subTab) {
@@ -123,7 +117,6 @@ export default function CAMTabs() {
 
     return (
         <div className="bg-white border-b">
-            {/* Main Tabs */}
             <div className="flex bg-gray-100 p-2">
                 {mainTabs.map((tab) => (
                     <button
@@ -139,7 +132,6 @@ export default function CAMTabs() {
                 ))}
             </div>
 
-            {/* Sub Tabs */}
             {subTabs.length > 0 && (
                 <div className="bg-blue-800 text-white p-2">
                     {subTabs.map((subTab) => (

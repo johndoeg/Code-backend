@@ -2,14 +2,13 @@ import React, { useState } from 'react';
 import DatePicker from 'react-datepicker';
 import 'react-datepicker/dist/react-datepicker.css';
 import { format } from 'date-fns';
+import api from "../../api/axiosInstance";
 
 const SipesatPage: React.FC = () => {
 	const [period, setPeriod] = useState<Date | null>(null);
 	const [isLoading, setIsLoading] = useState(false);
 
-	const API_BASE = import.meta.env.VITE_API_URL;
-
-	const handleExport = () => {
+	const handleExport = async () => {
 		if (!period) {
 			alert('Please select period first');
 			return;
@@ -18,26 +17,40 @@ const SipesatPage: React.FC = () => {
 		setIsLoading(true);
 		const formattedPeriod = format(period, 'MM-yyyy');
 
-		window.open(`${API_BASE}/SIPESAT/api/export/excel?period=${encodeURIComponent(formattedPeriod)}`, '_blank');
+		try {
+			const response = await api.get('/SIPESAT/api/export/excel', {
+				params: { period: formattedPeriod },
+				responseType: 'blob',
+			});
 
-		setTimeout(() => setIsLoading(false), 500);
+			const url = window.URL.createObjectURL(new Blob([response.data]));
+			const link = document.createElement('a');
+			link.href = url;
+			link.setAttribute('download', `SIPESAT_${formattedPeriod}.xlsx`);
+			document.body.appendChild(link);
+			link.click();
+			link.remove();
+			window.URL.revokeObjectURL(url);
+		} catch (error) {
+			console.error('Export failed:', error);
+			alert('Export failed. Please try again.');
+		} finally {
+			setIsLoading(false);
+		}
 	};
 
 	return (
 		<div className="min-h-screen bg-gray-50 py-6 print:bg-white print:py-0">
 			<div className="max-w-3xl mx-auto px-4 print:max-w-none print:px-0">
 
-				{/* Main Form Card */}
 				<div className="bg-white rounded-lg shadow print:shadow-none print:rounded-none">
 					<div className="p-6 print:p-0">
 
-						{/* Title */}
 						<h1 className="text-xl font-bold text-gray-800 mb-6 print:text-2xl print:text-center print:mb-8">
 							PELAPORAN SIPESAT
 						</h1>
 
 						<div className="space-y-6">
-							{/* Period Selector */}
 							<div className="flex flex-col sm:flex-row sm:items-center gap-4">
 								<label className="w-full sm:w-32 text-sm font-medium text-gray-700">
 									As Of <span className="text-red-500">*</span>
@@ -57,7 +70,6 @@ const SipesatPage: React.FC = () => {
 								</div>
 							</div>
 
-							{/* Action Button */}
 							<div className="no-print flex gap-4 pt-4 border-t border-gray-100">
 								<button
 									onClick={handleExport}
@@ -92,14 +104,12 @@ const SipesatPage: React.FC = () => {
 					</div>
 				</div>
 
-				{/* Footer */}
 				<div className="no-print mt-6 text-center text-sm text-gray-500">
 					<p>SIPESAT Reporting Module • {new Date().getFullYear()}</p>
 				</div>
 
 			</div>
 
-			{/* Print Styles */}
 			<style>{`
                 @media print {
                 .no-print { display: none !important; }

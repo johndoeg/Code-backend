@@ -1,30 +1,21 @@
 import React, { useEffect, useState, useCallback, useRef } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import api from "../../../api/axiosInstance";
 import Pagination from "../../../helpers/Pagination";
+import { DEFAULT_PAGE_LIMIT } from "../../../constants/DefaultValue";
 
-interface BlacklistEntry {
+type CustomerType = "PR" | "PT";
+
+interface BlacklistRow {
 	no: number;
-	display_id: string;
-	id_card: string;
-	npwp: string;
+	id_card_npwp: string;
 	name: string;
 	address: string;
 	apless: string;
-	customer_type: "PR" | "PT";
+	customer_type: CustomerType;
 }
 
-interface Reason {
-	value: string;
-	label: string;
-	disabled: boolean;
-}
-
-interface Group {
-	code: string;
-	name: string;
-}
-
-const Badge = ({ type }: { type: "PR" | "PT" }) => (
+const Badge = ({ type }: { type: CustomerType }) => (
 	<span
 		style={{
 			fontSize: 11,
@@ -68,15 +59,47 @@ const ErrorBanner = ({
 		</ul>
 		<button
 			onClick={onClose}
-			style={{ background: "none", border: "none", cursor: "pointer", color: "#dc2626", fontSize: 18, lineHeight: 1 }}
+			style={{
+				background: "none",
+				border: "none",
+				cursor: "pointer",
+				color: "#dc2626",
+				fontSize: 18,
+				lineHeight: 1,
+			}}
 		>
 			×
 		</button>
 	</div>
 );
 
-const BlacklistEntry: React.FC = () => {
-	const [entries, setEntries] = useState<BlacklistEntry[]>([]);
+const inputCls =
+	"w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-red-500 focus:border-transparent focus:outline-none transition-shadow";
+
+const Field = ({
+	label,
+	required,
+	children,
+}: {
+	label: string;
+	required?: boolean;
+	children: React.ReactNode;
+}) => (
+	<div>
+		<label className="block text-sm font-medium text-gray-700 mb-1">
+			{label}
+			{required && <span className="text-red-500 ml-0.5">*</span>}
+		</label>
+		{children}
+	</div>
+);
+
+const BlackListEntryPage: React.FC = () => {
+	const navigate = useNavigate();
+	const [searchParams] = useSearchParams();
+	const menuId = searchParams.get("menu_id") ?? "";
+
+	const [rows, setRows] = useState<BlacklistRow[]>([]);
 	const [total, setTotal] = useState(0);
 	const [page, setPage] = useState(1);
 	const [loading, setLoading] = useState(true);
@@ -86,26 +109,11 @@ const BlacklistEntry: React.FC = () => {
 	const [searchVal, setSearchVal] = useState("");
 	const [appliedSearch, setAppliedSearch] = useState({ by: "2", val: "" });
 
-	const limit = 25;
+	const limit = DEFAULT_PAGE_LIMIT;
 	const totalPages = Math.ceil(total / limit);
 
-	const [reasons, setReasons] = useState<Reason[]>([]);
-	const [groups, setGroups] = useState<Group[]>([]);
-
-	const [addOpen, setAddOpen] = useState(false);
-	const [addErrors, setAddErrors] = useState<string[]>([]);
-	const [addLoading, setAddLoading] = useState(false);
-	const [custType, setCustType] = useState<"PR" | "PT">("PR");
-	const [addForm, setAddForm] = useState({
-		name: "", alias_name: "", address: "", phone: "",
-		id_card: "", birth: "", spouse_name: "", mother: "", npwp: "",
-		contact_person: "", contact_address: "", group_code: "",
-		es_birth: "", reason: "", reason_other: "", remark: "",
-		create_date: new Date().toISOString().slice(0, 10),
-	});
-
 	const [deleteOpen, setDeleteOpen] = useState(false);
-	const [deleteTarget, setDeleteTarget] = useState<BlacklistEntry | null>(null);
+	const [deleteTarget, setDeleteTarget] = useState<BlacklistRow | null>(null);
 	const [deleteReason, setDeleteReason] = useState("");
 	const [deleteFile, setDeleteFile] = useState<File | null>(null);
 	const [deleteErrors, setDeleteErrors] = useState<string[]>([]);
@@ -116,10 +124,15 @@ const BlacklistEntry: React.FC = () => {
 		setLoading(true);
 		setListErrors([]);
 		try {
-			const { data } = await api.get('/MasterData/api/blacklist', {
-				params: { page, limit, search_by: appliedSearch.by, search_val: appliedSearch.val }
+			const { data } = await api.get("/MasterData/api/blacklist/list", {
+				params: {
+					page,
+					limit,
+					search_by: appliedSearch.by,
+					search_val: appliedSearch.val,
+				},
 			});
-			setEntries(data.data || []);
+			setRows(data.rows || []);
 			setTotal(data.total || 0);
 		} catch {
 			setListErrors(["Failed to load blacklist data. Please try again."]);
@@ -128,21 +141,9 @@ const BlacklistEntry: React.FC = () => {
 		}
 	}, [page, appliedSearch]);
 
-	const fetchCombos = useCallback(async () => {
-		try {
-			const [r, g] = await Promise.all([
-				api.get('/MasterData/api/blacklist/reasons'),
-				api.get('/MasterData/api/blacklist/groups'),
-			]);
-			setReasons(r.data || []);
-			setGroups(g.data || []);
-		} catch {
-			console.log('oke');
-		}
-	}, []);
-
-	useEffect(() => { fetchList(); }, [fetchList]);
-	useEffect(() => { fetchCombos(); }, [fetchCombos]);
+	useEffect(() => {
+		fetchList();
+	}, [fetchList]);
 
 	const handleSearch = () => {
 		setPage(1);
@@ -153,42 +154,17 @@ const BlacklistEntry: React.FC = () => {
 		if (e.key === "Enter") handleSearch();
 	};
 
-	const openAdd = () => {
-		setAddForm({
-			name: "", alias_name: "", address: "", phone: "",
-			id_card: "", birth: "", spouse_name: "", mother: "", npwp: "",
-			contact_person: "", contact_address: "", group_code: "",
-			es_birth: "", reason: "", reason_other: "", remark: "",
-			create_date: new Date().toISOString().slice(0, 10),
-		});
-		setCustType("PR");
-		setAddErrors([]);
-		setAddOpen(true);
+	const goToAddNew = () => {
+		navigate(`/blacklist/new?menu_id=${menuId}`);
 	};
 
-	const handleAddField = (field: string, value: string) =>
-		setAddForm((f) => ({ ...f, [field]: value }));
-
-	const handleSave = async () => {
-		setAddLoading(true);
-		setAddErrors([]);
-		try {
-			await api.post(
-				'/MasterData/api/blacklist/save',
-				{ ...addForm, customer_type: custType }
-			);
-			setAddOpen(false);
-			fetchList();
-		} catch (err: any) {
-			const errs = err?.response?.data?.errors;
-			setAddErrors(Array.isArray(errs) ? errs : ["Save failed. Please try again."]);
-		} finally {
-			setAddLoading(false);
-		}
+	const goToDetail = (row: BlacklistRow) => {
+		const mode = row.apless ? "view" : "edit";
+		navigate(`/blacklist/${row.no}?mode=${mode}&menu_id=${menuId}`);
 	};
 
-	const openDelete = (entry: BlacklistEntry) => {
-		setDeleteTarget(entry);
+	const openDelete = (row: BlacklistRow) => {
+		setDeleteTarget(row);
 		setDeleteReason("");
 		setDeleteFile(null);
 		setDeleteErrors([]);
@@ -197,22 +173,35 @@ const BlacklistEntry: React.FC = () => {
 
 	const handleDelete = async () => {
 		if (!deleteTarget) return;
+
+		if (!deleteReason) {
+			setDeleteErrors(["fill the reason first"]);
+			return;
+		}
+		if (!deleteFile) {
+			setDeleteErrors(["Upload the file first"]);
+			return;
+		}
+
 		setDeleteLoading(true);
 		setDeleteErrors([]);
-		const fd = new FormData();
-		fd.append("no", String(deleteTarget.no));
-		fd.append("reason_delete", deleteReason);
-		if (deleteFile) fd.append("attachment_delete", deleteFile);
-
 		try {
-			await api.post('/MasterData/api/blacklist/delete', fd, {
+			const fd = new FormData();
+			fd.append("reason", deleteReason);
+			fd.append("name", deleteTarget.name);
+			fd.append("address", deleteTarget.address);
+			fd.append("attachment", deleteFile);
+
+			await api.delete(`/MasterData/api/blacklist/${deleteTarget.no}`, {
+				data: fd,
 				headers: { "Content-Type": "multipart/form-data" },
 			});
+
 			setDeleteOpen(false);
 			fetchList();
 		} catch (err: any) {
-			const errs = err?.response?.data?.errors;
-			setDeleteErrors(Array.isArray(errs) ? errs : ["Delete failed. Please try again."]);
+			const msg = err?.response?.data?.error;
+			setDeleteErrors([msg || "Delete failed. Please try again."]);
 		} finally {
 			setDeleteLoading(false);
 		}
@@ -222,20 +211,24 @@ const BlacklistEntry: React.FC = () => {
 		<div className="min-h-screen bg-gradient-to-br from-gray-50 to-gray-100 p-4 md:p-6">
 			<div className="max-w-7xl mx-auto">
 
-				{/* ── header card ── */}
 				<div className="bg-white rounded-2xl shadow-lg p-6 mb-6">
+
 					<div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 mb-6">
 						<div>
-							<h1 className="text-2xl md:text-3xl font-bold text-gray-800">Blacklist Entry</h1>
-							<p className="text-gray-500 mt-1 text-sm">Manage blacklisted customers (Individual &amp; Corporate)</p>
+							<h1 className="text-2xl md:text-3xl font-bold text-gray-800">
+								Blacklist
+							</h1>
+							<p className="text-gray-500 mt-1 text-sm">
+								Manage blacklisted customers (Individual &amp; Corporate)
+							</p>
 						</div>
 						<div className="flex items-center gap-3">
 							<span className="bg-red-100 text-red-800 px-3 py-1 rounded-full text-sm font-medium">
 								Total: {total}
 							</span>
 							<button
-								onClick={openAdd}
-								className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm font-medium flex items-center gap-2 transition-colors"
+								onClick={goToAddNew}
+								className="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg text-sm font-medium flex items-center gap-2 transition-colors"
 							>
 								<svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 									<path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
@@ -245,12 +238,11 @@ const BlacklistEntry: React.FC = () => {
 						</div>
 					</div>
 
-					{/* search bar */}
 					<div className="flex flex-col sm:flex-row gap-3 mb-6">
 						<select
 							value={searchBy}
 							onChange={(e) => setSearchBy(e.target.value)}
-							className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none"
+							className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-red-500 focus:outline-none"
 						>
 							<option value="1">ID Card</option>
 							<option value="2">Name</option>
@@ -262,7 +254,7 @@ const BlacklistEntry: React.FC = () => {
 							onChange={(e) => setSearchVal(e.target.value)}
 							onKeyDown={handleSearchKey}
 							placeholder="Search…"
-							className="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none"
+							className="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-red-500 focus:outline-none"
 						/>
 						<button
 							onClick={handleSearch}
@@ -288,7 +280,6 @@ const BlacklistEntry: React.FC = () => {
 						<ErrorBanner errors={listErrors} onClose={() => setListErrors([])} />
 					)}
 
-					{/* table */}
 					<div className="overflow-x-auto rounded-xl border border-gray-200">
 						<table className="w-full">
 							<thead className="bg-gradient-to-r from-gray-50 to-gray-100">
@@ -308,35 +299,47 @@ const BlacklistEntry: React.FC = () => {
 									<tr>
 										<td colSpan={6} className="py-16 text-center">
 											<div className="flex justify-center">
-												<div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500" />
+												<div className="animate-spin rounded-full h-8 w-8 border-b-2 border-red-500" />
 											</div>
 										</td>
 									</tr>
-								) : entries.length === 0 ? (
+								) : rows.length === 0 ? (
 									<tr>
 										<td colSpan={6} className="py-16 text-center text-gray-400 text-sm">
 											No records found
 										</td>
 									</tr>
 								) : (
-									entries.map((entry, i) => (
+									rows.map((row, i) => (
 										<tr
-											key={entry.no}
-											className={`hover:bg-gray-50 transition-colors ${i % 2 === 0 ? "bg-white" : "bg-gray-50/50"}`}
+											key={row.no}
+											className={`hover:bg-red-50/30 transition-colors ${i % 2 === 0 ? "bg-white" : "bg-gray-50/50"}`}
 										>
 											<td className="py-3 px-4 text-sm text-gray-500 text-center">
 												{(page - 1) * limit + i + 1}
 											</td>
-											<td className="py-3 px-4 text-sm font-mono text-gray-800">{entry.display_id}</td>
-											<td className="py-3 px-4 text-sm font-medium text-gray-900">{entry.name}</td>
-											<td className="py-3 px-4 text-sm text-gray-600 max-w-xs truncate">{entry.address}</td>
-											<td className="py-3 px-4">
-												<Badge type={entry.customer_type} />
+											<td className="py-3 px-4 text-sm font-mono text-gray-800">
+												{row.id_card_npwp}
+											</td>
+											<td className="py-3 px-4 text-sm font-medium text-gray-900">
+												{row.name}
+											</td>
+											<td className="py-3 px-4 text-sm text-gray-600 max-w-xs truncate">
+												{row.address}
 											</td>
 											<td className="py-3 px-4">
-												<div className="flex gap-2">
+												<Badge type={row.customer_type} />
+											</td>
+											<td className="py-3 px-4">
+												<div className="flex gap-2 flex-wrap">
 													<button
-														onClick={() => openDelete(entry)}
+														onClick={() => goToDetail(row)}
+														className="bg-blue-500 hover:bg-blue-600 text-white px-3 py-1 rounded-md text-xs font-medium transition-colors"
+													>
+														{row.apless ? "View Detail" : "Edit"}
+													</button>
+													<button
+														onClick={() => openDelete(row)}
 														className="bg-red-500 hover:bg-red-600 text-white px-3 py-1 rounded-md text-xs font-medium transition-colors"
 													>
 														Delete
@@ -363,227 +366,6 @@ const BlacklistEntry: React.FC = () => {
 				</div>
 			</div>
 
-			{/* ═══ ADD MODAL ═══════════════════════════════════════════════════════ */}
-			{addOpen && (
-				<div className="fixed inset-0 bg-black bg-opacity-50 flex items-start justify-center z-50 p-4 overflow-y-auto">
-					<div className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl my-8">
-
-						{/* header */}
-						<div className="flex justify-between items-center px-6 py-5 border-b">
-							<div>
-								<h2 className="text-xl font-bold text-gray-800">Add Blacklist Entry</h2>
-								<p className="text-sm text-gray-500 mt-0.5">Fill in all required fields</p>
-							</div>
-							<button onClick={() => setAddOpen(false)} className="text-gray-400 hover:text-gray-600 text-2xl leading-none">×</button>
-						</div>
-
-						<div className="p-6">
-							{addErrors.length > 0 && (
-								<ErrorBanner errors={addErrors} onClose={() => setAddErrors([])} />
-							)}
-
-							{/* customer type toggle */}
-							<div className="mb-6">
-								<label className="block text-sm font-semibold text-gray-700 mb-2">Customer Type <span className="text-red-500">*</span></label>
-								<div className="flex gap-4">
-									{(["PR", "PT"] as const).map((t) => (
-										<label key={t} className="flex items-center gap-2 cursor-pointer">
-											<input
-												type="radio"
-												name="customer_type"
-												value={t}
-												checked={custType === t}
-												onChange={() => setCustType(t)}
-												className="text-blue-600"
-											/>
-											<span className="text-sm font-medium text-gray-700">
-												{t === "PR" ? "Individual" : "Corporate"}
-											</span>
-										</label>
-									))}
-								</div>
-							</div>
-
-							<div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-
-								{/* ── left column ── */}
-								<div className="space-y-4">
-									<h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider">
-										{custType === "PR" ? "Personal Information" : "Company Information"}
-									</h3>
-
-									<Field label="Name" required>
-										<input
-											type="text"
-											value={addForm.name}
-											onChange={(e) => handleAddField("name", e.target.value)}
-											className={inputCls}
-											placeholder="Full name"
-										/>
-									</Field>
-
-									{custType === "PR" && (
-										<Field label="Alias Name">
-											<input type="text" value={addForm.alias_name}
-												onChange={(e) => handleAddField("alias_name", e.target.value)}
-												className={inputCls} placeholder="Alias / other name" />
-										</Field>
-									)}
-
-									<Field label="Address" required>
-										<textarea
-											value={addForm.address}
-											onChange={(e) => handleAddField("address", e.target.value)}
-											className={`${inputCls} resize-none`}
-											rows={3}
-											placeholder="Full address"
-										/>
-									</Field>
-
-									<Field label="Phone">
-										<input type="tel" value={addForm.phone}
-											onChange={(e) => handleAddField("phone", e.target.value.replace(/\D/g, ""))}
-											className={inputCls} placeholder="08xx-xxxx-xxxx" />
-									</Field>
-
-									{/* PR-only */}
-									{custType === "PR" && (
-										<>
-											<Field label="ID Card No." required>
-												<input type="text" value={addForm.id_card}
-													onChange={(e) => handleAddField("id_card", e.target.value.replace(/\D/g, ""))}
-													className={inputCls} placeholder="16-digit KTP" maxLength={16} />
-											</Field>
-											<Field label="Date of Birth">
-												<input type="date" value={addForm.birth}
-													max={new Date().toISOString().slice(0, 10)}
-													onChange={(e) => handleAddField("birth", e.target.value)}
-													className={inputCls} />
-											</Field>
-											<Field label="NPWP">
-												<input type="text" value={addForm.npwp}
-													onChange={(e) => handleAddField("npwp", e.target.value.replace(/\D/g, ""))}
-													className={inputCls} placeholder="15-digit NPWP" maxLength={15} />
-											</Field>
-											<Field label="Spouse Name">
-												<input type="text" value={addForm.spouse_name}
-													onChange={(e) => handleAddField("spouse_name", e.target.value)}
-													className={inputCls} />
-											</Field>
-											<Field label="Mother's Maiden Name">
-												<input type="text" value={addForm.mother}
-													onChange={(e) => handleAddField("mother", e.target.value)}
-													className={inputCls} />
-											</Field>
-										</>
-									)}
-
-									{/* PT-only */}
-									{custType === "PT" && (
-										<>
-											<Field label="NPWP" required>
-												<input type="text" value={addForm.npwp}
-													onChange={(e) => handleAddField("npwp", e.target.value.replace(/\D/g, ""))}
-													className={inputCls} placeholder="15-digit NPWP" maxLength={15} />
-											</Field>
-											<Field label="Establishment Date">
-												<input type="date" value={addForm.es_birth}
-													max={new Date().toISOString().slice(0, 10)}
-													onChange={(e) => handleAddField("es_birth", e.target.value)}
-													className={inputCls} />
-											</Field>
-										</>
-									)}
-								</div>
-
-								{/* ── right column ── */}
-								<div className="space-y-4">
-									<h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider">
-										{custType === "PT" ? "Contact Person" : "Case Information"}
-									</h3>
-
-									{custType === "PT" && (
-										<>
-											<Field label="Contact Person Name">
-												<input type="text" value={addForm.contact_person}
-													onChange={(e) => handleAddField("contact_person", e.target.value)}
-													className={inputCls} />
-											</Field>
-											<Field label="Contact Person Address">
-												<textarea value={addForm.contact_address}
-													onChange={(e) => handleAddField("contact_address", e.target.value)}
-													className={`${inputCls} resize-none`} rows={3} />
-											</Field>
-											<Field label="Group">
-												<select value={addForm.group_code}
-													onChange={(e) => handleAddField("group_code", e.target.value)}
-													className={inputCls}>
-													<option value="">— Select —</option>
-													{groups.map((g) => (
-														<option key={g.code} value={g.code}>{g.name}</option>
-													))}
-												</select>
-											</Field>
-										</>
-									)}
-
-									<Field label="Reason" required>
-										<select value={addForm.reason}
-											onChange={(e) => handleAddField("reason", e.target.value)}
-											className={inputCls}>
-											<option value="">— Select reason —</option>
-											{reasons.map((r) => (
-												<option key={r.value} value={r.value} disabled={r.disabled}>
-													{r.label}
-												</option>
-											))}
-										</select>
-									</Field>
-
-									{addForm.reason === "5" && (
-										<Field label="Reason Other" required>
-											<textarea value={addForm.reason_other}
-												onChange={(e) => handleAddField("reason_other", e.target.value)}
-												className={`${inputCls} resize-none`} rows={2} />
-										</Field>
-									)}
-
-									<Field label="Remark">
-										<textarea value={addForm.remark}
-											onChange={(e) => handleAddField("remark", e.target.value)}
-											className={`${inputCls} resize-none`} rows={3} />
-									</Field>
-
-									<Field label="Create Date">
-										<input type="date" value={addForm.create_date} readOnly className={`${inputCls} bg-gray-50 cursor-not-allowed`} />
-									</Field>
-								</div>
-							</div>
-						</div>
-
-						{/* footer */}
-						<div className="flex justify-end gap-3 px-6 py-4 border-t bg-gray-50 rounded-b-2xl">
-							<button onClick={() => setAddOpen(false)}
-								className="px-5 py-2 border border-gray-300 rounded-lg text-sm text-gray-700 hover:bg-gray-100 transition-colors">
-								Cancel
-							</button>
-							<button onClick={handleSave} disabled={addLoading}
-								className={`px-6 py-2 rounded-lg text-sm text-white font-medium transition-colors flex items-center gap-2 ${addLoading ? "bg-blue-400 cursor-not-allowed" : "bg-blue-600 hover:bg-blue-700"
-									}`}>
-								{addLoading && (
-									<svg className="animate-spin h-4 w-4" fill="none" viewBox="0 0 24 24">
-										<circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-										<path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-									</svg>
-								)}
-								{addLoading ? "Saving…" : "Save Entry"}
-							</button>
-						</div>
-					</div>
-				</div>
-			)}
-
-			{/* ═══ DELETE MODAL ════════════════════════════════════════════════════ */}
 			{deleteOpen && deleteTarget && (
 				<div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
 					<div className="bg-white rounded-2xl shadow-2xl w-full max-w-md">
@@ -593,7 +375,12 @@ const BlacklistEntry: React.FC = () => {
 								<h2 className="text-lg font-bold text-gray-800">Delete Blacklist Entry</h2>
 								<p className="text-sm text-gray-500 mt-0.5 font-mono">{deleteTarget.name}</p>
 							</div>
-							<button onClick={() => setDeleteOpen(false)} className="text-gray-400 hover:text-gray-600 text-2xl leading-none">×</button>
+							<button
+								onClick={() => setDeleteOpen(false)}
+								className="text-gray-400 hover:text-gray-600 text-2xl leading-none"
+							>
+								×
+							</button>
 						</div>
 
 						<div className="p-6 space-y-4">
@@ -601,13 +388,12 @@ const BlacklistEntry: React.FC = () => {
 								<ErrorBanner errors={deleteErrors} onClose={() => setDeleteErrors([])} />
 							)}
 
-							{/* warning box */}
 							<div className="bg-amber-50 border border-amber-200 rounded-lg p-4 flex gap-3">
 								<svg className="w-5 h-5 text-amber-500 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 									<path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
 								</svg>
 								<p className="text-sm text-amber-700">
-									This action requires a reason and supporting memo upload. The entry will be soft-deleted and retained for audit purposes.
+									A reason and supporting memo are required. The entry will be soft-deleted and retained for audit purposes.
 								</p>
 							</div>
 
@@ -624,7 +410,7 @@ const BlacklistEntry: React.FC = () => {
 							<Field label="Upload Supporting Memo" required>
 								<div
 									onClick={() => fileInputRef.current?.click()}
-									className="border-2 border-dashed border-gray-300 hover:border-blue-400 rounded-lg p-4 cursor-pointer transition-colors text-center"
+									className="border-2 border-dashed border-gray-300 hover:border-red-400 rounded-lg p-4 cursor-pointer transition-colors text-center"
 								>
 									<input
 										ref={fileInputRef}
@@ -640,7 +426,11 @@ const BlacklistEntry: React.FC = () => {
 											</svg>
 											<span className="text-sm text-gray-700">{deleteFile.name}</span>
 											<button
-												onClick={(e) => { e.stopPropagation(); setDeleteFile(null); if (fileInputRef.current) fileInputRef.current.value = ""; }}
+												onClick={(e) => {
+													e.stopPropagation();
+													setDeleteFile(null);
+													if (fileInputRef.current) fileInputRef.current.value = "";
+												}}
 												className="text-red-500 hover:text-red-700 text-xs ml-2"
 											>
 												Remove
@@ -659,13 +449,17 @@ const BlacklistEntry: React.FC = () => {
 						</div>
 
 						<div className="flex justify-end gap-3 px-6 py-4 border-t bg-gray-50 rounded-b-2xl">
-							<button onClick={() => setDeleteOpen(false)}
-								className="px-5 py-2 border border-gray-300 rounded-lg text-sm text-gray-700 hover:bg-gray-100 transition-colors">
+							<button
+								onClick={() => setDeleteOpen(false)}
+								className="px-5 py-2 border border-gray-300 rounded-lg text-sm text-gray-700 hover:bg-gray-100 transition-colors"
+							>
 								Cancel
 							</button>
-							<button onClick={handleDelete} disabled={deleteLoading}
-								className={`px-5 py-2 rounded-lg text-sm text-white font-medium transition-colors flex items-center gap-2 ${deleteLoading ? "bg-red-400 cursor-not-allowed" : "bg-red-500 hover:bg-red-600"
-									}`}>
+							<button
+								onClick={handleDelete}
+								disabled={deleteLoading}
+								className={`px-5 py-2 rounded-lg text-sm text-white font-medium transition-colors flex items-center gap-2 ${deleteLoading ? "bg-red-400 cursor-not-allowed" : "bg-red-500 hover:bg-red-600"}`}
+							>
 								{deleteLoading && (
 									<svg className="animate-spin h-4 w-4" fill="none" viewBox="0 0 24 24">
 										<circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
@@ -682,25 +476,4 @@ const BlacklistEntry: React.FC = () => {
 	);
 };
 
-const inputCls =
-	"w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent focus:outline-none transition-shadow";
-
-const Field = ({
-	label,
-	required,
-	children,
-}: {
-	label: string;
-	required?: boolean;
-	children: React.ReactNode;
-}) => (
-	<div>
-		<label className="block text-sm font-medium text-gray-700 mb-1">
-			{label}
-			{required && <span className="text-red-500 ml-0.5">*</span>}
-		</label>
-		{children}
-	</div>
-);
-
-export default BlacklistEntry;
+export default BlackListEntryPage;

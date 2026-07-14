@@ -1,7 +1,7 @@
 import React, { useState } from "react";
-import axios from "axios";
+import api from '../../../api/axiosInstance';
 import Pagination from "../../../helpers/Pagination";
-
+import { DEFAULT_PAGE_LIMIT } from "../../../constants/DefaultValue";
 interface GroupReportRow {
 	APLESS: string;
 	LESSEE_NM: string;
@@ -9,8 +9,6 @@ interface GroupReportRow {
 	CITY1: string;
 	OUTS_TOTAL: number;
 }
-
-const API_URL = import.meta.env.VITE_API_URL;
 
 const fmt = (n: number) =>
 	new Intl.NumberFormat("id-ID", { minimumFractionDigits: 0 }).format(n);
@@ -27,12 +25,11 @@ const GroupReportPage: React.FC = () => {
 	const [exporting, setExporting] = useState(false);
 	const [error, setError] = useState<string | null>(null);
 	const [previewed, setPreviewed] = useState(false);
-	const limit = 25;
+	const limit = DEFAULT_PAGE_LIMIT;
 
 	const fetchData = async (name: string, pg: number) => {
-		const res = await axios.get(`${API_URL}/MasterData/api/group-report`, {
+		const res = await api.get('/MasterData/api/group-report', {
 			params: { grpname: name, page: pg, limit },
-			timeout: 30000,
 		});
 		return res.data;
 	};
@@ -74,9 +71,8 @@ const GroupReportPage: React.FC = () => {
 	};
 
 	const fetchExportData = async (): Promise<GroupReportRow[]> => {
-		const res = await axios.get(`${API_URL}/MasterData/api/group-report/export`, {
+		const res = await api.get('/MasterData/api/group-report/export', {
 			params: { grpname: appliedGrpname },
-			timeout: 60000,
 		});
 		return res.data.data;
 	};
@@ -183,7 +179,6 @@ const GroupReportPage: React.FC = () => {
 		<div className="min-h-screen bg-gradient-to-br from-gray-50 to-gray-100 p-4 md:p-6">
 			<div className="max-w-6xl mx-auto space-y-6">
 
-				{/* ── Filter Form ── */}
 				<div className="bg-white rounded-2xl shadow-lg p-6">
 					<h1 className="text-2xl md:text-3xl font-bold text-gray-800 mb-6">Group Report</h1>
 
@@ -204,7 +199,6 @@ const GroupReportPage: React.FC = () => {
 					</div>
 
 					<div className="flex flex-wrap gap-3">
-						{/* Preview */}
 						<button
 							onClick={handlePreview}
 							disabled={loading}
@@ -229,7 +223,6 @@ const GroupReportPage: React.FC = () => {
 							)}
 						</button>
 
-						{/* Print */}
 						<button
 							onClick={handlePrint}
 							disabled={!previewed || loading}
@@ -241,7 +234,6 @@ const GroupReportPage: React.FC = () => {
 							Print
 						</button>
 
-						{/* Export to Excel */}
 						<button
 							onClick={handleExportExcel}
 							disabled={!previewed || loading || exporting}
@@ -255,7 +247,6 @@ const GroupReportPage: React.FC = () => {
 					</div>
 				</div>
 
-				{/* ── Results Table ── */}
 				{previewed && (
 					<div className="bg-white rounded-2xl shadow-lg p-6">
 						<div className="flex items-center justify-between mb-4">
@@ -334,7 +325,6 @@ const GroupReportPage: React.FC = () => {
 									)}
 								</tbody>
 
-								{/* Grand total footer — always shown once previewed */}
 								{!loading && rows.length > 0 && (
 									<tfoot>
 										<tr className="bg-gray-100 border-t-2 border-gray-300">

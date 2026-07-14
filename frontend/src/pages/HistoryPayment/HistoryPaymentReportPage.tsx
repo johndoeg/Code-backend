@@ -1,8 +1,7 @@
 import React, { useState, useCallback } from "react";
-import axios from "axios";
-import Pagination from "../../helpers/Pagination";
-
-const API_URL = import.meta.env.VITE_API_URL;
+import api from '../../api/axiosInstance';
+import Pagination from '../../helpers/Pagination';
+import { DEFAULT_PAGE_LIMIT } from '../../constants/DefaultValue';
 
 interface PaymentRecord {
 	LESSEE_NM: string;
@@ -54,7 +53,6 @@ interface LeaseReport {
 	penaltyPayment: number; shortagePay: number; inkasoPay: number;
 }
 
-
 const fmt = (n: number) => (n ? n.toLocaleString("id-ID") : "0");
 const todayLong = () => new Date().toLocaleDateString("en-GB", { day: "2-digit", month: "long", year: "numeric" });
 const todayShort = () => new Date().toLocaleDateString("en-GB", { day: "2-digit", month: "2-digit", year: "2-digit" });
@@ -69,7 +67,6 @@ const PrintPreview: React.FC<{ reports: LeaseReport[]; onBack: () => void }> = (
 			}
 		`}</style>
 
-		{/* Toolbar — hidden on print */}
 		<div className="no-print sticky top-0 z-10 bg-white border-b border-gray-200 px-6 py-3 flex items-center justify-between shadow-sm">
 			<button
 				onClick={onBack}
@@ -97,7 +94,6 @@ const PrintPreview: React.FC<{ reports: LeaseReport[]; onBack: () => void }> = (
 			</button>
 		</div>
 
-		{/* Pages */}
 		<div className="print-area bg-gray-100 min-h-screen py-6 px-4">
 			{reports.map((rpt, idx) => {
 				const ci = rpt.contractInfo;
@@ -109,7 +105,6 @@ const PrintPreview: React.FC<{ reports: LeaseReport[]; onBack: () => void }> = (
 					<div key={rpt.leaseNo} className="page bg-white mx-auto mb-6 p-6 shadow-md"
 						style={{ maxWidth: 1050, fontFamily: "Tahoma, sans-serif", fontSize: 12 }}>
 
-						{/* Page header */}
 						<table style={{ width: "100%", borderCollapse: "collapse", marginBottom: 4 }}>
 							<tbody>
 								<tr>
@@ -127,7 +122,6 @@ const PrintPreview: React.FC<{ reports: LeaseReport[]; onBack: () => void }> = (
 							<strong><u>CUSTOMER HISTORY PAYMENT REPORT</u><br />As of {todayLong()}</strong>
 						</div>
 
-						{/* Customer info */}
 						<table style={{ width: "100%", borderCollapse: "collapse", marginBottom: 8 }}>
 							<tbody>
 								<tr>
@@ -149,7 +143,6 @@ const PrintPreview: React.FC<{ reports: LeaseReport[]; onBack: () => void }> = (
 							</tbody>
 						</table>
 
-						{/* Payment table */}
 						<table style={{ width: "100%", borderCollapse: "collapse", marginBottom: 4 }}>
 							<thead>
 								<tr style={{ backgroundColor: "#f0f0f0", textAlign: "center" }}>
@@ -214,7 +207,6 @@ const PrintPreview: React.FC<{ reports: LeaseReport[]; onBack: () => void }> = (
 							</tbody>
 						</table>
 
-						{/* Vehicle info */}
 						<table style={{ width: "100%", borderCollapse: "collapse" }}>
 							<tbody>
 								<tr>
@@ -267,7 +259,7 @@ const HistoryPaymentReportPage: React.FC = () => {
 	const [searchParams, setSearchParams] = useState<SearchParams>({
 		printBy: "",
 		page: 1,
-		limit: 25,
+		limit: DEFAULT_PAGE_LIMIT,
 	});
 
 	const [records, setRecords] = useState<PaymentRecord[]>([]);
@@ -335,9 +327,9 @@ const HistoryPaymentReportPage: React.FC = () => {
 				case "5": params.master_no = searchTerm; break;
 			}
 
-			const response = await axios.get<{ data: PaymentRecord[]; total: number }>(
-				`${API_URL}/HistoryPayment/api/history-payment`,
-				{ params, timeout: 15000 }
+			const response = await api.get<{ data: PaymentRecord[]; total: number }>(
+				'HistoryPayment/api/history-payment',
+				{ params }
 			);
 
 			setRecords(response.data.data);
@@ -408,6 +400,7 @@ const HistoryPaymentReportPage: React.FC = () => {
 			default: return { header: "No. Contract", value: (r: PaymentRecord) => r.LEASE_NO };
 		}
 	};
+
 	const middleCol = getMiddleColumn();
 	const totalPages = Math.ceil(total / searchParams.limit);
 
@@ -422,9 +415,9 @@ const HistoryPaymentReportPage: React.FC = () => {
 			const leaseNos = Array.from(selectedRecords);
 			const results = await Promise.all(
 				leaseNos.map(lease_no =>
-					axios.get<{ contractInfo: ContractInfo; payments: PaymentRow[] }>(
-						`${API_URL}/HistoryPayment/api/history-payment/print`,
-						{ params: { lease_no }, timeout: 30000 }
+					api.get<{ contractInfo: ContractInfo; payments: PaymentRow[] }>(
+						'/HistoryPayment/api/history-payment/print',
+						{ params: { lease_no } }
 					).then(({ data }) => {
 						let totAmount = 0, totPenalty = 0, totShortage = 0, totInkaso = 0;
 						let penaltyPayment = 0, shortagePay = 0, inkasoPay = 0;
@@ -434,6 +427,7 @@ const HistoryPaymentReportPage: React.FC = () => {
 							totPenalty += row.penalty ?? 0;
 							totShortage += row.Shortage ?? 0;
 							totInkaso += (row.inkaso ?? 0) * 25000;
+
 							if (idx === 0) {
 								penaltyPayment = row.penalty_payment ?? 0;
 								shortagePay = row.ShortagePay ?? 0;
@@ -471,7 +465,6 @@ const HistoryPaymentReportPage: React.FC = () => {
 			<div className="max-w-7xl mx-auto">
 				<div className="bg-white rounded-2xl shadow-lg p-6 mb-6">
 
-					{/* Header */}
 					<div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 mb-6">
 						<div>
 							<h1 className="text-2xl md:text-3xl font-bold text-gray-800">History Payment</h1>
@@ -484,7 +477,6 @@ const HistoryPaymentReportPage: React.FC = () => {
 						)}
 					</div>
 
-					{/* Search Section */}
 					<div className="bg-gray-50 rounded-xl p-4 border border-gray-200 mb-6">
 						<div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
 							<div>
@@ -558,7 +550,6 @@ const HistoryPaymentReportPage: React.FC = () => {
 						</div>
 					</div>
 
-					{/* Error */}
 					{error && (
 						<div className="mb-4 p-4 bg-red-50 border border-red-200 rounded-lg text-red-700 flex items-start gap-3">
 							<svg className="w-5 h-5 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -571,7 +562,6 @@ const HistoryPaymentReportPage: React.FC = () => {
 						</div>
 					)}
 
-					{/* Results Table */}
 					{printBy && searchTerm.trim() && records.length > 0 && (
 						<div className="overflow-x-auto rounded-lg border border-gray-200">
 							<table className="w-full">
@@ -633,7 +623,6 @@ const HistoryPaymentReportPage: React.FC = () => {
 						</div>
 					)}
 
-					{/* No results */}
 					{printBy && searchTerm.trim() && records.length === 0 && !loading && (
 						<div className="py-10 px-6 text-center text-gray-500 border border-gray-200 rounded-lg">
 							<div className="flex flex-col items-center justify-center">
@@ -646,7 +635,6 @@ const HistoryPaymentReportPage: React.FC = () => {
 						</div>
 					)}
 
-					{/* Pagination */}
 					{!loading && records.length > 0 && (
 						<Pagination
 							page={searchParams.page}
@@ -658,7 +646,6 @@ const HistoryPaymentReportPage: React.FC = () => {
 						/>
 					)}
 
-					{/* Preview Button */}
 					{records.length > 0 && selectedRecords.size > 0 && (
 						<div className="mt-6 flex justify-end">
 							<button

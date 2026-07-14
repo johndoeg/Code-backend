@@ -1,5 +1,5 @@
-import React, { useState, useEffect, useCallback } from 'react';
-
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import { useIndustry } from '../../../hooks/useIndustry';
 interface IndustryNode {
     code: string;
     parent: string;
@@ -7,7 +7,6 @@ interface IndustryNode {
     descrip: string;
     children: IndustryNode[];
 }
-
 interface IndustrialCodePageProps {
     onSelect?: (node: IndustryNode) => void;
 }
@@ -83,7 +82,7 @@ interface TreeNodeProps {
     query: string;
 }
 
-const TreeNode: React.FC<TreeNodeProps> = ({
+const TreeNode: React.FC<TreeNodeProps> = React.memo(({
     node, depth, expandedNodes, selectedCode, onToggle, onSelect, query
 }) => {
     const hasChildren = node.children.length > 0;
@@ -204,64 +203,43 @@ const TreeNode: React.FC<TreeNodeProps> = ({
             )}
         </div>
     );
-};
+});
 
 const IndustrialCodePage: React.FC<IndustrialCodePageProps> = ({ onSelect }) => {
-    const [treeData, setTreeData] = useState<IndustryNode[]>([]);
+    const { data: treeData = [], isLoading: loading, isError, refetch: fetchTreeData } = useIndustry();
+    const error = isError ? 'Failed to load industry data' : null;
+
     const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set(['1.2']));
     const [selectedCode, setSelectedCode] = useState<string | null>(null);
-    const [loading, setLoading] = useState(true);
-    const [error, setError] = useState<string | null>(null);
     const [query, setQuery] = useState('');
 
-    const fetchTreeData = useCallback(async () => {
-        try {
-            setLoading(true);
-            setError(null);
-            const response = await fetch(
-                `${import.meta.env.VITE_API_URL}/MasterData/api/industry`,
-                { credentials: 'include' }
-            );
-            if (!response.ok) throw new Error('Failed to fetch industry data');
-            const data = await response.json();
-            setTreeData(data.data);
-        } catch (err) {
-            console.error('Error fetching industry tree:', err);
-            setError('Failed to load industry data');
-        } finally {
-            setLoading(false);
-        }
-    }, []);
+    const totalNodes = useMemo(() => collectAllCodes(treeData).size, [treeData.length]);
+    const filtered = useMemo(() => filterTree(treeData, query), [treeData, query]);
+    const matchedCount = useMemo(() => collectAllCodes(filtered).size, [filtered]);
 
-    useEffect(() => { fetchTreeData(); }, [fetchTreeData]);
-
-    useEffect(() => {
-        if (query) {
-            const allCodes = collectAllCodes(treeData);
-            setExpandedNodes(allCodes);
-        } else {
-            setExpandedNodes(new Set(['1.2']));
-        }
-    }, [query, treeData]);
-
-    const toggleNode = (code: string) => {
+    const toggleNode = useCallback((code: string) => {
         setExpandedNodes(prev => {
             const next = new Set(prev);
             next.has(code) ? next.delete(code) : next.add(code);
             return next;
         });
-    };
+    }, []);
 
-    const handleSelect = (node: IndustryNode) => {
+    const handleSelect = useCallback((node: IndustryNode) => {
         setSelectedCode(node.code);
         onSelect?.(node);
-    };
+    }, [onSelect]);
 
-    const expandAll = () => setExpandedNodes(collectAllCodes(treeData));
-    const collapseAll = () => setExpandedNodes(new Set());
+    const expandAll = useCallback(() => setExpandedNodes(collectAllCodes(treeData)), [treeData]);
+    const collapseAll = useCallback(() => setExpandedNodes(new Set()), []);
 
-    const filtered = filterTree(treeData, query);
-    const totalNodes = collectAllCodes(treeData).size;
+    useEffect(() => {
+        if (query) {
+            setExpandedNodes(collectAllCodes(treeData));
+        } else {
+            setExpandedNodes(new Set(['1.2']));
+        }
+    }, [query, treeData.length]);
 
     return (
         <>
@@ -365,7 +343,6 @@ const IndustrialCodePage: React.FC<IndustrialCodePageProps> = ({ onSelect }) => 
                 height: '100%',
                 minHeight: 0,
             }}>
-                {/* ── header ── */}
                 <div style={{
                     padding: '14px 16px 0',
                     borderBottom: '1px solid var(--border)',
@@ -385,7 +362,7 @@ const IndustrialCodePage: React.FC<IndustrialCodePageProps> = ({ onSelect }) => 
                                 <p style={{ margin: '2px 0 0', fontSize: '11px', color: 'var(--text-muted)' }}>
                                     {totalNodes} entries
                                     {query && filtered.length !== treeData.length
-                                        ? ` · ${collectAllCodes(filtered).size} matched`
+                                        ? ` · ${matchedCount} matched`
                                         : ''}
                                 </p>
                             )}
@@ -396,7 +373,6 @@ const IndustrialCodePage: React.FC<IndustrialCodePageProps> = ({ onSelect }) => 
                         </div>
                     </div>
 
-                    {/* search */}
                     <div style={{ position: 'relative', marginBottom: '12px' }}>
                         <span style={{
                             position: 'absolute', left: '10px', top: '50%',
@@ -471,7 +447,7 @@ const IndustrialCodePage: React.FC<IndustrialCodePageProps> = ({ onSelect }) => 
                             <p style={{ margin: '4px 0 0', fontSize: '12px', color: '#ef4444' }}>
                                 {error}
                             </p>
-                            <button className="retry-btn" onClick={fetchTreeData}>
+                            <button className="retry-btn" onClick={() => fetchTreeData()}>
                                 <RefreshIcon /> Retry
                             </button>
                         </div>

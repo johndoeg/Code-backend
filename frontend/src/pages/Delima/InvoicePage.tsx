@@ -205,7 +205,6 @@ const DelimaInvoice: React.FC = () => {
 						</table>
 					</div>
 
-					{/* Use the custom Pagination component */}
 					{!loading && total > 0 && (
 						<Pagination
 							page={page}
@@ -219,7 +218,6 @@ const DelimaInvoice: React.FC = () => {
 				</div>
 			</div>
 
-			{/* Detail Modal */}
 			{detailModalOpen && (
 				<div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
 					<div className="bg-white rounded-2xl shadow-xl w-full max-w-6xl max-h-[90vh] overflow-hidden flex flex-col">

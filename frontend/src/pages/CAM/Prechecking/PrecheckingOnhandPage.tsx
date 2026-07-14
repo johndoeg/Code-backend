@@ -2,6 +2,7 @@ import React, { useEffect, useState, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import api from "../../../api/axiosInstance";
 import Pagination from "../../../helpers/Pagination";
+import { DEFAULT_PAGE_LIMIT } from '../../../constants/DefaultValue';
 
 interface CMORow {
 	apless: string;
@@ -28,8 +29,6 @@ type OnHandRow = CMORow | CRRow;
 const isCMORow = (row: OnHandRow): row is CMORow =>
 	"PRECHECKING_ID" in row;
 
-const API_URL = import.meta.env.VITE_API_URL;
-
 const PreCheckingOnHandPage: React.FC = () => {
 	const navigate = useNavigate();
 
@@ -38,7 +37,7 @@ const PreCheckingOnHandPage: React.FC = () => {
 	const [page, setPage] = useState(1);
 	const [loading, setLoading] = useState(false);
 	const [error, setError] = useState<string | null>(null);
-	const limit = 25;
+	const limit = DEFAULT_PAGE_LIMIT;
 
 	const [accesslevel, setAccesslevel] = useState("");
 	const [username, setUsername] = useState("");
@@ -54,7 +53,7 @@ const PreCheckingOnHandPage: React.FC = () => {
 		setLoading(true);
 		setError(null);
 		try {
-			const res = await api.get(`${API_URL}/Prechecking/api/onhand`, {
+			const res = await api.get('/Prechecking/Onhand/api/data', {
 				params: {
 					search_by: appliedSearchBy,
 					search_val: appliedSearchVal,
@@ -125,7 +124,6 @@ const PreCheckingOnHandPage: React.FC = () => {
 			<div className="max-w-7xl mx-auto space-y-6">
 				<div className="bg-white rounded-2xl shadow-lg p-6">
 
-					{/* ── Header ── */}
 					<div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 mb-6">
 						<div>
 							<h1 className="text-2xl md:text-3xl font-bold text-gray-800">
@@ -140,7 +138,6 @@ const PreCheckingOnHandPage: React.FC = () => {
 						</span>
 					</div>
 
-					{/* ── Search bar ── */}
 					<div className="flex flex-col md:flex-row gap-3 mb-6">
 						<select
 							value={searchBy}
@@ -182,7 +179,6 @@ const PreCheckingOnHandPage: React.FC = () => {
 						</div>
 					)}
 
-					{/* ── CMO / CMH Table ── */}
 					{isCMO && (
 						<div className="overflow-x-auto rounded-lg border border-gray-200">
 							<table className="w-full">
@@ -285,7 +281,6 @@ const PreCheckingOnHandPage: React.FC = () => {
 						</div>
 					)}
 
-					{/* ── CR Table ── */}
 					{accesslevel === 'CR' && (
 						<div className="overflow-x-auto rounded-lg border border-gray-200">
 							<table className="w-full">

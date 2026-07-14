@@ -15,6 +15,7 @@ const JurnalFinancingPage: React.FC = () => {
 			alert('Please fill in both dates.');
 			return;
 		}
+
 		if (dateFrom > dateTo) {
 			alert('Date From cannot be later than Date To.');
 			return;
@@ -57,14 +58,12 @@ const JurnalFinancingPage: React.FC = () => {
 			<div className="max-w-7xl mx-auto">
 				<div className="bg-white rounded-2xl shadow-lg p-6 mb-6">
 
-					{/* Header */}
 					<div className="mb-6">
 						<h1 className="text-2xl md:text-3xl font-bold text-gray-800">
 							Jurnal Financing
 						</h1>
 					</div>
 
-					{/* Filters */}
 					<div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
 						<AsOfDatePicker
 							label="Disbursement Date From"
@@ -83,14 +82,12 @@ const JurnalFinancingPage: React.FC = () => {
 						/>
 					</div>
 
-					{/* Error banner */}
 					{error && (
 						<div className="mb-4 p-4 bg-red-50 border border-red-200 rounded-lg text-red-700">
 							{error}
 						</div>
 					)}
 
-					{/* Action */}
 					<div className="flex flex-wrap gap-2">
 						<button
 							onClick={handleExportExcel}

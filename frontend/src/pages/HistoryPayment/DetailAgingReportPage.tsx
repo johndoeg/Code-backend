@@ -12,8 +12,6 @@ interface EquipmentType {
 	DESC_VALUE: string;
 }
 
-const API_URL = import.meta.env.VITE_API_URL;
-
 const DetailAgingReportPage: React.FC = () => {
 	const [asof, setAsof] = useState<Date | null>(null);
 	const [branchCd, setBranchCd] = useState<string>("");
@@ -30,12 +28,13 @@ const DetailAgingReportPage: React.FC = () => {
 		const day = String(date.getDate()).padStart(2, "0");
 		const month = String(date.getMonth() + 1).padStart(2, "0");
 		const year = date.getFullYear();
-		
+
 		return `${day}-${month}-${year}`;
 	};
 
 	useEffect(() => {
 		const fetchDropdownData = async () => {
+			setLoading(true);
 			try {
 				const [branchesRes, typesRes] = await Promise.all([
 					api.get<Branch[]>('/Common/api/branches'),
@@ -52,6 +51,8 @@ const DetailAgingReportPage: React.FC = () => {
 			} catch (err) {
 				console.error("Failed to fetch dropdown data:", err);
 				setError("Failed to load form options. Please refresh the page.");
+			} finally {
+				setLoading(false);
 			}
 		};
 		fetchDropdownData();
@@ -69,7 +70,7 @@ const DetailAgingReportPage: React.FC = () => {
 			type_of: typeOf,
 		});
 
-		window.open(`${API_URL}/Report/export/aging-detail?${params.toString()}`, "_blank");
+		window.open(`/Report/export/aging-detail?${params.toString()}`, "_blank");
 	}, [asof, branchCd, typeOf]);
 
 	const handleExportPDF = useCallback(() => {
@@ -84,7 +85,7 @@ const DetailAgingReportPage: React.FC = () => {
 			type_of: typeOf,
 		});
 
-		window.open(`${API_URL}/Report/print/aging-detail?${params.toString()}`, "_blank");
+		window.open(`/Report/print/aging-detail?${params.toString()}`, "_blank");
 	}, [asof, branchCd, typeOf]);
 
 
@@ -92,7 +93,6 @@ const DetailAgingReportPage: React.FC = () => {
 		<div className="min-h-screen bg-gradient-to-br from-gray-50 to-gray-100 p-4 md:p-6">
 			<div className="max-w-4xl mx-auto">
 				<div className="bg-white rounded-2xl shadow-lg p-6 mb-6">
-					{/* Header */}
 					<div className="mb-6">
 						<h1 className="text-2xl md:text-3xl font-bold text-gray-800">
 							Detail Aging Report
@@ -102,7 +102,6 @@ const DetailAgingReportPage: React.FC = () => {
 						</p>
 					</div>
 
-					{/* Error Message */}
 					{error && (
 						<div className="mb-4 p-4 bg-red-50 border border-red-200 rounded-lg text-red-700 flex items-start gap-3">
 							<svg className="w-5 h-5 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -112,16 +111,13 @@ const DetailAgingReportPage: React.FC = () => {
 						</div>
 					)}
 
-					{/* Form */}
 					<div className="bg-gray-50 rounded-xl p-4 border border-gray-200 no-print">
 						<div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-							{/* As of Date */}
 							<div>
-								<AsOfDatePicker value={asof} onChange={setAsof} format="DD-MM-YYYY" label="As of" required/>
+								<AsOfDatePicker value={asof} onChange={setAsof} format="DD-MM-YYYY" label="As of" required />
 								<p className="text-xs text-gray-500 mt-1">Format: DD-MM-YYYY</p>
 							</div>
 
-							{/* Branch */}
 							<div>
 								<label className="block text-sm font-medium text-gray-700 mb-1">
 									Branch
@@ -141,7 +137,6 @@ const DetailAgingReportPage: React.FC = () => {
 								</select>
 							</div>
 
-							{/* Type of Equipment */}
 							<div className="md:col-span-2">
 								<label className="block text-sm font-medium text-gray-700 mb-1">
 									Type of Equipment
@@ -162,7 +157,6 @@ const DetailAgingReportPage: React.FC = () => {
 							</div>
 						</div>
 
-						{/* Action Buttons */}
 						<div className="flex flex-wrap gap-3 mt-6">
 							<button
 								onClick={handleExportExcel}
@@ -190,7 +184,6 @@ const DetailAgingReportPage: React.FC = () => {
 				</div>
 			</div>
 
-			{/* Print Styles */}
 			<style>{`
                 @media print {
                     .no-print {

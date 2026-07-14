@@ -1,7 +1,8 @@
 import React, { useEffect, useState, useCallback } from "react";
-import axios from "axios";
-import Pagination from "../../helpers/Pagination";
-
+import api from '../../api/axiosInstance';
+import Pagination from '../../helpers/Pagination';
+import { DEFAULT_PAGE_LIMIT } from '../../constants/DefaultValue';
+import Formatter from "../../helpers/Formatter";
 interface InvoiceSummary {
 	asof: string;
 	disb_month: string;
@@ -12,7 +13,6 @@ interface InvoiceSummary {
 	confirmby: string;
 	confirmdate: string;
 }
-
 interface InvoiceDetail {
 	lease_no: string;
 	lessee_nm: string;
@@ -25,8 +25,6 @@ interface InvoiceDetail {
 	remark: string;
 }
 
-const API_URL = import.meta.env.VITE_API_URL;
-
 const InvoiceSimasPage: React.FC = () => {
 	const [invoiceSummaries, setInvoiceSummaries] = useState<InvoiceSummary[]>([]);
 	const [invoiceDetails, setInvoiceDetails] = useState<InvoiceDetail[]>([]);
@@ -35,14 +33,14 @@ const InvoiceSimasPage: React.FC = () => {
 	const [detailModalOpen, setDetailModalOpen] = useState(false);
 	const [currentInvoiceNo, setCurrentInvoiceNo] = useState("");
 	const [page, setPage] = useState(1);
-	const limit = 25;
+	const limit = DEFAULT_PAGE_LIMIT;
 	const [total, setTotal] = useState(0);
 
 	const fetchInvoiceSummaries = useCallback(async () => {
 		setLoading(true);
 		setError(null);
 		try {
-			const response = await axios.get(`${API_URL}/Insurance/api/simas/invoice`, {
+			const response = await api.get('/Insurance/api/simas/invoice', {
 				params: { page, limit }
 			});
 
@@ -67,7 +65,7 @@ const InvoiceSimasPage: React.FC = () => {
 
 	const fetchInvoiceDetails = useCallback(async (invoiceNo: string) => {
 		try {
-			const response = await axios.get(`${API_URL}/Insurance/api/simas/detail`, {
+			const response = await api.get('/Insurance/api/simas/detail', {
 				params: { id: invoiceNo, filter: "" }
 			});
 
@@ -185,9 +183,9 @@ const InvoiceSimasPage: React.FC = () => {
 												</td>
 												<td className="py-4 px-4 whitespace-nowrap text-sm text-gray-700 font-medium">{simas.disb_month}</td>
 												<td className="py-4 px-4 whitespace-nowrap text-sm text-gray-700 text-right">{simas.tot_kontrak_inv}</td>
-												<td className="py-4 px-4 whitespace-nowrap text-sm text-gray-700 text-right">{simas.tot_biaya_inv}</td>
+												<td className="py-4 px-4 whitespace-nowrap text-sm text-gray-700 text-right">{Formatter.formatThousands(simas.tot_biaya_inv)}</td>
 												<td className="py-4 px-4 whitespace-nowrap text-sm text-gray-700 text-right">{simas.tot_kontrak_sys}</td>
-												<td className="py-4 px-4 whitespace-nowrap text-sm text-gray-700 text-right">{simas.tot_biaya_sys}</td>
+												<td className="py-4 px-4 whitespace-nowrap text-sm text-gray-700 text-right">{Formatter.formatThousands(simas.tot_biaya_sys)}</td>
 												<td className="py-4 px-4 whitespace-nowrap text-sm text-gray-700 text-right">{simas.confirmby}</td>
 												<td className="py-4 px-4 whitespace-nowrap text-sm text-gray-700 text-right">{simas.confirmdate}</td>
 												<td className="py-4 px-4 whitespace-nowrap text-sm text-center">
@@ -206,7 +204,6 @@ const InvoiceSimasPage: React.FC = () => {
 						</table>
 					</div>
 
-					{/* Use the custom Pagination component */}
 					{!loading && total > 0 && (
 						<Pagination
 							page={page}
@@ -220,7 +217,6 @@ const InvoiceSimasPage: React.FC = () => {
 				</div>
 			</div>
 
-			{/* Detail Modal */}
 			{detailModalOpen && (
 				<div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
 					<div className="bg-white rounded-2xl shadow-xl w-full max-w-6xl max-h-[90vh] overflow-hidden flex flex-col">
@@ -268,8 +264,8 @@ const InvoiceSimasPage: React.FC = () => {
 											<tr
 												key={index}
 												className={`${detail.invoice === 'N' || detail.system === 'N'
-														? 'bg-red-500 text-white'
-														: 'bg-white'
+													? 'bg-red-500 text-white'
+													: 'bg-white'
 													} hover:opacity-90 transition-opacity`}
 											>
 												<td className="py-3 px-4 whitespace-nowrap text-sm text-center">{index + 1}</td>
@@ -277,8 +273,8 @@ const InvoiceSimasPage: React.FC = () => {
 												<td className="py-3 px-4 whitespace-nowrap text-sm">{detail.lessee_nm}</td>
 												<td className="py-3 px-4 whitespace-nowrap text-sm text-center">{detail.execution}</td>
 												<td className="py-3 px-4 whitespace-nowrap text-sm text-center">{detail.batchdt}</td>
-												<td className="py-3 px-4 whitespace-nowrap text-sm text-right">{detail.totalnett}</td>
-												<td className="py-3 px-4 whitespace-nowrap text-sm text-right">{detail.gross}</td>
+												<td className="py-3 px-4 whitespace-nowrap text-sm text-right">{Formatter.formatThousands(detail.totalnett)}</td>
+												<td className="py-3 px-4 whitespace-nowrap text-sm text-right">{Formatter.formatThousands(detail.gross)}</td>
 												<td className="py-3 px-4 whitespace-nowrap text-sm text-center">{detail.invoice}</td>
 												<td className="py-3 px-4 whitespace-nowrap text-sm text-center">{detail.system}</td>
 												<td className="py-3 px-4 whitespace-nowrap text-sm">{detail.remark}</td>

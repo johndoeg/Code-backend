@@ -124,7 +124,6 @@ const EmployeeDataPage: React.FC = () => {
 		<div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100 p-4 md:p-6">
 			<div className="max-w-6xl mx-auto space-y-6">
 
-				{/* ── Filter card ─────────────────────────────────────────────── */}
 				<div className="bg-white rounded-2xl shadow-lg p-6">
 					<h1 className="text-2xl md:text-3xl font-bold text-slate-800 mb-6">
 						Employee Data
@@ -136,9 +135,7 @@ const EmployeeDataPage: React.FC = () => {
 						</div>
 					)}
 
-					{/* Search controls */}
 					<div className="flex flex-wrap items-center gap-3">
-						{/* Search By */}
 						<div className="flex items-center gap-2">
 							<label htmlFor="search_by" className="text-sm font-medium text-slate-700 whitespace-nowrap">
 								Search By:
@@ -162,7 +159,6 @@ const EmployeeDataPage: React.FC = () => {
 							</select>
 						</div>
 
-						{/* Text input (search_by 1 or 2) */}
 						{showText && (
 							<input
 								type="text"
@@ -174,7 +170,6 @@ const EmployeeDataPage: React.FC = () => {
 							/>
 						)}
 
-						{/* Branch dropdown (search_by 3) */}
 						{showBranch && (
 							<select
 								value={branchVal}
@@ -188,7 +183,6 @@ const EmployeeDataPage: React.FC = () => {
 							</select>
 						)}
 
-						{/* Division dropdown (search_by 4) */}
 						{showDiv && (
 							<select
 								value={divVal}
@@ -202,7 +196,6 @@ const EmployeeDataPage: React.FC = () => {
 							</select>
 						)}
 
-						{/* Position dropdown (search_by 5) */}
 						{showPosition && (
 							<select
 								value={positionVal}
@@ -216,7 +209,6 @@ const EmployeeDataPage: React.FC = () => {
 							</select>
 						)}
 
-						{/* Search button */}
 						<button
 							onClick={handleSearch}
 							disabled={loading}
@@ -236,7 +228,6 @@ const EmployeeDataPage: React.FC = () => {
 							) : "Search"}
 						</button>
 
-						{/* Result count badge */}
 						{searched && (
 							<span className="bg-blue-100 text-blue-800 px-3 py-1 rounded-full text-sm font-medium">
 								{rows.length} record{rows.length !== 1 ? "s" : ""} found
@@ -245,7 +236,6 @@ const EmployeeDataPage: React.FC = () => {
 					</div>
 				</div>
 
-				{/* ── Results table ───────────────────────────────────────────── */}
 				{searched && (
 					<div className="bg-white rounded-2xl shadow-lg p-6">
 
@@ -297,7 +287,6 @@ const EmployeeDataPage: React.FC = () => {
 							</table>
 						</div>
 
-						{/* Pagination */}
 						{!loading && rows.length > PAGE_SIZE && (
 							<Pagination
 								page={page}

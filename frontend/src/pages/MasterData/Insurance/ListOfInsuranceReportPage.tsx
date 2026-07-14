@@ -107,7 +107,6 @@ const ListOfInsuranceReportPage: React.FC = () => {
 		<div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100 p-4 md:p-6">
 			<div className="max-w-6xl mx-auto space-y-6">
 
-				{/* ── Filter card  (hidden on print) ─────────────────────────── */}
 				<div className="bg-white rounded-2xl shadow-lg p-6 print:hidden">
 					<h1 className="text-2xl md:text-3xl font-bold text-slate-800 mb-6">
 						List of Insurance Premi
@@ -115,7 +114,6 @@ const ListOfInsuranceReportPage: React.FC = () => {
 
 					<div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
 
-						{/* Insurance Company */}
 						<div>
 							<label className="block text-sm font-medium text-slate-700 mb-1">
 								Insurance Company
@@ -132,7 +130,6 @@ const ListOfInsuranceReportPage: React.FC = () => {
 							</select>
 						</div>
 
-						{/* Model */}
 						<div>
 							<label className="block text-sm font-medium text-slate-700 mb-1">
 								Model Name
@@ -150,7 +147,6 @@ const ListOfInsuranceReportPage: React.FC = () => {
 						</div>
 					</div>
 
-					{/* Report type radio */}
 					<div className="mb-6">
 						<p className="block text-sm font-medium text-slate-700 mb-2">Report</p>
 						<div className="flex items-center gap-6">
@@ -179,7 +175,6 @@ const ListOfInsuranceReportPage: React.FC = () => {
 						</div>
 					</div>
 
-					{/* Actions */}
 					<div className="flex items-center gap-3">
 						<button
 							onClick={handlePreview}
@@ -214,16 +209,13 @@ const ListOfInsuranceReportPage: React.FC = () => {
 					)}
 				</div>
 
-				{/* ── Results ─────────────────────────────────────────────────── */}
 				{submitted && (
 					<div className="bg-white rounded-2xl shadow-lg p-6">
 
-						{/* Report title */}
 						<h2 className="text-xl font-bold text-slate-800 text-center mb-6 tracking-widest uppercase">
 							List of Insurance
 						</h2>
 
-						{/* No results */}
 						{noResults && (
 							<div className="flex flex-col items-center justify-center py-14 text-slate-400">
 								<svg className="w-16 h-16 mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -234,7 +226,6 @@ const ListOfInsuranceReportPage: React.FC = () => {
 							</div>
 						)}
 
-						{/* ── Premi table ─────────────────────────────────────────── */}
 						{reportType === "premi" && premiRows.length > 0 && (
 							<div className="overflow-x-auto rounded-xl border border-slate-200">
 								<table className="w-full text-sm">
@@ -267,7 +258,6 @@ const ListOfInsuranceReportPage: React.FC = () => {
 							</div>
 						)}
 
-						{/* ── TPL table ───────────────────────────────────────────── */}
 						{reportType === "tpl" && tplRows.length > 0 && (
 							<div className="overflow-x-auto rounded-xl border border-slate-200">
 								<table className="w-full text-sm">

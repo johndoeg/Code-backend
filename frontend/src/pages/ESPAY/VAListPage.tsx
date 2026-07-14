@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from "react";
+import React, { useEffect, useState } from "react";
 import api from '../../api/axiosInstance';
 
 interface VaRecord {
@@ -19,6 +19,7 @@ const VAListPage: React.FC = () => {
 	const [leaseNo, setLeaseNo] = useState<string>("");
 	const [loading, setLoading] = useState(false);
 	const [error, setError] = useState<string | null>(null);
+	const [hasSearched, setHasSearched] = useState(false);
 
 	useEffect(() => {
 		const fetchOptions = async () => {
@@ -30,48 +31,34 @@ const VAListPage: React.FC = () => {
 				}
 			} catch (err) {
 				console.error("Failed to load search options:", err);
-				setError("Failed to load search options. Please try again.");
+				setError("Failed to load search options. Please refresh.");
 			}
 		};
 		fetchOptions();
 	}, []);
 
-	const fetchVaRecords = useCallback(async () => {
+	const fetchVaRecords = async () => {
 		if (!leaseNo.trim()) {
-			setRecords([]);
+			setError("Please enter a contract number.");
 			return;
 		}
-
-		if (leaseNo.length > 9) {
-			setLoading(true);
-			setError(null);
-			try {
-				const response = await api.get('/va/search', {
-					params: {
-						lease_no: leaseNo,
-						search_by: searchBy
-					},
-				});
-
-				setRecords(response.data || []);
-			} catch (err) {
-				if (err) return;
-				setError("Failed to load VA records. Please try again.");
-				setRecords([]);
-			} finally {
-				setLoading(false);
-			}
+		setLoading(true);
+		setError(null);
+		setHasSearched(true);
+		try {
+			const response = await api.get('/va/search', {
+				params: { lease_no: leaseNo, search_by: searchBy },
+			});
+			setRecords(response.data || []);
+		} catch (err) {
+			setError("Failed to load VA records. Please check the contract number.");
+			setRecords([]);
+		} finally {
+			setLoading(false);
 		}
-	}, [leaseNo, searchBy]);
-
-	useEffect(() => {
-		fetchVaRecords();
-	}, [fetchVaRecords]);
-
-	const handleSearch = () => {
-		fetchVaRecords();
 	};
 
+	const handleSearch = () => fetchVaRecords();
 	const handleKeyPress = (e: React.KeyboardEvent) => {
 		if (e.key === 'Enter') handleSearch();
 	};
@@ -80,146 +67,169 @@ const VAListPage: React.FC = () => {
 		<div className="min-h-screen bg-gradient-to-br from-gray-50 to-gray-100 p-4 md:p-6">
 			<div className="max-w-7xl mx-auto">
 				<div className="bg-white rounded-2xl shadow-lg p-6 mb-6">
-					<div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 mb-6">
-						<div>
-							<h1 className="text-2xl md:text-3xl font-bold text-gray-800">VA List</h1>
-							<p className="text-gray-600 mt-1">View and manage your virtual account records</p>
-						</div>
-						<div className="flex items-center gap-3">
-							<span className="bg-blue-100 text-blue-800 px-3 py-1 rounded-full text-sm font-medium">
-								Total: {records.length}
-							</span>
-						</div>
+
+					<div className="mb-6">
+						<h1 className="text-2xl md:text-3xl font-bold text-gray-800">
+							VA List
+						</h1>
+						<p className="text-gray-600 mt-1">
+							View and manage virtual account records for lease contracts
+						</p>
 					</div>
 
-					{/* Search Controls */}
-					<div className="flex flex-col md:flex-row gap-4 mb-6">
-						<div className="w-full md:w-64">
-							<select
-								id="search_by"
-								value={searchBy}
-								onChange={(e) => setSearchBy(e.target.value)}
-								className="w-full px-4 py-3 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-							>
-								{searchOptions.map((option) => (
-									<option key={option.value} value={option.value}>
-										{option.descValue}
-									</option>
-								))}
-							</select>
+					<div className="bg-gray-50 rounded-xl p-4 border border-gray-200 mb-6">
+						<div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+							<div>
+								<label className="block text-sm font-medium text-gray-700 mb-1">
+									Search By
+								</label>
+								<select
+									value={searchBy}
+									onChange={(e) => setSearchBy(e.target.value)}
+									className="w-full px-3 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all bg-white"
+								>
+									{searchOptions.map((option) => (
+										<option key={option.value} value={option.value}>
+											{option.descValue}
+										</option>
+									))}
+								</select>
+							</div>
+							<div>
+								<label className="block text-sm font-medium text-gray-700 mb-1">
+									{searchOptions.find(o => o.value === searchBy)?.descValue ?? 'Contract No.'} *
+								</label>
+								<input
+									type="text"
+									value={leaseNo}
+									onChange={(e) => setLeaseNo(e.target.value)}
+									onKeyPress={handleKeyPress}
+									placeholder={`Enter ${searchOptions.find(o => o.value === searchBy)?.descValue?.toLowerCase() ?? 'contract number'}`}
+									className="w-full px-3 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all"
+								/>
+							</div>
 						</div>
 
-						<div className="flex-1 relative">
-							<input
-								type="text"
-								id="lease_no"
-								placeholder="Enter contract number..."
-								value={leaseNo}
-								onChange={(e) => setLeaseNo(e.target.value)}
-								onKeyPress={handleKeyPress}
-								className="w-full pl-10 pr-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all"
-							/>
-							<svg
-								className="w-5 h-5 text-gray-400 absolute left-3 top-1/2 transform -translate-y-1/2"
-								viewBox="0 0 24 24"
-								fill="currentColor"
+						<div className="flex flex-wrap gap-3 mt-4">
+							<button
+								onClick={handleSearch}
+								disabled={loading || !leaseNo.trim()}
+								className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
 							>
-								<path d="M15.5 14H14.71L14.43 13.73C15.41 12.59 16 11.11 16 9.5C16 5.91 13.09 3 9.5 3C5.91 3 3 5.91 3 9.5C3 13.09 5.91 16 9.5 16C11.11 16 12.59 15.41 13.73 14.43L14 14.71V15.5L19 20.49L20.49 19L15.5 14ZM9.5 14C7.01 14 5 11.99 5 9.5C5 7.01 7.01 5 9.5 5C11.99 5 14 7.01 14 9.5C14 11.99 11.99 14 9.5 14Z" />
-							</svg>
-						</div>
+								{loading ? (
+									<>
+										<svg className="animate-spin h-4 w-4 text-white" fill="none" viewBox="0 0 24 24">
+											<circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+											<path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+										</svg>
+										Searching...
+									</>
+								) : (
+									<>
+										<svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+											<path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-4.35-4.35M17 11A6 6 0 105 11a6 6 0 0012 0z" />
+										</svg>
+										Search
+									</>
+								)}
+							</button>
 
-						<button
-							onClick={handleSearch}
-							disabled={loading || !leaseNo.trim()}
-							className={`bg-gradient-to-r from-blue-600 to-indigo-700 hover:from-blue-700 hover:to-indigo-800 text-white px-6 py-3 rounded-lg font-medium shadow-md hover:shadow-lg transition-all flex items-center justify-center gap-2 ${loading || !leaseNo.trim() ? 'opacity-75 cursor-not-allowed' : ''
-								}`}
-						>
-							{loading ? (
-								<>
-									<svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" fill="none" viewBox="0 0 24 24">
-										<circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-										<path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+							{records.length > 0 && (
+								<span className="inline-flex items-center px-3 py-2 rounded-lg bg-green-50 border border-green-200 text-green-700 text-sm font-medium">
+									<svg className="w-4 h-4 mr-1.5" fill="currentColor" viewBox="0 0 20 20">
+										<path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
 									</svg>
-									Searching...
-								</>
-							) : (
-								<>
-									<svg className="w-5 h-5" viewBox="0 0 24 24" fill="currentColor">
-										<path d="M15.5 14H14.71L14.43 13.73C15.41 12.59 16 11.11 16 9.5C16 5.91 13.09 3 9.5 3C5.91 3 3 5.91 3 9.5C3 13.09 5.91 16 9.5 16C11.11 16 12.59 15.41 13.73 14.43L14 14.71V15.5L19 20.49L20.49 19L15.5 14ZM9.5 14C7.01 14 5 11.99 5 9.5C5 7.01 7.01 5 9.5 5C11.99 5 14 7.01 14 9.5C14 11.99 11.99 14 9.5 14Z" />
-									</svg>
-									Search
-								</>
+									{records.length} record{records.length !== 1 ? 's' : ''} found
+								</span>
 							)}
-						</button>
+						</div>
 					</div>
 
 					{error && (
-						<div className="mb-4 p-4 bg-red-50 border border-red-200 rounded-lg text-red-700">
-							{error}
-							<button
-								onClick={fetchVaRecords}
-								className="ml-4 text-red-900 underline"
-							>
-								Retry
-							</button>
+						<div className="mb-4 p-4 bg-red-50 border border-red-200 rounded-lg text-red-700 flex items-start gap-3">
+							<svg className="w-5 h-5 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+							</svg>
+							<span>{error}</span>
 						</div>
 					)}
 
-					{/* Table */}
-					<div className="overflow-x-auto rounded-lg border border-gray-200">
-						<table className="w-full">
-							<thead className="bg-gradient-to-r from-gray-50 to-gray-100">
-								<tr>
-									<th className="py-4 px-6 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-16">No.</th>
-									<th className="py-4 px-6 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Contract No.</th>
-									<th className="py-4 px-6 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Bank</th>
-									<th className="py-4 px-6 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">VA Number</th>
-								</tr>
-							</thead>
-							<tbody className="divide-y divide-gray-200">
-								{records.length === 0 && !loading ? (
+					{records.length > 0 && (
+						<div className="overflow-x-auto rounded-lg border border-gray-200">
+							<table className="w-full text-sm">
+								<thead className="bg-gradient-to-r from-gray-50 to-gray-100 sticky top-0 z-10">
 									<tr>
-										<td colSpan={4} className="py-10 px-6 text-center text-gray-500">
-											<div className="flex flex-col items-center justify-center">
-												<svg className="w-16 h-16 text-gray-300 mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-													<path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9.172 16.172a4 4 0 015.656 0M9 10h.01M15 10h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
-												</svg>
-												<p className="text-lg">No VA records found</p>
-												<p className="text-sm mt-1">Try adjusting your search criteria</p>
-											</div>
-										</td>
+										<th className="py-3 px-4 text-center text-xs font-medium text-gray-500 uppercase tracking-wider border border-gray-300 bg-gray-100 w-16">
+											No.
+										</th>
+										<th className="py-3 px-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider border border-gray-300 bg-gray-100">
+											Contract No.
+										</th>
+										<th className="py-3 px-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider border border-gray-300 bg-gray-100">
+											Bank
+										</th>
+										<th className="py-3 px-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider border border-gray-300 bg-gray-100">
+											VA Number
+										</th>
 									</tr>
-								) : (
-									<>
-										{records.map((record, idx) => (
-											<tr
-												key={`${record.leaseNo}-${idx}`}
-												className={`hover:bg-gray-50 transition-colors ${idx % 2 === 0 ? "bg-white" : "bg-gray-50"
-													}`}
-											>
-												<td className="py-4 px-6 whitespace-nowrap text-sm text-center text-gray-700">{idx + 1}</td>
-												<td className="py-4 px-6 whitespace-nowrap text-sm font-medium text-gray-900">{record.Lease_No}</td>
-												<td className="py-4 px-6 whitespace-nowrap text-sm text-gray-700">{record.Bank}</td>
-												<td className="py-4 px-6 whitespace-nowrap text-sm font-mono text-gray-700">{record.VA_No}</td>
-											</tr>
-										))}
-										{loading && (
-											<tr>
-												<td colSpan={4} className="py-4 px-6 text-center">
-													<div className="flex justify-center">
-														<svg className="animate-spin h-6 w-6 text-blue-600" fill="none" viewBox="0 0 24 24">
-															<circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-															<path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-														</svg>
-													</div>
-												</td>
-											</tr>
-										)}
-									</>
-								)}
-							</tbody>
-						</table>
-					</div>
+								</thead>
+								<tbody className="divide-y divide-gray-200">
+									{records.map((record, idx) => (
+										<tr
+											key={`${record.Lease_No}-${idx}`}
+											className={`hover:bg-blue-50 transition-colors ${idx % 2 === 0 ? 'bg-white' : 'bg-gray-50/50'}`}
+										>
+											<td className="py-2.5 px-4 text-center border border-gray-200 text-gray-500 font-medium text-sm">
+												{idx + 1}
+											</td>
+											<td className="py-2.5 px-4 border border-gray-200 font-semibold text-gray-900 font-mono">
+												{record.Lease_No}
+											</td>
+											<td className="py-2.5 px-4 border border-gray-200 text-gray-700">
+												{record.Bank}
+											</td>
+											<td className="py-2.5 px-4 border border-gray-200 font-mono text-gray-700">
+												{record.VA_No}
+											</td>
+										</tr>
+									))}
+								</tbody>
+							</table>
+						</div>
+					)}
+
+					{loading && (
+						<div className="py-10 text-center">
+							<div className="flex justify-center">
+								<svg className="animate-spin h-8 w-8 text-blue-600" fill="none" viewBox="0 0 24 24">
+									<circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+									<path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+								</svg>
+							</div>
+							<p className="mt-4 text-gray-600">Searching VA records...</p>
+						</div>
+					)}
+
+					{!loading && hasSearched && records.length === 0 && !error && (
+						<div className="py-10 text-center text-gray-500">
+							<svg className="w-16 h-16 text-gray-300 mx-auto mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9.172 16.172a4 4 0 015.656 0M9 10h.01M15 10h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+							</svg>
+							<p className="text-lg">No VA records found</p>
+							<p className="text-sm mt-1">Try adjusting your search criteria</p>
+						</div>
+					)}
+
+					{!loading && !hasSearched && !error && (
+						<div className="py-10 text-center text-gray-500">
+							<svg className="w-16 h-16 text-gray-300 mx-auto mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-4.35-4.35M17 11A6 6 0 105 11a6 6 0 0012 0z" />
+							</svg>
+							<p className="text-lg">Enter a Contract No. to view VA records</p>
+							<p className="text-sm mt-1">Search will show all virtual accounts linked to the contract</p>
+						</div>
+					)}
+
 				</div>
 			</div>
 		</div>

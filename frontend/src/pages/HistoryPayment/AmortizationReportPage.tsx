@@ -1,6 +1,5 @@
-// AmortizationReport.tsx
-import React, { useState, useEffect, useCallback, useRef } from "react";
-import axios from "axios";
+import React, { useState, useCallback, useRef } from "react";
+import api from '../../api/axiosInstance';
 
 interface AmortizationRow {
 	PERIOD: number;
@@ -28,8 +27,6 @@ interface AmortizationData {
 	rows: AmortizationRow[];
 }
 
-const API_URL = import.meta.env.VITE_API_URL;
-
 const AmortizationReport: React.FC = () => {
 	const [leaseNo, setLeaseNo] = useState<string>("");
 	const [loading, setLoading] = useState<boolean>(false);
@@ -47,11 +44,10 @@ const AmortizationReport: React.FC = () => {
 		setError(null);
 
 		try {
-			const response = await axios.get<AmortizationData>(
-				`${API_URL}/HistoryPayment/api/amortization`,
+			const response = await api.get<AmortizationData>(
+				'/HistoryPayment/api/amortization',
 				{
 					params: { lease_no: leaseNo },
-					timeout: 30000,
 				}
 			);
 			setData(response.data);
@@ -73,13 +69,13 @@ const AmortizationReport: React.FC = () => {
 
 	const handlePrint = (type: "contractual" | "all") => {
 		if (!data) return;
-		const url = `${API_URL}/HistoryPayment/api/print/amortization?lease_no=${leaseNo}&type=${type}`;
+		const url = `/HistoryPayment/api/print/amortization?lease_no=${leaseNo}&type=${type}`;
 		window.open(url, "_blank");
 	};
 
 	const handleExport = () => {
 		if (!data) return;
-		const url = `${API_URL}/HistoryPayment/api/export/amortization?lease_no=${leaseNo}&format=xlsx`;
+		const url = `/HistoryPayment/api/export/amortization?lease_no=${leaseNo}&format=xlsx`;
 		window.open(url, "_blank");
 	};
 
@@ -91,7 +87,6 @@ const AmortizationReport: React.FC = () => {
 		<div className="min-h-screen bg-gradient-to-br from-gray-50 to-gray-100 p-4 md:p-6">
 			<div className="max-w-[1920px] mx-auto">
 				<div className="bg-white rounded-2xl shadow-lg p-6 mb-6">
-					{/* Header */}
 					<div className="mb-6">
 						<h1 className="text-2xl md:text-3xl font-bold text-gray-800">
 							Amortization Report
@@ -101,7 +96,6 @@ const AmortizationReport: React.FC = () => {
 						</p>
 					</div>
 
-					{/* Search Form */}
 					<div className="bg-gray-50 rounded-xl p-4 border border-gray-200 mb-6 no-print">
 						<div className="grid grid-cols-1 md:grid-cols-2 gap-4">
 							<div>
@@ -130,7 +124,6 @@ const AmortizationReport: React.FC = () => {
 							</div>
 						</div>
 
-						{/* Action Buttons */}
 						<div className="flex flex-wrap gap-3 mt-4">
 							<button
 								onClick={handlePreview}
@@ -252,7 +245,6 @@ const AmortizationReport: React.FC = () => {
 						</div>
 					</div>
 
-					{/* Error Message */}
 					{error && (
 						<div className="mb-4 p-4 bg-red-50 border border-red-200 rounded-lg text-red-700 flex items-start gap-3">
 							<svg
@@ -272,7 +264,6 @@ const AmortizationReport: React.FC = () => {
 						</div>
 					)}
 
-					{/* Results Table - Improved Layout */}
 					{data && (
 						<div
 							ref={tableContainerRef}
@@ -281,25 +272,22 @@ const AmortizationReport: React.FC = () => {
 						>
 							<table className="w-full text-sm font-tahoma table-fixed">
 								<colgroup>
-									{/* Fixed column widths for better readability */}
-									<col className="w-[60px]" /> {/* Period */}
-									<col className="w-[100px]" /> {/* Due Date */}
-									<col className="w-[120px]" /> {/* Installment */}
-									{/* Contractual Section */}
-									<col className="w-[100px]" /> {/* Accrual 1 */}
-									<col className="w-[100px]" /> {/* Accrual 2 */}
-									<col className="w-[110px]" /> {/* Interest Income */}
-									<col className="w-[100px]" /> {/* Recovery */}
-									<col className="w-[130px]" /> {/* Outstanding Principal */}
-									<col className="w-[110px]" /> {/* Unearned Income */}
-									<col className="w-[130px]" /> {/* Outstanding Receivable */}
-									<col className="w-[100px]" /> {/* Payment Date */}
-									{/* PSAK Section */}
-									<col className="w-[110px]" /> {/* Interest Income */}
-									<col className="w-[100px]" /> {/* Recovery */}
-									<col className="w-[130px]" /> {/* Outstanding Principal */}
-									<col className="w-[110px]" /> {/* Unearned Income */}
-									<col className="w-[90px]" /> {/* Attribute */}
+									<col className="w-[60px]" /> 
+									<col className="w-[100px]" />
+									<col className="w-[120px]" />
+									<col className="w-[100px]" />
+									<col className="w-[100px]" />
+									<col className="w-[110px]" />
+									<col className="w-[100px]" />
+									<col className="w-[130px]" />
+									<col className="w-[110px]" />
+									<col className="w-[130px]" />
+									<col className="w-[100px]" />
+									<col className="w-[110px]" />
+									<col className="w-[100px]" />
+									<col className="w-[130px]" />
+									<col className="w-[110px]" />
+									<col className="w-[90px]" />
 								</colgroup>
 
 								<thead className="bg-gradient-to-r from-gray-50 to-gray-100 sticky top-0 z-10">
@@ -342,7 +330,6 @@ const AmortizationReport: React.FC = () => {
 										</th>
 									</tr>
 									<tr className="bg-gray-50">
-										{/* Contractual Headers */}
 										<th className="py-2 px-2 text-right text-[10px] font-medium text-gray-600 border border-gray-300 bg-blue-50">
 											Accrual 1
 										</th>
@@ -364,7 +351,6 @@ const AmortizationReport: React.FC = () => {
 										<th className="py-2 px-2 text-right text-[10px] font-medium text-gray-600 border border-gray-300 bg-blue-50">
 											Outstanding Receivable
 										</th>
-										{/* PSAK Headers */}
 										<th className="py-2 px-2 text-right text-[10px] font-medium text-gray-600 border border-gray-300 bg-green-50">
 											Interest Income
 										</th>
@@ -398,7 +384,6 @@ const AmortizationReport: React.FC = () => {
 											<td className="py-2 px-2 text-right border border-gray-200 font-semibold text-gray-900">
 												{formatCurrency(row.RENTAL)}
 											</td>
-											{/* Contractual Columns */}
 											<td className="py-2 px-2 text-right border border-gray-200 text-gray-700">
 												{formatCurrency(row.ACCRUAL1)}
 											</td>
@@ -420,11 +405,9 @@ const AmortizationReport: React.FC = () => {
 											<td className="py-2 px-2 text-right border border-gray-200 font-medium text-gray-900">
 												{formatCurrency(row.OUTS_REC)}
 											</td>
-											{/* Payment Date */}
 											<td className="py-2 px-2 border border-gray-200 text-gray-700">
 												{row.Payment || "-"}
 											</td>
-											{/* PSAK Columns */}
 											<td className="py-2 px-2 text-right border border-gray-200 text-gray-700">
 												{formatCurrency(row.L_INCOME_PSAK)}
 											</td>
@@ -447,7 +430,6 @@ const AmortizationReport: React.FC = () => {
 						</div>
 					)}
 
-					{/* Loading State */}
 					{loading && (
 						<div className="py-10 text-center">
 							<div className="flex justify-center">
@@ -475,7 +457,6 @@ const AmortizationReport: React.FC = () => {
 						</div>
 					)}
 
-					{/* Empty State */}
 					{!loading && !data && !error && (
 						<div className="py-10 text-center text-gray-500">
 							<svg
@@ -499,7 +480,6 @@ const AmortizationReport: React.FC = () => {
 					)}
 				</div>
 
-				{/* Help Text */}
 				<div className="text-center text-sm text-gray-500 mt-4">
 					<p>
 						Contractual rate: <span className="font-medium text-blue-600">{data?.declrate}%</span> |
@@ -508,112 +488,102 @@ const AmortizationReport: React.FC = () => {
 				</div>
 			</div>
 
-			{/* Enhanced Print Styles */}
 			<style>{`
-        @media print {
-          @page {
-            size: A4 landscape;
-            margin: 0.5cm;
-          }
-          
-          .no-print {
-            display: none !important;
-          }
-          
-          body {
-            font-family: Tahoma, Geneva, sans-serif;
-            font-size: 8px;
-            -webkit-print-color-adjust: exact;
-            print-color-adjust: exact;
-            background: white !important;
-          }
-          
-          /* Table-specific print styles */
-          table {
-            font-family: Tahoma, Geneva, sans-serif;
-            font-size: 7.5px;
-            width: 100% !important;
-            table-layout: fixed !important;
-          }
-          
-          th, td {
-            padding: 1px 2px !important;
-            white-space: nowrap !important;
-            overflow: hidden !important;
-            text-overflow: ellipsis !important;
-          }
-          
-          /* Adjust column widths for print */
-          col:nth-child(1) { width: 45px !important; }   /* Period */
-          col:nth-child(2) { width: 75px !important; }    /* Due Date */
-          col:nth-child(3) { width: 90px !important; }    /* Installment */
-          col:nth-child(4) { width: 75px !important; }    /* Accrual 1 */
-          col:nth-child(5) { width: 75px !important; }    /* Accrual 2 */
-          col:nth-child(6) { width: 85px !important; }    /* Interest Income */
-          col:nth-child(7) { width: 75px !important; }    /* Recovery */
-          col:nth-child(8) { width: 100px !important; }   /* Outstanding Principal */
-          col:nth-child(9) { width: 85px !important; }    /* Unearned Income */
-          col:nth-child(10) { width: 100px !important; }  /* Outstanding Receivable */
-          col:nth-child(11) { width: 75px !important; }   /* Payment Date */
-          col:nth-child(12) { width: 85px !important; }   /* PSAK Interest Income */
-          col:nth-child(13) { width: 75px !important; }   /* PSAK Recovery */
-          col:nth-child(14) { width: 100px !important; }  /* PSAK Outstanding Principal */
-          col:nth-child(15) { width: 85px !important; }   /* PSAK Unearned Income */
-          col:nth-child(16) { width: 70px !important; }   /* Attribute */
-          
-          h1 {
-            font-size: 11px !important;
-          }
-          
-          /* Remove hover effects in print */
-          tr:hover {
-            background: transparent !important;
-          }
-          
-          /* Ensure borders print correctly */
-          .border-gray-200, .border-gray-300 {
-            border-color: #000 !important;
-          }
-        }
-        
-        /* Screen-specific enhancements */
-        @media screen {
-          .font-tahoma {
-            font-family: Tahoma, Geneva, sans-serif;
-          }
-          
-          /* Sticky header for scrolling */
-          thead.sticky {
-            position: sticky;
-            top: 0;
-            z-index: 20;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-          }
-          
-          /* Smooth horizontal scroll */
-          .overflow-x-auto {
-            scroll-behavior: smooth;
-            -webkit-overflow-scrolling: touch;
-          }
-          
-          /* Better hover effect */
-          tbody tr:hover {
-            background-color: #eff6ff !important;
-            transform: translateX(0);
-            transition: background-color 0.15s ease;
-          }
-        }
-        
-        /* Utility classes */
-        .text-nowrap {
-          white-space: nowrap;
-        }
-        
-        .text-truncate {
-          overflow: hidden;
-          text-overflow: ellipsis;
-          white-space: nowrap;
-        }
+			@media print {
+				@page {
+					size: A4 landscape;
+					margin: 0.5cm;
+				}
+			
+				.no-print {
+					display: none !important;
+				}
+			
+				body {
+					font-family: Tahoma, Geneva, sans-serif;
+					font-size: 8px;
+					-webkit-print-color-adjust: exact;
+					print-color-adjust: exact;
+					background: white !important;
+				}
+				
+				table {
+					font-family: Tahoma, Geneva, sans-serif;
+					font-size: 7.5px;
+					width: 100% !important;
+					table-layout: fixed !important;
+				}
+				
+				th, td {
+					padding: 1px 2px !important;
+					white-space: nowrap !important;
+					overflow: hidden !important;
+					text-overflow: ellipsis !important;
+				}
+				
+				col:nth-child(1) { width: 45px !important; }
+				col:nth-child(2) { width: 75px !important; }
+				col:nth-child(3) { width: 90px !important; }
+				col:nth-child(4) { width: 75px !important; }
+				col:nth-child(5) { width: 75px !important; }
+				col:nth-child(6) { width: 85px !important; }
+				col:nth-child(7) { width: 75px !important; }
+				col:nth-child(8) { width: 100px !important; }
+				col:nth-child(9) { width: 85px !important; }
+				col:nth-child(10) { width: 100px !important; }
+				col:nth-child(11) { width: 75px !important; }
+				col:nth-child(12) { width: 85px !important; }
+				col:nth-child(13) { width: 75px !important; }
+				col:nth-child(14) { width: 100px !important; }
+				col:nth-child(15) { width: 85px !important; }
+				col:nth-child(16) { width: 70px !important; }
+				
+				h1 {
+					font-size: 11px !important;
+				}
+				
+				tr:hover {
+					background: transparent !important;
+				}
+				
+				.border-gray-200, .border-gray-300 {
+					border-color: #000 !important;
+				}
+			}
+				
+			@media screen {
+				.font-tahoma {
+					font-family: Tahoma, Geneva, sans-serif;
+				}
+				
+				thead.sticky {
+					position: sticky;
+					top: 0;
+					z-index: 20;
+					box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+				}
+				
+				.overflow-x-auto {
+					scroll-behavior: smooth;
+					-webkit-overflow-scrolling: touch;
+				}
+				
+				tbody tr:hover {
+					background-color: #eff6ff !important;
+					transform: translateX(0);
+					transition: background-color 0.15s ease;
+				}
+			}
+				
+			.text-nowrap {
+				white-space: nowrap;
+			}
+			
+			.text-truncate {
+				overflow: hidden;
+				text-overflow: ellipsis;
+				white-space: nowrap;
+			}
       `}</style>
 		</div>
 	);

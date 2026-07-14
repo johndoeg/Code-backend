@@ -1,8 +1,8 @@
 import React, { useEffect, useState, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
-import axios from "axios";
+import api from "../../../api/axiosInstance";
 import Pagination from "../../../helpers/Pagination";
-
+import { DEFAULT_PAGE_LIMIT } from "../../../constants/DefaultValue";
 interface RejectedRow {
 	Prechecking_Id: string;
 	Apless: string;
@@ -17,8 +17,6 @@ const SEARCH_OPTIONS = [
 	{ value: "2", label: "Customer Name" },
 ];
 
-const API_URL = import.meta.env.VITE_API_URL;
-
 const PrecheckingRejectedPage: React.FC = () => {
 	const navigate = useNavigate();
 
@@ -27,7 +25,7 @@ const PrecheckingRejectedPage: React.FC = () => {
 	const [page, setPage] = useState(1);
 	const [loading, setLoading] = useState(false);
 	const [error, setError] = useState<string | null>(null);
-	const limit = 25;
+	const limit = DEFAULT_PAGE_LIMIT;
 
 	const [searchBy, setSearchBy] = useState("1");
 	const [searchVal, setSearchVal] = useState("");
@@ -38,14 +36,13 @@ const PrecheckingRejectedPage: React.FC = () => {
 		setLoading(true);
 		setError(null);
 		try {
-			const res = await axios.get(`${API_URL}/Prechecking/api/rejected`, {
+			const res = await api.get('/Prechecking/Rejected/api/data', {
 				params: {
 					search_by: appliedSearchBy,
 					search_val: appliedSearchVal,
 					page,
 					limit,
 				},
-				timeout: 15000,
 			});
 			setRows(res.data.data);
 			setTotal(res.data.total);
@@ -71,7 +68,6 @@ const PrecheckingRejectedPage: React.FC = () => {
 			<div className="max-w-7xl mx-auto space-y-6">
 				<div className="bg-white rounded-2xl shadow-lg p-6">
 
-					{/* ── Header ── */}
 					<div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 mb-6">
 						<div>
 							<h1 className="text-2xl md:text-3xl font-bold text-gray-800">
@@ -86,7 +82,6 @@ const PrecheckingRejectedPage: React.FC = () => {
 						</span>
 					</div>
 
-					{/* ── Search bar ── */}
 					<div className="flex flex-col md:flex-row gap-3 mb-6">
 						<select
 							value={searchBy}
@@ -130,7 +125,6 @@ const PrecheckingRejectedPage: React.FC = () => {
 						</div>
 					)}
 
-					{/* ── Table ── */}
 					<div className="overflow-x-auto rounded-lg border border-gray-200">
 						<table className="w-full">
 							<thead className="bg-gradient-to-r from-gray-50 to-gray-100">
@@ -176,7 +170,6 @@ const PrecheckingRejectedPage: React.FC = () => {
 													{row.Rejected_Date}
 												</td>
 												<td className="py-3 px-4 text-sm whitespace-nowrap">
-													{/* Link to view_prechecking, mirroring the PHP <a href> */}
 													<button
 														onClick={() => navigate(
 															`/view-prechecking?apless=${encodeURIComponent(row.Apless)}&prechecking_id=${encodeURIComponent(row.Prechecking_Id)}`

@@ -1,241 +1,280 @@
 import "react-datepicker/dist/react-datepicker.css";
-import { BrowserRouter, Routes, Route, Navigate, Outlet } from "react-router-dom";
 import { lazy, Suspense } from "react";
+import { BrowserRouter, Navigate, Outlet, Route, Routes, useLocation } from "react-router-dom";
 
-// Auth & Core
-import LoginPage from "./pages/LoginPage";
-import Dashboard from "./pages/Dashboard";
-import NotFound from "./pages/NotFound";
-
-// Guards
-import ProtectedRoute from "./components/ProtectedRoute";
-import PublicRoute from "./components/PublicRoute";
-
-// CAM
-import AddCAM from "./pages/CAM/AddCAM";
-import PrecheckingIndividuPage from "./pages/CAM/PrecheckingIndividuPage";
-import PrecheckingCorporatePage from "./pages/CAM/PrecheckingCorporatePage";
-import CAMForm from "./pages/CAM/CAMForm";
-import CAMOnhandPage from "./pages/CAM/Onprocess/CAMOnhandPage";
-import PrecheckingOnHandPage from "./pages/CAM/Prechecking/PrecheckingOnhandPage";
-import PrecheckingRejectedPage from "./pages/CAM/Prechecking/PrecheckingRejectedPage";
-
-// Master Data — Sales
-import SalesPage from "./pages/MasterData/Sales/SalesPage";
-import ListOfSalesPage from "./pages/MasterData/Sales/ListOfSalesPage";
-import SalesEntryPage from "./pages/MasterData/Sales/SalesEntryPage";
-
-// Master Data — Dealer/Supplier
-import SupplierPage from "./pages/MasterData/Dealer/SupplierPage";
-import ListOfSupplierPage from "./pages/MasterData/Dealer/ListOfSupplierPage";
-import DealerDeletedReportPage from "./pages/MasterData/Dealer/DealerDeletedReportPage";
-
-// Master Data — Collateral Object
-import ModelEntryPage from "./pages/MasterData/CollateralObject/ModelEntryPage";
-import KaroseriPage from "./pages/MasterData/CollateralObject/KaroseriPage";
-import BrandPage from "./pages/MasterData/CollateralObject/Brand/BrandPage";
-import BrandVehiclePage from "./pages/MasterData/CollateralObject/Brand/BrandVehiclePage";
-import ListBrandPage from "./pages/MasterData/CollateralObject/ListBrandPage";
-import ListModelPage from "./pages/MasterData/CollateralObject/ListModelPage";
-import ListKaroseriPage from "./pages/MasterData/CollateralObject/ListKaroseriPage";
-
-// Master Data — Group
-import GroupPage from "./pages/MasterData/Group/GroupPage";
-import GroupReportPage from "./pages/MasterData/Group//GroupReportPage";
-
-// Master Data — Insurance
-import InsurancePage from "./pages/MasterData/Insurance/InsurancePage";
-import ListOfInsuranceReportPage from "./pages/MasterData/Insurance/ListOfInsuranceReportPage";
-
-// Master Data — Watchlist
-import WatchListEntryPage from "./pages/MasterData/watchlist/WatchListEntryPage";
-import WatchListEditPage from "./pages/MasterData/watchlist/WatchListEditPage";
-
-// Master Data — Blacklist
-import BlackListEntryPage from "./pages/MasterData/Blacklist/BlackListEntryPage";
-
-// Master Data — Industrial
-import IndustrialCodePage from "./pages/MasterData/IndustryCode/IndustrialCodePage";
-
-// Reports
-import HistoryPaymentReportPage from "./pages/HistoryPayment/HistoryPaymentReportPage";
-import AmortizationReportPage from "./pages/HistoryPayment/AmortizationReportPage";
-import DetailAgingReportPage from "./pages/HistoryPayment/DetailAgingReportPage";
-import JurnalFinancingPage from "./pages/Disbursement/JurnalFinancingPage";
-import PrintHistoryPaymentPage from "./pages/HistoryPayment/PrintHistoryPaymentPage";
-import SummaryAgingReportPage from "./pages/HistoryPayment/SummaryAgingReportPage";
-
-// Admin / Settings
-import MenuEntryPage from "./pages/Menu/MenuEntryPage";
-import UserAccessPage from "./pages/Menu/UserAccessPage";
-import UsersPage from "./pages/Menu/UsersPage";
-
-// OJK
-import Form10Page from "./pages/OJK/SILARAS/Form10Page";
-import SLIKPage from "./pages/OJK/SLIKPage";
-import SipesatPage from "./pages/OJK/SipesatPage";
-
-// Insurance
-import InsuranceEntryPage from "./pages/Insurance/InsuranceEntryPage";
-import InsuranceReportPage from "./pages/Insurance/InsuranceReportPage";
-import InvoiceRaksaPage from "./pages/Insurance/InvoiceRaksaPage";
-import InvoiceSimasPage from "./pages/Insurance/InvoiceSimasPage";
-
-// GPS & Payments
-import InvoiceGPSPage from "./pages/GPS/InvoiceGPSPage";
-import VAListPage from "./pages/ESPAY/VAListPage";
-
-// Delima
-import DelimaInvoicePage from "./pages/Delima/InvoicePage";
-import FiduciaReportPage from "./pages/Delima/FiduciaReportPage";
-
-// Employee
-import EmployeeDataPage from "./pages/Employee/EmployeeDataPage";
-import EmployeeMemoPage from "./pages/Employee/EmployeeMemoPage";
-
-// CAM Context & Layout
+import { AuthProvider } from "./contexts/AuthContext";
 import { CamProvider } from "./contexts/CamContext";
 import CAMTabs from "./components/CAMTabs";
+import Dashboard from "./pages/Dashboard";
+import LoginPage from "./pages/LoginPage";
+import NotFound from "./pages/NotFound";
+import ProtectedRoute from "./components/ProtectedRoute";
+import PublicRoute from "./components/PublicRoute";
 import Sidebar from "./components/Sidebar";
+import MaintenancePage from "./components/MaintenancePage";
+import MaintenanceGate from "./components/MaintenanceGate";
 
-// Lazy-loaded CAM sub-pages
-const CustomerDetail = lazy(() => import("./pages/Customer/CustomerDetail"));
+function makeRoute(path, importFn, props = {}) {
+	const Component = lazy(importFn);
+	return { path, importFn, element: <Component {...props} />, Component };
+}
 
-const camRoutes = [
-    { path: "/index", element: <AddCAM /> },
-    { path: "/PrecheckingIndividuPage", element: <PrecheckingIndividuPage /> },
-    { path: "/PrecheckingCorporatePage", element: <PrecheckingCorporatePage /> },
-    { path: "/CAMForm", element: <CAMForm apless="" precheckingId="" lesseeTp="PR" /> },
-    { path: "/CustomerDetail", element: <CustomerDetail /> },
-    { path: "/cam-onhand", element: <CAMOnhandPage /> },
-    { path: "/cam-request-onhand", element: <PrecheckingOnHandPage /> },
-    { path: "/cam-request-rejected", element: <PrecheckingRejectedPage /> },
+const CAM_CORE_ROUTES = [
+	makeRoute("/index", () => import("./pages/CAM/Add CAM/AddCAMCustomerForm")),
+	makeRoute("/index-guarantor", () => import("./pages/CAM/Add CAM/AddCAMGuarantorForm")),
+	makeRoute("/CAMForm", () => import("./pages/CAM/CAMForm"), {
+		apless: "", precheckingId: "", lesseeTp: "PR",
+	}),
+	makeRoute("/cam-onhand", () => import("./pages/CAM/Onprocess/View/CAMOnhandPage")),
+	makeRoute("/cam-inprogress", () => import("./pages/CAM/Onprocess/View/CAMInProgressPage")),
+	makeRoute("/cam-approved", () => import("./pages/CAM/Onprocess/View/CAMApprovedPage")),
 ];
 
-const ojkRoutes = [
-    { path: "/form-10", element: <Form10Page /> },
-    { path: "/slik", element: <SLIKPage /> },
-    { path: "/sipesat", element: <SipesatPage /> },
+const CAM_PRECHECKING_ROUTES = [
+	makeRoute("/PrecheckingIndividuPage", () => import("./pages/CAM/Prechecking/PrecheckingIndividuPage")),
+	makeRoute("/PrecheckingCorporatePage", () => import("./pages/CAM/Prechecking/PrecheckingCorporatePage")),
+	makeRoute("/PrecheckingGuarantorIndividuPage", () => import("./pages/CAM/Prechecking/PrecheckingGuarantorIndividuPage")),
+	makeRoute("/PrecheckingGuarantorCorporatePage", () => import("./pages/CAM/Prechecking/PrecheckingGuarantorCorporatePage")),
+	makeRoute("/cam-request-onhand", () => import("./pages/CAM/Prechecking/PrecheckingOnhandPage")),
+	makeRoute("/cam-request-inprogress", () => import("./pages/CAM/Prechecking/PrecheckingInProgressPage")),
+	makeRoute("/cam-request-approved", () => import("./pages/CAM/Prechecking/PrecheckingApprovedPage")),
+	makeRoute("/cam-request-rejected", () => import("./pages/CAM/Prechecking/PrecheckingRejectedPage")),
+	makeRoute("/view-prechecking", () => import("./pages/CAM/Prechecking/ViewPrecheckingPage")),
+	makeRoute("/cam-request-approval", () => import("./pages/CAM/Prechecking/ApprovalPrecheckingPage")),
 ];
 
-const masterDataRoutes = [
-    { path: "/sales", element: <SalesPage /> },
-    { path: "/rpt-list-sales", element: <ListOfSalesPage /> },
-    { path: "/sales-entry", element: <SalesEntryPage /> },
-    { path: "/supplier", element: <SupplierPage /> },
-    { path: "/rpt-list-supplier", element: <ListOfSupplierPage /> },
-    { path: "/report-delete-dealer", element: <DealerDeletedReportPage /> },
-    { path: "/model-entry", element: <ModelEntryPage /> },
-    { path: "/karoseri-entry", element: <KaroseriPage /> },
-    { path: "/brand-entry", element: <BrandPage /> },
-    { path: "/brand-vehicle", element: <BrandVehiclePage /> },
-    { path: "/rpt-list-vehicle", element: <ListBrandPage /> },
-    { path: "/rpt-list-model", element: <ListModelPage /> },
-    { path: "/rpt-list-karoseri", element: <ListKaroseriPage /> },
-    { path: "/insurance", element: <InsurancePage /> },
-    { path: "/rpt-list-insurance", element: <ListOfInsuranceReportPage /> },
-    { path: "/group-entry", element: <GroupPage /> },
-    { path: "/rpt-group", element: <GroupReportPage /> },
-    { path: "/wlist-entry", element: <WatchListEntryPage /> },
-    { path: "/wlist-edit", element: <WatchListEditPage /> },
-    { path: "/blacklist-entry", element: <BlackListEntryPage /> },
-    { path: "/industrial-code", element: <IndustrialCodePage /> },
+const CAM_REPORT_ROUTES = [
+	makeRoute("/rpt-in-progress-cam", () => import("./pages/CAM/ReportView/ListApprovedCAM/ListInprogressCAMPage")),
+	makeRoute("/report-nett-booking-appi", () => import("./pages/CAM/ReportView/Others/NettBookingAPPIPage")),
+	makeRoute("/undisbursecontract", () => import("./pages/CAM/ReportView/Others/UndisbursedContractPage")),
+	makeRoute("/report-list-cont-del-by-system", () => import("./pages/CAM/ReportView/Others/PendingContractWillBeDeletedBySystemPage")),
+	makeRoute("/report-his-bpkb-submit", () => import("./pages/CAM/ReportView/Others/HistoryBPKBSubmissionPage")),
+	makeRoute("/report-summary-cam-bycmo", () => import("./pages/CAM/ReportView/Others/MonthlySummaryCAMApprovedPage")),
+	makeRoute("/report-f6pd", () => import("./pages/CAM/ReportView/Others/F6PDReportPage")),
+	makeRoute("/rpt-top-customer", () => import("./pages/CAM/ReportView/Others/Top20CustomerPage")),
+	makeRoute("/prechecking-and-cam-sla", () => import("./pages/CAM/ReportView/Others/PrecheckingAndCAMSLAPage")),
+	makeRoute("/customer-outstanding", () => import("./pages/CAM/ReportView/Others/CustomerOustandingPage")),
+	makeRoute("/summary-rundownosp", () => import("./pages/CAM/ReportView/Others/SummaryRunDownOSPPage")),
+	makeRoute("/history-mrp", () => import("./pages/CAM/ReportView/Others/HistoryMRPPage")),
 ];
 
-const reportRoutes = [
-    { path: "/rpt-his-pmt", element: <HistoryPaymentReportPage /> },
-    { path: "/rpt-amortization", element: <AmortizationReportPage /> },
-    { path: "/report-aging-detail", element: <DetailAgingReportPage /> },
-    { path: "/rpt-jurnal-financing", element: <JurnalFinancingPage /> },
-    { path: "/rpt-print-his-pmt", element: <PrintHistoryPaymentPage /> },
-    { path: "/report-aging-summary", element: <SummaryAgingReportPage /> },
+const MASTER_DATA_ROUTES = [
+	makeRoute("/sales", () => import("./pages/MasterData/Sales/SalesPage")),
+	makeRoute("/sales-entry", () => import("./pages/MasterData/Sales/SalesEntryPage")),
+	makeRoute("/rpt-list-sales", () => import("./pages/MasterData/Sales/ListOfSalesPage")),
+	makeRoute("/supplier", () => import("./pages/MasterData/Dealer/SupplierPage")),
+	makeRoute("/supplier-entry", () => import("./pages/MasterData/Dealer/SupplierEntryPage")),
+	makeRoute("/rpt-list-supplier", () => import("./pages/MasterData/Dealer/ListOfSupplierPage")),
+	makeRoute("/report-delete-dealer", () => import("./pages/MasterData/Dealer/DealerDeletedReportPage")),
+	makeRoute("/brand-entry", () => import("./pages/MasterData/CollateralObject/Brand/BrandPage")),
+	makeRoute("/brand-vehicle", () => import("./pages/MasterData/CollateralObject/Brand/BrandVehiclePage")),
+	makeRoute("/rpt-list-vehicle", () => import("./pages/MasterData/CollateralObject/Brand/ListBrandPage")),
+	makeRoute("/model-entry", () => import("./pages/MasterData/CollateralObject/Model/ModelEntryPage")),
+	makeRoute("/rpt-list-model", () => import("./pages/MasterData/CollateralObject/Model/ListModelPage")),
+	makeRoute("/karoseri-entry", () => import("./pages/MasterData/CollateralObject/Karoseri/KaroseriPage")),
+	makeRoute("/rpt-list-karoseri", () => import("./pages/MasterData/CollateralObject/Karoseri/ListKaroseriPage")),
+	makeRoute("/group-entry", () => import("./pages/MasterData/Group/GroupPage")),
+	makeRoute("/group-member", () => import("./pages/MasterData/Group/GroupMemberPage")),
+	makeRoute("/rpt-group", () => import("./pages/MasterData/Group/GroupReportPage")),
+	makeRoute("/insurance", () => import("./pages/MasterData/Insurance/InsurancePage")),
+	makeRoute("/ins-company", () => import("./pages/MasterData/Insurance/InsuranceCompanyPage")),
+	makeRoute("/rpt-list-insurance", () => import("./pages/MasterData/Insurance/ListOfInsuranceReportPage")),
+	makeRoute("/wlist-entry", () => import("./pages/MasterData/Watchlist/WatchListEntryPage")),
+	makeRoute("/wlist-edit", () => import("./pages/MasterData/Watchlist/WatchListEditPage")),
+	makeRoute("/blacklist-entry", () => import("./pages/MasterData/Blacklist/BlackListEntryPage")),
+	makeRoute("/master-data-threshold-level", () => import("./pages/MasterData/RatioAndDeviation/MasterDataThresholdLevelPage")),
+	makeRoute("/master-data-ratio", () => import("./pages/MasterData/RatioAndDeviation/MasterDataRatioPage")),
+	makeRoute("/master-data-ratio-view-edit", () => import("./pages/MasterData/RatioAndDeviation/MasterDataRatioViewEditPage")),
+	makeRoute("/master-data-npf-range", () => import("./pages/MasterData/RatioAndDeviation/MasterDataNPFRangePage")),
+	makeRoute("/master-data-deviation-dp", () => import("./pages/MasterData/RatioAndDeviation/MasterDataDeviationDPPage")),
+	makeRoute("/master-data-deviation-dp-view", () => import("./pages/MasterData/RatioAndDeviation/MasterDataDeviationDPViewPage")),
+	makeRoute("/industrial-code", () => import("./pages/MasterData/IndustryCode/IndustrialCodePage")),
 ];
 
-const invoiceRoutes = [
-    { path: "/insurance-entry", element: <InsuranceEntryPage /> },
-    { path: "/insurance-report", element: <InsuranceReportPage /> },
-    { path: "/invoice-raksa", element: <InvoiceRaksaPage /> },
-    { path: "/invoice-simas", element: <InvoiceSimasPage /> },
-    { path: "/invoice-gps", element: <InvoiceGPSPage /> },
-    { path: "/va-list", element: <VAListPage /> },
-    { path: "/invoice", element: <DelimaInvoicePage /> },
-    { path: "/report-list-fiducia", element: <FiduciaReportPage /> },
+const REPORT_ROUTES = [
+	makeRoute("/rpt-his-pmt", () => import("./pages/HistoryPayment/HistoryPaymentReportPage")),
+	makeRoute("/rpt-amortization", () => import("./pages/HistoryPayment/AmortizationReportPage")),
+	makeRoute("/report-aging-detail", () => import("./pages/HistoryPayment/DetailAgingReportPage")),
+	makeRoute("/report-aging-summary", () => import("./pages/HistoryPayment/SummaryAgingReportPage")),
+	makeRoute("/rpt-jurnal-financing", () => import("./pages/Disbursement/JurnalFinancingPage")),
+	makeRoute("/rpt-print-his-pmt", () => import("./pages/HistoryPayment/PrintHistoryPaymentPage")),
 ];
 
-const adminRoutes = [
-    { path: "/menu-entry", element: <MenuEntryPage /> },
-    { path: "/uacc-entry", element: <UserAccessPage /> },
-    { path: "/users", element: <UsersPage /> },
-    { path: "/employee-data", element: <EmployeeDataPage /> },
-    { path: "/memo-employee", element: <EmployeeMemoPage /> },
+const INSURANCE_INVOICE_ROUTES = [
+	makeRoute("/insurance-entry", () => import("./pages/Insurance/InsuranceEntryPage")),
+	makeRoute("/insurance-report", () => import("./pages/Insurance/InsuranceReportPage")),
+	makeRoute("/invoice-raksa", () => import("./pages/Insurance/InvoiceRaksaPage")),
+	makeRoute("/invoice-simas", () => import("./pages/Insurance/InvoiceSimasPage")),
+	makeRoute("/invoice-gps", () => import("./pages/GPS/InvoiceGPSPage")),
+	makeRoute("/va-list", () => import("./pages/ESPAY/VAListPage")),
+	makeRoute("/invoice", () => import("./pages/Delima/InvoicePage")),
+	makeRoute("/report-list-fiducia", () => import("./pages/Delima/FiduciaReportPage")),
 ];
 
-const protectedFlatRoutes = [
-    ...camRoutes,
-    ...ojkRoutes,
-    ...masterDataRoutes,
-    ...reportRoutes,
-    ...invoiceRoutes,
-    ...adminRoutes,
+const OJK_ROUTES = [
+	makeRoute("/form-10", () => import("./pages/OJK/SILARAS/Form10Page")),
+	makeRoute("/slik", () => import("./pages/OJK/SLIKPage")),
+	makeRoute("/sipesat", () => import("./pages/OJK/SipesatPage")),
 ];
+
+const ADMIN_ROUTES = [
+	makeRoute("/menu-entry", () => import("./pages/Menu/MenuEntryPage")),
+	makeRoute("/menu-edit", () => import("./pages/Menu/MenuEditPage")),
+	makeRoute("/uacc-entry", () => import("./pages/Menu/UserAccessPage")),
+	makeRoute("/users", () => import("./pages/Menu/UsersPage")),
+	makeRoute("/user-entry", () => import("./pages/Menu/UserEntryPage")),
+	makeRoute("/employee-data", () => import("./pages/Employee/EmployeeDataPage")),
+	makeRoute("/memo-employee", () => import("./pages/Employee/EmployeeMemoPage")),
+];
+
+const ALL_PROTECTED_ROUTES = [
+	...CAM_CORE_ROUTES,
+	...CAM_PRECHECKING_ROUTES,
+	...CAM_REPORT_ROUTES,
+	...MASTER_DATA_ROUTES,
+	...REPORT_ROUTES,
+	...INSURANCE_INVOICE_ROUTES,
+	...OJK_ROUTES,
+	...ADMIN_ROUTES,
+];
+
+const prefetchedPaths = new Set();
+const routePrefetchMap = new Map(
+	ALL_PROTECTED_ROUTES.map(({ path, importFn }) => [path, importFn]),
+);
+
+export function prefetchRoute(path) {
+	if (prefetchedPaths.has(path)) return;
+	const importFn = routePrefetchMap.get(path);
+
+	if (!importFn) return;
+	prefetchedPaths.add(path);
+	importFn().catch(() => { });
+}
+
+function PageLoader() {
+	return (
+		<div className="flex items-center justify-center h-full min-h-[60vh]">
+			<div className="flex flex-col items-center gap-3 text-gray-400">
+				<div className="w-8 h-8 border-4 border-gray-200 border-t-blue-500 rounded-full animate-spin" />
+				<span className="text-sm">Loading…</span>
+			</div>
+		</div>
+	);
+}
 
 function AppLayout() {
-    return (
-        <div className="flex h-screen bg-gray-100">
-            <Sidebar />
-            <div className="flex-1 flex flex-col overflow-y-auto">
-                <Outlet />
-            </div>
-        </div>
-    );
+	return (
+		<div className="flex h-screen bg-gray-100">
+			<Sidebar />
+			<div className="flex-1 flex flex-col overflow-y-auto">
+				<Suspense fallback={<PageLoader />}>
+					<Outlet />
+				</Suspense>
+			</div>
+		</div>
+	);
 }
 
 function CAMLayout() {
-    return (
-        <CamProvider>
-            <div className="flex h-screen bg-gray-100">
-                <div className="flex-1 overflow-auto">
-                    <CAMTabs />
-                    <div className="p-6">
-                        <div className="bg-white rounded shadow min-h-[80vh]">
-                            <Suspense fallback={<div className="p-6">Loading...</div>}>
-                                <Outlet />
-                            </Suspense>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </CamProvider>
-    );
+	return (
+		<CamProvider>
+			<div className="flex h-screen bg-gray-100">
+				<div className="flex-1 overflow-auto">
+					<CAMTabs />
+					<div className="p-6">
+						<div className="bg-white rounded shadow min-h-[80vh]">
+							<Suspense fallback={<PageLoader />}>
+								<Outlet />
+							</Suspense>
+						</div>
+					</div>
+				</div>
+			</div>
+		</CamProvider>
+	);
+}
+
+
+const AddCAMModal = lazy(() => import("./pages/CAM/Add CAM/AddCAMModal"));
+const AddCAMGuarantorModal = lazy(() => import("./pages/CAM/Add CAM/AddCAMGuarantorModal"));
+
+function AppRoutes() {
+	const location = useLocation();
+	const background = location.state && location.state.background;
+
+	return (
+		<>
+			<Routes location={background || location}>
+				<Route
+					path="/maintenance"
+					element={
+						<MaintenancePage
+							info={{
+								error: "maintenance",
+								message: "We're currently performing scheduled maintenance.",
+								retry_after: 600,
+								app_name: "GenieFinance",
+							}}
+						/>
+					}
+				/>
+				<Route
+					path="/login"
+					element={<PublicRoute><LoginPage /></PublicRoute>}
+				/>
+
+				<Route element={<ProtectedRoute><AppLayout /></ProtectedRoute>}>
+					<Route path="/" element={<Dashboard />} />
+					{ALL_PROTECTED_ROUTES.map(({ path, element }) => (
+						<Route key={path} path={path} element={element} />
+					))}
+					<Route path="/cam" element={<CAMLayout />}>
+						<Route index element={<Navigate to="customer/detail" replace />} />
+						<Route path="*" element={<Navigate to="customer/detail" replace />} />
+					</Route>
+					<Route path="*" element={<NotFound />} />
+				</Route>
+			</Routes>
+
+			{background && (
+				<Routes>
+					<Route
+						path="/index"
+						element={
+							<ProtectedRoute>
+								<Suspense fallback={<PageLoader />}>
+									<AddCAMModal />
+								</Suspense>
+							</ProtectedRoute>
+						}
+					/>
+					<Route
+						path="/index-guarantor"
+						element={
+							<ProtectedRoute>
+								<Suspense fallback={<PageLoader />}>
+									<AddCAMGuarantorModal />
+								</Suspense>
+							</ProtectedRoute>
+						}
+					/>
+				</Routes>
+			)}
+		</>
+	);
 }
 
 function App() {
-    return (
-        <BrowserRouter>
-            <Routes>
-                {/* Public */}
-                <Route path="/login" element={<PublicRoute><LoginPage /></PublicRoute>} />
-                <Route element={<ProtectedRoute><AppLayout /></ProtectedRoute>}>
-
-                    <Route path="/" element={<Dashboard />} />
-
-                    {protectedFlatRoutes.map(({ path, element }) => (
-                        <Route key={path} path={path} element={element} />
-                    ))}
-
-                    <Route path="/cam" element={<CAMLayout />}>
-                        <Route path="customer/detail" element={<CustomerDetail />} />
-                        <Route index element={<Navigate to="customer/detail" replace />} />
-                        <Route path="*" element={<Navigate to="customer/detail" replace />} />
-                    </Route>
-
-                    {/* Catch-all: any unknown URL renders NotFound inside AppLayout */}
-                    <Route path="*" element={<NotFound />} />
-
-                </Route>
-            </Routes>
-        </BrowserRouter>
-    );
+	return (
+		<MaintenanceGate>
+			<AuthProvider>
+				<BrowserRouter>
+					<AppRoutes />
+				</BrowserRouter>
+			</AuthProvider>
+		</MaintenanceGate>
+	);
 }
 
 export default App;

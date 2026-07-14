@@ -2,6 +2,7 @@ import React, { useEffect, useState, useCallback, useRef } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import api from "../../../api/axiosInstance";
 import Pagination from "../../../helpers/Pagination";
+import { DEFAULT_PAGE_LIMIT } from '../../../constants/DefaultValue';
 
 type CustomerType = "PR" | "PT";
 
@@ -134,26 +135,22 @@ const WatchlistEntryPage: React.FC = () => {
 	const [searchParams] = useSearchParams();
 	const menuId = searchParams.get("menu_id") ?? "";
 
-	// list state
 	const [entries, setEntries] = useState<WatchlistEntryPage[]>([]);
 	const [total, setTotal] = useState(0);
 	const [page, setPage] = useState(1);
 	const [loading, setLoading] = useState(true);
 	const [listErrors, setListErrors] = useState<string[]>([]);
 
-	// search
 	const [searchBy, setSearchBy] = useState("2");
 	const [searchVal, setSearchVal] = useState("");
 	const [appliedSearch, setAppliedSearch] = useState({ by: "2", val: "" });
 
-	const limit = 25;
+	const limit = DEFAULT_PAGE_LIMIT;
 	const totalPages = Math.ceil(total / limit);
 
-	// combo data
 	const [reasons, setReasons] = useState<Reason[]>([]);
 	const [groups, setGroups] = useState<Group[]>([]);
 
-	// add modal
 	const [addOpen, setAddOpen] = useState(false);
 	const [addErrors, setAddErrors] = useState<string[]>([]);
 	const [addLoading, setAddLoading] = useState(false);
@@ -178,7 +175,6 @@ const WatchlistEntryPage: React.FC = () => {
 		create_date: today,
 	});
 
-	// delete modal
 	const [deleteOpen, setDeleteOpen] = useState(false);
 	const [deleteTarget, setDeleteTarget] = useState<WatchlistEntryPage | null>(null);
 	const [deleteReason, setDeleteReason] = useState("");
@@ -216,7 +212,7 @@ const WatchlistEntryPage: React.FC = () => {
 			]);
 			setReasons(r.data || []);
 			setGroups(g.data || []);
-		} catch {}
+		} catch { }
 	}, []);
 
 	useEffect(() => {
@@ -321,10 +317,8 @@ const WatchlistEntryPage: React.FC = () => {
 		<div className="min-h-screen bg-gradient-to-br from-gray-50 to-gray-100 p-4 md:p-6">
 			<div className="max-w-7xl mx-auto">
 
-				{/* ── header card ── */}
 				<div className="bg-white rounded-2xl shadow-lg p-6 mb-6">
 
-					{/* title row */}
 					<div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 mb-6">
 						<div>
 							<h1 className="text-2xl md:text-3xl font-bold text-gray-800">
@@ -360,7 +354,6 @@ const WatchlistEntryPage: React.FC = () => {
 						</div>
 					</div>
 
-					{/* search bar */}
 					<div className="flex flex-col sm:flex-row gap-3 mb-6">
 						<select
 							value={searchBy}
@@ -403,7 +396,6 @@ const WatchlistEntryPage: React.FC = () => {
 						<ErrorBanner errors={listErrors} onClose={() => setListErrors([])} />
 					)}
 
-					{/* table */}
 					<div className="overflow-x-auto rounded-xl border border-gray-200">
 						<table className="w-full">
 							<thead className="bg-gradient-to-r from-gray-50 to-gray-100">
@@ -467,7 +459,6 @@ const WatchlistEntryPage: React.FC = () => {
 											</td>
 											<td className="py-3 px-4">
 												<div className="flex gap-2 flex-wrap">
-													{/* View Detail — always visible, opens read-only */}
 													<button
 														onClick={() =>
 															navigate(
@@ -479,7 +470,6 @@ const WatchlistEntryPage: React.FC = () => {
 														View Detail
 													</button>
 
-													{/* Delete — hidden when reason_category === 8 */}
 													{entry.reason_category !== 8 && (
 														<button
 															onClick={() => openDelete(entry)}
@@ -510,12 +500,10 @@ const WatchlistEntryPage: React.FC = () => {
 				</div>
 			</div>
 
-			{/* ═══ ADD MODAL ════════════════════════════════════════════════════════ */}
 			{addOpen && (
 				<div className="fixed inset-0 bg-black bg-opacity-50 flex items-start justify-center z-50 p-4 overflow-y-auto">
 					<div className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl my-8">
 
-						{/* modal header */}
 						<div className="flex justify-between items-center px-6 py-5 border-b">
 							<div>
 								<h2 className="text-xl font-bold text-gray-800">
@@ -541,7 +529,6 @@ const WatchlistEntryPage: React.FC = () => {
 								/>
 							)}
 
-							{/* customer type toggle */}
 							<div className="mb-6">
 								<label className="block text-sm font-semibold text-gray-700 mb-2">
 									Customer Type <span className="text-red-500">*</span>
@@ -570,7 +557,6 @@ const WatchlistEntryPage: React.FC = () => {
 
 							<div className="grid grid-cols-1 md:grid-cols-2 gap-5">
 
-								{/* ── left column ── */}
 								<div className="space-y-4">
 									<h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider">
 										{custType === "PR"
@@ -622,7 +608,6 @@ const WatchlistEntryPage: React.FC = () => {
 										/>
 									</Field>
 
-									{/* PR-only fields */}
 									{custType === "PR" && (
 										<>
 											<Field label="ID Card No." required>
@@ -689,7 +674,6 @@ const WatchlistEntryPage: React.FC = () => {
 										</>
 									)}
 
-									{/* PT-only fields */}
 									{custType === "PT" && (
 										<>
 											<Field label="NPWP" required>
@@ -723,13 +707,11 @@ const WatchlistEntryPage: React.FC = () => {
 									)}
 								</div>
 
-								{/* ── right column ── */}
 								<div className="space-y-4">
 									<h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider">
 										{custType === "PT" ? "Contact Person" : "Case Information"}
 									</h3>
 
-									{/* PT-only: contact person section */}
 									{custType === "PT" && (
 										<>
 											<Field label="Contact Person Name">
@@ -827,7 +809,6 @@ const WatchlistEntryPage: React.FC = () => {
 							</div>
 						</div>
 
-						{/* modal footer */}
 						<div className="flex justify-end gap-3 px-6 py-4 border-t bg-gray-50 rounded-b-2xl">
 							<button
 								onClick={() => setAddOpen(false)}
@@ -839,8 +820,8 @@ const WatchlistEntryPage: React.FC = () => {
 								onClick={handleSave}
 								disabled={addLoading}
 								className={`px-6 py-2 rounded-lg text-sm text-white font-medium transition-colors flex items-center gap-2 ${addLoading
-										? "bg-amber-400 cursor-not-allowed"
-										: "bg-amber-600 hover:bg-amber-700"
+									? "bg-amber-400 cursor-not-allowed"
+									: "bg-amber-600 hover:bg-amber-700"
 									}`}
 							>
 								{addLoading && (
@@ -871,7 +852,6 @@ const WatchlistEntryPage: React.FC = () => {
 				</div>
 			)}
 
-			{/* ═══ DELETE MODAL ════════════════════════════════════════════════════ */}
 			{deleteOpen && deleteTarget && (
 				<div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
 					<div className="bg-white rounded-2xl shadow-2xl w-full max-w-md">
@@ -901,7 +881,6 @@ const WatchlistEntryPage: React.FC = () => {
 								/>
 							)}
 
-							{/* warning box */}
 							<div className="bg-amber-50 border border-amber-200 rounded-lg p-4 flex gap-3">
 								<svg
 									className="w-5 h-5 text-amber-500 flex-shrink-0 mt-0.5"
@@ -1009,8 +988,8 @@ const WatchlistEntryPage: React.FC = () => {
 								onClick={handleDelete}
 								disabled={deleteLoading}
 								className={`px-5 py-2 rounded-lg text-sm text-white font-medium transition-colors flex items-center gap-2 ${deleteLoading
-										? "bg-red-400 cursor-not-allowed"
-										: "bg-red-500 hover:bg-red-600"
+									? "bg-red-400 cursor-not-allowed"
+									: "bg-red-500 hover:bg-red-600"
 									}`}
 							>
 								{deleteLoading && (

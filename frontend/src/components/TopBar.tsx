@@ -13,15 +13,12 @@ export default function TopBar({
 			</div>
 
 			<div className="flex items-center gap-2">
-				{/* mini toggle */}
 				<button
 					onClick={onMiniToggle}
 					className="p-2 rounded hover:bg-neutral-700 hidden md:block"
 				>
 				⇔
 				</button>
-
-				{/* drawer toggle */}
 				<button
 					onClick={onToggle}
 					className="p-2 rounded hover:bg-neutral-700"

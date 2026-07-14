@@ -1,43 +1,38 @@
 import React, { useEffect, useState, useCallback } from "react";
-import axios from "axios";
+import api from "../api/axiosInstance";
 import Pagination from "../helpers/Pagination";
-
+import { DEFAULT_PAGE_LIMIT } from '../constants/DefaultValue';
 interface Users {
-    EMPLOYEE_ID: string;
-    USERNAME: string;
-    FULLNAME: string;
-    ACCESSCAM: string;
-    SUPERIOR: string;
-    BRANCH_NAME: string;
-    STATUS: string;
+	EMPLOYEE_ID: string;
+	USERNAME: string;
+	FULLNAME: string;
+	ACCESSCAM: string;
+	SUPERIOR: string;
+	BRANCH_NAME: string;
+	STATUS: string;
 }
 
-const API_URL = import.meta.env.VITE_API_URL;
-
 const Users: React.FC = () => {
-    const [user, setUser] = useState<Users[]>([]);
+	const [user, setUser] = useState<Users[]>([]);
 	const [search, setSearch] = useState("");
 	const [page, setPage] = useState(1);
 	const [total, setTotal] = useState(0);
 	const [loading, setLoading] = useState(false);
 	const [error, setError] = useState<string | null>(null);
-	const limit = 25;
+	const limit = DEFAULT_PAGE_LIMIT;
 
 	const fetchUser = useCallback(async () => {
 		setLoading(true);
 		setError(null);
 		try {
-			const response = await axios.get(`${API_URL}/MenuUserAccess/api/users`, {
-				params: { search_val: search, page, limit },
-				timeout: 10000,
+			const response = await api.get('/MenuUserAccess/api/users', {
+				params: { search_val: search, page, limit }
 			});
 			setUser(response.data.data);
 			setTotal(response.data.total);
 		} catch (err) {
-			if (axios.isCancel(err)) {
-				return;
-			}
 			setError('Failed to load model data. Please try again.');
+			return;
 		} finally {
 			setLoading(false);
 		}
@@ -58,8 +53,8 @@ const Users: React.FC = () => {
 	useEffect(() => {
 		const handleScroll = () => {
 			if (
-				window.innerHeight + document.documentElement.scrollTop !== 
-				document.documentElement.offsetHeight || 
+				window.innerHeight + document.documentElement.scrollTop !==
+				document.documentElement.offsetHeight ||
 				loading
 			) {
 				return;
@@ -96,11 +91,11 @@ const Users: React.FC = () => {
 								onChange={(e) => setSearch(e.target.value)}
 								className="w-full pl-10 pr-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all"
 							/>
-							<svg 
-								className="w-5 h-5 text-gray-400 absolute left-3 top-1/2 transform -translate-y-1/2" 
-								focusable="false" 
-								aria-hidden="true" 
-								viewBox="0 0 24 24" 
+							<svg
+								className="w-5 h-5 text-gray-400 absolute left-3 top-1/2 transform -translate-y-1/2"
+								focusable="false"
+								aria-hidden="true"
+								viewBox="0 0 24 24"
 								fill="none"
 							>
 								<path d="M15.5 14H14.71L14.43 13.73C15.41 12.59 16 11.11 16 9.5C16 5.91 13.09 3 9.5 3C5.91 3 3 5.91 3 9.5C3 13.09 5.91 16 9.5 16C11.11 16 12.59 15.41 13.73 14.43L14 14.71V15.5L19 20.49L20.49 19L15.5 14ZM9.5 14C7.01 14 5 11.99 5 9.5C5 7.01 7.01 5 9.5 5C11.99 5 14 7.01 14 9.5C14 11.99 11.99 14 9.5 14Z" fill="currentColor"></path>
@@ -112,9 +107,8 @@ const Users: React.FC = () => {
 								fetchUser();
 							}}
 							disabled={loading}
-							className={`bg-gradient-to-r from-blue-600 to-indigo-700 hover:from-blue-700 hover:to-indigo-800 text-white px-6 py-3 rounded-lg font-medium shadow-md hover:shadow-lg transition-all flex items-center justify-center gap-2 ${
-								loading ? 'opacity-75 cursor-not-allowed' : ''
-							}`}
+							className={`bg-gradient-to-r from-blue-600 to-indigo-700 hover:from-blue-700 hover:to-indigo-800 text-white px-6 py-3 rounded-lg font-medium shadow-md hover:shadow-lg transition-all flex items-center justify-center gap-2 ${loading ? 'opacity-75 cursor-not-allowed' : ''
+								}`}
 						>
 							{loading ? (
 								<>
@@ -138,7 +132,7 @@ const Users: React.FC = () => {
 					{error && (
 						<div className="mb-4 p-4 bg-red-50 border border-red-200 rounded-lg text-red-700">
 							{error}
-							<button 
+							<button
 								onClick={fetchUser}
 								className="ml-4 text-red-900 underline"
 							>
@@ -153,11 +147,11 @@ const Users: React.FC = () => {
 								<tr>
 									<th className="py-4 px-6 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Employee ID</th>
 									<th className="py-4 px-6 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Username</th>
-                                    <th className="py-4 px-6 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Fullname</th>
-                                    <th className="py-4 px-6 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Branch</th>
-                                    <th className="py-4 px-6 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Access Group</th>
-                                    <th className="py-4 px-6 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Superior</th>
-                                    <th className="py-4 px-6 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
+									<th className="py-4 px-6 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Fullname</th>
+									<th className="py-4 px-6 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Branch</th>
+									<th className="py-4 px-6 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Access Group</th>
+									<th className="py-4 px-6 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Superior</th>
+									<th className="py-4 px-6 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
 									<th className="py-4 px-6 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
 								</tr>
 							</thead>
@@ -177,17 +171,17 @@ const Users: React.FC = () => {
 								) : (
 									<>
 										{user.map((s, idx) => (
-											<tr 
-												key={s.EMPLOYEE_ID} 
+											<tr
+												key={s.EMPLOYEE_ID}
 												className={`hover:bg-gray-50 transition-colors ${idx % 2 === 0 ? "bg-white" : "bg-gray-50"}`}
 											>
 												<td className="py-4 px-6 whitespace-nowrap text-sm font-medium text-gray-900">{s.EMPLOYEE_ID}</td>
 												<td className="py-4 px-6 whitespace-nowrap text-sm text-gray-700 font-medium">{s.USERNAME}</td>
-                                                <td className="py-4 px-6 whitespace-nowrap text-sm text-gray-700 font-medium">{s.FULLNAME}</td>
-                                                <td className="py-4 px-6 whitespace-nowrap text-sm text-gray-700 font-medium">{s.BRANCH_NAME}</td>
-                                                <td className="py-4 px-6 whitespace-nowrap text-sm text-gray-700 font-medium">{s.ACCESSCAM}</td>
-                                                <td className="py-4 px-6 whitespace-nowrap text-sm text-gray-700 font-medium">{s.SUPERIOR}</td>
-                                                <td className="py-4 px-6 whitespace-nowrap text-sm text-gray-700 font-medium">{s.STATUS}</td>
+												<td className="py-4 px-6 whitespace-nowrap text-sm text-gray-700 font-medium">{s.FULLNAME}</td>
+												<td className="py-4 px-6 whitespace-nowrap text-sm text-gray-700 font-medium">{s.BRANCH_NAME}</td>
+												<td className="py-4 px-6 whitespace-nowrap text-sm text-gray-700 font-medium">{s.ACCESSCAM}</td>
+												<td className="py-4 px-6 whitespace-nowrap text-sm text-gray-700 font-medium">{s.SUPERIOR}</td>
+												<td className="py-4 px-6 whitespace-nowrap text-sm text-gray-700 font-medium">{s.STATUS}</td>
 												<td className="py-4 px-6 whitespace-nowrap text-sm">
 													<button className="text-blue-600 hover:text-blue-900 hover:underline font-medium flex items-center gap-1">
 														<svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">

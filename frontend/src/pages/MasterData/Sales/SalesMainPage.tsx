@@ -1,7 +1,6 @@
 import React, { useEffect, useState, useCallback } from "react";
 import api from "../../../api/axiosInstance";
 import { useNavigate, useLocation } from "react-router-dom";
-
 interface SalesFormData {
 	SALES_NO: string;
 	NAME: string;
@@ -16,7 +15,7 @@ interface SalesFormData {
 	NICKNAME: string;
 	OCCUPATION: string;
 	ID_VALID_DT: string;
-	EXPIRE_OPTION: "0" | "1"; // 0 = No Expire, 1 = Certain Period
+	EXPIRE_OPTION: "0" | "1";
 	PAID: "0" | "1";
 	STATUS: "A" | "I";
 	SALES_TYPE: "PT" | "PR" | "";
@@ -28,22 +27,18 @@ interface SalesFormData {
 	UPDATE_BY: string;
 	LAST_UPDATE: string;
 }
-
 interface ComboOption {
 	VALUE: string;
 	DESC_VALUE: string;
 }
-
 interface Branch {
 	BRANCH_CD: string;
 	BRANCH_NAME: string;
 }
-
 interface CMO {
 	EMPLOYEE_ID: string;
 	FULLNAME: string;
 }
-
 interface ApiResponse<T> {
 	success: boolean;
 	message: string;
@@ -141,6 +136,7 @@ const SalesMainPage: React.FC = () => {
 			setCMOs([]);
 			return;
 		}
+		
 		try {
 			const response = await api.get<CMO[]>('/MasterData/api/cmos', {
 				params: { branch: branchCd },
@@ -158,7 +154,7 @@ const SalesMainPage: React.FC = () => {
 		setError(null);
 
 		try {
-			const response = await api.get<SalesFormData>('/MasterData/api/sales/${initialSalesNo}', {
+			const response = await api.get<SalesFormData>(`/MasterData/api/sales/${initialSalesNo}`, {
 				params: { type: initialSalType, broker: initialBroker },
 			});
 
@@ -263,7 +259,6 @@ const SalesMainPage: React.FC = () => {
 
 	const handleChange = useCallback((field: keyof SalesFormData, value: string) => {
 		setFormData(prev => ({ ...prev, [field]: value }));
-		// Clear errors when user types
 		if (error) setError(null);
 		if (success) setSuccess(null);
 	}, [error, success]);
@@ -279,22 +274,27 @@ const SalesMainPage: React.FC = () => {
 			setError("Name is required");
 			return false;
 		}
+
 		if (!formData.SALES_TYPE) {
 			setError("Sales Type is required");
 			return false;
 		}
+
 		if (formData.SALES_TYPE === "PT" && !formData.BROKER_TYPE) {
 			setError("Broker Type is required for PT Sales");
 			return false;
 		}
+
 		if (formData.EXPIRE_OPTION === "1" && !formData.ID_VALID_DT && isIndividual) {
 			setError("ID Valid Date is required when 'Certain Period' is selected");
 			return false;
 		}
+
 		if (formData.IDCARD && !/^\d+$/.test(formData.IDCARD) && isIndividual) {
 			setError("ID Card must contain only numbers");
 			return false;
 		}
+
 		return true;
 	}, [formData, isIndividual]);
 
@@ -349,7 +349,7 @@ const SalesMainPage: React.FC = () => {
 			};
 
 			const response = await api.put<ApiResponse>(
-				'/MasterData/api/sales/${formData.SALES_NO}',
+				`/MasterData/api/sales/${formData.SALES_NO}`,
 				payload
 			);
 
@@ -403,7 +403,6 @@ const SalesMainPage: React.FC = () => {
 	return (
 		<div className="min-h-screen bg-gradient-to-br from-gray-50 to-gray-100 p-4 md:p-6">
 			<div className="max-w-6xl mx-auto">
-				{/* Header */}
 				<div className="bg-white rounded-2xl shadow-lg p-6 mb-6">
 					<div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 mb-6">
 						<div>
@@ -424,8 +423,8 @@ const SalesMainPage: React.FC = () => {
 									#{formData.SALES_NO}
 								</span>
 								<span className={`px-3 py-1 rounded-full text-xs font-semibold ${formData.STATUS === "A"
-										? "bg-green-100 text-green-800"
-										: "bg-red-100 text-red-800"
+									? "bg-green-100 text-green-800"
+									: "bg-red-100 text-red-800"
 									}`}>
 									{formData.STATUS === "A" ? "Active" : "Inactive"}
 								</span>
@@ -433,7 +432,6 @@ const SalesMainPage: React.FC = () => {
 						)}
 					</div>
 
-					{/* Messages */}
 					{error && (
 						<div className="mb-4 p-4 bg-red-50 border border-red-200 rounded-lg text-red-700 flex items-start gap-3">
 							<svg className="w-5 h-5 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -452,9 +450,7 @@ const SalesMainPage: React.FC = () => {
 						</div>
 					)}
 
-					{/* Form */}
 					<form onSubmit={handleSubmit} className="space-y-6">
-						{/* Sales Information Section */}
 						<div className="bg-gray-50 rounded-xl p-4 border border-gray-200">
 							<h3 className="font-semibold text-gray-800 mb-4 flex items-center gap-2">
 								<svg className="w-5 h-5 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -464,7 +460,6 @@ const SalesMainPage: React.FC = () => {
 							</h3>
 
 							<div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-								{/* Sales Type */}
 								<div>
 									<label className="block text-sm font-medium text-gray-700 mb-1">
 										Sales Type <span className="text-red-500">*</span>
@@ -482,7 +477,6 @@ const SalesMainPage: React.FC = () => {
 									</select>
 								</div>
 
-								{/* Broker Type - Only for PT */}
 								{showBrokerFields && (
 									<div>
 										<label className="block text-sm font-medium text-gray-700 mb-1">
@@ -502,7 +496,6 @@ const SalesMainPage: React.FC = () => {
 									</div>
 								)}
 
-								{/* Status */}
 								<div>
 									<label className="block text-sm font-medium text-gray-700 mb-1">Status</label>
 									<select
@@ -516,7 +509,6 @@ const SalesMainPage: React.FC = () => {
 									</select>
 								</div>
 
-								{/* Branch */}
 								<div>
 									<label className="block text-sm font-medium text-gray-700 mb-1">Branch</label>
 									<select
@@ -534,7 +526,6 @@ const SalesMainPage: React.FC = () => {
 									</select>
 								</div>
 
-								{/* CMO Name */}
 								<div>
 									<label className="block text-sm font-medium text-gray-700 mb-1">CMO Name</label>
 									<select
@@ -552,7 +543,6 @@ const SalesMainPage: React.FC = () => {
 									</select>
 								</div>
 
-								{/* Sales No */}
 								<div>
 									<label className="block text-sm font-medium text-gray-700 mb-1">
 										{isBroker ? "Broker" : "Sales"} No.
@@ -565,7 +555,6 @@ const SalesMainPage: React.FC = () => {
 									/>
 								</div>
 
-								{/* Initial Sales No */}
 								<div>
 									<label className="block text-sm font-medium text-gray-700 mb-1">Initial Sales No.</label>
 									<input
@@ -578,7 +567,6 @@ const SalesMainPage: React.FC = () => {
 							</div>
 						</div>
 
-						{/* Personal/Broker Details Section */}
 						<div className="bg-gray-50 rounded-xl p-4 border border-gray-200">
 							<h3 className="font-semibold text-gray-800 mb-4 flex items-center gap-2">
 								<svg className="w-5 h-5 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -588,7 +576,6 @@ const SalesMainPage: React.FC = () => {
 							</h3>
 
 							<div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-								{/* Name */}
 								<div className="md:col-span-2">
 									<label className="block text-sm font-medium text-gray-700 mb-1">
 										Name <span className="text-red-500">*</span>
@@ -603,7 +590,6 @@ const SalesMainPage: React.FC = () => {
 									/>
 								</div>
 
-								{/* Gender - Only for Individual */}
 								{showIndividualFields && (
 									<div>
 										<label className="block text-sm font-medium text-gray-700 mb-1">Gender</label>
@@ -621,7 +607,6 @@ const SalesMainPage: React.FC = () => {
 									</div>
 								)}
 
-								{/* Nickname - Only for PT Broker */}
 								{showNickname && (
 									<div>
 										<label className="block text-sm font-medium text-gray-700 mb-1">Nick Name</label>
@@ -635,7 +620,6 @@ const SalesMainPage: React.FC = () => {
 									</div>
 								)}
 
-								{/* Occupation - Only for Individual */}
 								{showIndividualFields && (
 									<div>
 										<label className="block text-sm font-medium text-gray-700 mb-1">Occupation</label>
@@ -653,7 +637,6 @@ const SalesMainPage: React.FC = () => {
 									</div>
 								)}
 
-								{/* ID Card - Only for Individual */}
 								{showIndividualFields && (
 									<div>
 										<label className="block text-sm font-medium text-gray-700 mb-1">ID Card</label>
@@ -669,7 +652,6 @@ const SalesMainPage: React.FC = () => {
 									</div>
 								)}
 
-								{/* ID Valid Date - Only for Individual */}
 								{showIndividualFields && (
 									<div className="md:col-span-2">
 										<label className="block text-sm font-medium text-gray-700 mb-2">ID Valid Date</label>
@@ -716,7 +698,6 @@ const SalesMainPage: React.FC = () => {
 									</div>
 								)}
 
-								{/* Address */}
 								<div className="md:col-span-2">
 									<label className="block text-sm font-medium text-gray-700 mb-1">Address</label>
 									<textarea
@@ -728,7 +709,6 @@ const SalesMainPage: React.FC = () => {
 									/>
 								</div>
 
-								{/* City & Postcode */}
 								<div className="grid grid-cols-2 gap-4 md:col-span-2">
 									<div>
 										<label className="block text-sm font-medium text-gray-700 mb-1">City</label>
@@ -754,7 +734,6 @@ const SalesMainPage: React.FC = () => {
 									</div>
 								</div>
 
-								{/* Phone */}
 								<div>
 									<label className="block text-sm font-medium text-gray-700 mb-1">Phone</label>
 									<input
@@ -767,7 +746,6 @@ const SalesMainPage: React.FC = () => {
 									/>
 								</div>
 
-								{/* Fax - Only for PT Broker */}
 								{showFax && (
 									<div>
 										<label className="block text-sm font-medium text-gray-700 mb-1">Fax</label>
@@ -782,7 +760,6 @@ const SalesMainPage: React.FC = () => {
 									</div>
 								)}
 
-								{/* Email - Only for Individual */}
 								{showIndividualFields && (
 									<div className="md:col-span-2">
 										<label className="block text-sm font-medium text-gray-700 mb-1">Email Address</label>
@@ -797,7 +774,6 @@ const SalesMainPage: React.FC = () => {
 									</div>
 								)}
 
-								{/* Refund Payment */}
 								<div>
 									<label className="block text-sm font-medium text-gray-700 mb-2">Refund Payment</label>
 									<div className="flex gap-4">
@@ -830,7 +806,6 @@ const SalesMainPage: React.FC = () => {
 							</div>
 						</div>
 
-						{/* Audit Trail - Read Only */}
 						{showLastUpdate && (
 							<div className="bg-gray-50 rounded-xl p-4 border border-gray-200">
 								<h3 className="font-semibold text-gray-800 mb-4 flex items-center gap-2">
@@ -881,7 +856,6 @@ const SalesMainPage: React.FC = () => {
 							</div>
 						)}
 
-						{/* Action Buttons */}
 						<div className="flex flex-wrap gap-3 pt-4 border-t border-gray-200">
 							{isAddMode && (
 								<>
@@ -968,7 +942,6 @@ const SalesMainPage: React.FC = () => {
 					</form>
 				</div>
 
-				{/* Help Text */}
 				<div className="text-center text-sm text-gray-500 mt-4">
 					<p>
 						Fields marked with <span className="text-red-500">*</span> are required.

@@ -137,12 +137,12 @@ const EmployeeMemoPage: React.FC = () => {
 		const load = async () => {
 			try {
 				const [role, types, emps, brs, divs, posAll] = await Promise.all([
-					api.get('/EmployeeMemo/api/role'),
-					api.get('/EmployeeMemo/api/memo-types'),
-					api.get('/EmployeeMemo/api/employees'),
-					api.get('/EmployeeMemo/api/branches'),
-					api.get('/EmployeeMemo/api/divisions'),
-					api.get('/EmployeeMemo/api/positions-all'),
+					api.get('/Employee/api/role'),
+					api.get('/Employee/api/memo-types'),
+					api.get('/Employee/api/employees'),
+					api.get('/Employee/api/branches'),
+					api.get('/Employee/api/divisions'),
+					api.get('/Employee/api/positions-all'),
 				]);
 				setIsHr(role.data.is_hr);
 				setIsIt(role.data.is_it);
@@ -163,7 +163,7 @@ const EmployeeMemoPage: React.FC = () => {
 		setError(null);
 		setPage(1);
 		try {
-			const res = await api.get('/EmployeeMemo/api/search', {
+			const res = await api.get('/Employee/api/search', {
 				params: {
 					memo_from: dateToDDMMYYYY(memoFrom),
 					memo_to: dateToDDMMYYYY(memoTo),
@@ -187,7 +187,7 @@ const EmployeeMemoPage: React.FC = () => {
 
 	const loadPositionsByDiv = async (div_id: string) => {
 		if (!div_id) { setFormPositions([]); return; }
-		const res = await api.get('/EmployeeMemo/api/positions', { params: { div_id } });
+		const res = await api.get('/Employee/api/positions', { params: { div_id } });
 		setFormPositions(res.data);
 	};
 
@@ -201,7 +201,7 @@ const EmployeeMemoPage: React.FC = () => {
 		setField("employee_id_old", employee_id);
 		if (!employee_id) return;
 		try {
-			const res = await api.get(`/EmployeeMemo/api/employee/${employee_id}`);
+			const res = await api.get(`/Employee/api/employee/${employee_id}`);
 			const d = res.data;
 			setForm(f => ({
 				...f,
@@ -229,7 +229,7 @@ const EmployeeMemoPage: React.FC = () => {
 
 	const openEditModal = async (memo_id: string) => {
 		try {
-			const res = await api.get(`/EmployeeMemo/api/detail/${memo_id}`);
+			const res = await api.get(`/Employee/api/detail/${memo_id}`);
 			const d = res.data;
 			setFormPositions(d.positions);
 			setMemoDt(ddmmToDate(d.memo_date));
@@ -265,10 +265,12 @@ const EmployeeMemoPage: React.FC = () => {
 			alert("Please fill all required fields.");
 			return;
 		}
+		
 		if (memo_type === "NW" && !employee_fullname) {
 			alert("Please fill Employee Fullname.");
 			return;
 		}
+		
 		if ((memo_type === "RL" || memo_type === "RS") && !employee_id) {
 			alert("Please select an employee.");
 			return;
@@ -280,7 +282,7 @@ const EmployeeMemoPage: React.FC = () => {
 
 		setSaving(true);
 		try {
-			const res = await api.post('/EmployeeMemo/api/save', {
+			const res = await api.post('/Employee/api/save', {
 				memo_id: form.memo_id,
 				memo_type,
 				memo_dt: dateToDDMMYYYY(memoDt),
@@ -310,7 +312,7 @@ const EmployeeMemoPage: React.FC = () => {
 	const handleCancelMemo = async () => {
 		if (!cancelReason.trim()) { alert("Please enter a cancel reason."); return; }
 		try {
-			const res = await api.post('/EmployeeMemo/api/cancel', {
+			const res = await api.post('/Employee/api/cancel', {
 				memo_id: cancelId, cancel_reason: cancelReason,
 			});
 			alert(res.data.message);
@@ -325,7 +327,7 @@ const EmployeeMemoPage: React.FC = () => {
 	const handleEmailUpdate = async () => {
 		if (!emailVal.trim()) { alert("Please enter an email."); return; }
 		try {
-			const res = await api.post('/EmployeeMemo/api/email', {
+			const res = await api.post('/Employee/api/email', {
 				memo_id: emailId, email: emailVal,
 			});
 			alert(res.data.message);

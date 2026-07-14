@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useCallback } from "react";
-import axios from "axios";
+import api from "../../api/axiosInstance";
 import Pagination from "../../helpers/Pagination";
+import { DEFAULT_PAGE_LIMIT } from '../../constants/DefaultValue';
 
 interface MenuItem {
 	menu_id: string;
@@ -15,15 +16,13 @@ interface ParentOption {
 	menu_desc: string;
 }
 
-const API_URL = import.meta.env.VITE_API_URL;
-
 const MenuEntryPage: React.FC = () => {
 	const [menus, setMenus] = useState<MenuItem[]>([]);
 	const [total, setTotal] = useState(0);
 	const [page, setPage] = useState(1);
 	const [loading, setLoading] = useState(false);
 	const [error, setError] = useState<string | null>(null);
-	const limit = 25;
+	const limit = DEFAULT_PAGE_LIMIT;
 
 	const [akses, setAkses] = useState("");
 	const [parentOptions, setParentOptions] = useState<ParentOption[]>([]);
@@ -33,13 +32,14 @@ const MenuEntryPage: React.FC = () => {
 	const [formLoading, setFormLoading] = useState(false);
 	const [formMessage, setFormMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
 
+	const canEdit = String(akses).trim().toUpperCase() === "ADMIN";
+
 	const fetchMenus = useCallback(async () => {
 		setLoading(true);
 		setError(null);
 		try {
-			const res = await axios.get(`${API_URL}/SystemAdmin/api/menu`, {
+			const res = await api.get('/SystemAdmin/api/menu', {
 				params: { page, limit },
-				timeout: 10000,
 			});
 			setMenus(res.data.data);
 			setTotal(res.data.total);
@@ -53,21 +53,19 @@ const MenuEntryPage: React.FC = () => {
 
 	const fetchParentOptions = useCallback(async () => {
 		try {
-			const res = await axios.get(`${API_URL}/SystemAdmin/api/menu/parent-options`);
+			const res = await api.get('/SystemAdmin/api/menu/parent-options');
 			setParentOptions(res.data.data);
-		} catch {
-			// non-critical
-		}
+		} catch { }
 	}, []);
 
 	useEffect(() => { fetchMenus(); }, [fetchMenus]);
-	useEffect(() => { if (akses === "9") fetchParentOptions(); }, [akses, fetchParentOptions]);
+	useEffect(() => { if (canEdit) fetchParentOptions(); }, [canEdit, fetchParentOptions]);
 
 	const handleSave = async () => {
 		setFormLoading(true);
 		setFormMessage(null);
 		try {
-			await axios.post(`${API_URL}/SystemAdmin/api/menu`, {
+			await api.post('/SystemAdmin/api/menu', {
 				menu_parent: formParent,
 				menu_desc: formDesc,
 				url: formUrl,
@@ -93,7 +91,7 @@ const MenuEntryPage: React.FC = () => {
 	const handleDelete = async (menu_id: string, menu_desc: string) => {
 		if (!window.confirm(`Delete menu "${menu_desc}" (${menu_id})?\nAll child menus will also be deleted.`)) return;
 		try {
-			await axios.delete(`${API_URL}/SystemAdmin/api/menu/${encodeURIComponent(menu_id)}`);
+			await api.delete(`/SystemAdmin/api/menu/${encodeURIComponent(menu_id)}`);
 			fetchMenus();
 			fetchParentOptions();
 		} catch {
@@ -107,13 +105,11 @@ const MenuEntryPage: React.FC = () => {
 		<div className="min-h-screen bg-gradient-to-br from-gray-50 to-gray-100 p-4 md:p-6">
 			<div className="max-w-7xl mx-auto space-y-6">
 
-				{/* ── Entry Form (admin only) ── */}
-				{akses === "9" && (
+				{canEdit && (
 					<div className="bg-white rounded-2xl shadow-lg p-6">
 						<h2 className="text-xl font-bold text-gray-800 mb-4">Add Menu</h2>
 
 						<div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-							{/* Menu Parent */}
 							<div>
 								<label className="block text-sm font-medium text-gray-700 mb-1">Menu Parent</label>
 								<select
@@ -131,7 +127,6 @@ const MenuEntryPage: React.FC = () => {
 								</select>
 							</div>
 
-							{/* Menu Description */}
 							<div>
 								<label className="block text-sm font-medium text-gray-700 mb-1">Menu Description</label>
 								<input
@@ -143,7 +138,6 @@ const MenuEntryPage: React.FC = () => {
 								/>
 							</div>
 
-							{/* Menu URL */}
 							<div>
 								<label className="block text-sm font-medium text-gray-700 mb-1">Menu URL</label>
 								<input
@@ -174,7 +168,6 @@ const MenuEntryPage: React.FC = () => {
 					</div>
 				)}
 
-				{/* ── List ── */}
 				<div className="bg-white rounded-2xl shadow-lg p-6">
 					<div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 mb-6">
 						<div>
@@ -201,7 +194,7 @@ const MenuEntryPage: React.FC = () => {
 									<th className="py-4 px-6 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Description</th>
 									<th className="py-4 px-6 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Parent</th>
 									<th className="py-4 px-6 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">URL</th>
-									{akses === "9" && (
+									{canEdit && (
 										<th className="py-4 px-6 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">Action</th>
 									)}
 								</tr>
@@ -226,7 +219,6 @@ const MenuEntryPage: React.FC = () => {
 												className={`hover:bg-blue-50 transition-colors ${idx % 2 === 0 ? "bg-white" : "bg-gray-50"}`}
 											>
 												<td className="py-4 px-6 text-sm font-mono font-medium text-gray-900">
-													{/* indent child menus visually by depth */}
 													<span style={{ paddingLeft: `${(row.menu_id.split('.').length - 1) * 16}px` }}>
 														{row.menu_id}
 													</span>
@@ -234,7 +226,7 @@ const MenuEntryPage: React.FC = () => {
 												<td className="py-4 px-6 text-sm text-gray-800">{row.menu_desc}</td>
 												<td className="py-4 px-6 text-sm text-gray-500">{row.parent_label}</td>
 												<td className="py-4 px-6 text-sm text-gray-500 font-mono">{row.url}</td>
-												{akses === "9" && (
+												{canEdit && (
 													<td className="py-4 px-6 text-center">
 														<div className="flex justify-center gap-2">
 															<button
