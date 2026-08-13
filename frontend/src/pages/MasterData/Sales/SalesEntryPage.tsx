@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useCallback } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import api from "../../../api/axiosInstance";
+import { isImageFile } from "../../../constants/DefaultValue";
 
 type Mode = "Add" | "Edit" | "View";
 type Tab = "main" | "pic" | "bank" | "tax" | "doc" | "notes";
@@ -168,6 +169,73 @@ function Msg({ msg }: { msg?: { type: "success" | "error"; text: string } }) {
 	);
 }
 
+interface FilePreviewState {
+	open: boolean;
+	name: string;
+	url: string;
+}
+
+const FILE_PREVIEW_CLOSED: FilePreviewState = { open: false, name: "", url: "" };
+
+function FilePreviewModal({ state, onClose }: { state: FilePreviewState; onClose: () => void }) {
+	const [imgError, setImgError] = useState(false);
+
+	useEffect(() => { setImgError(false); }, [state.url]);
+
+	if (!state.open) return null;
+
+	const cleanName = state.name.split("?")[0];
+	const isImage = isImageFile(cleanName);
+	const isPdf = cleanName.split(".").pop()?.toLowerCase() === "pdf";
+
+	return (
+		<div
+			onClick={onClose}
+			className="fixed inset-0 z-[60] flex items-center justify-center bg-black/70 p-4"
+		>
+			<div
+				onClick={e => e.stopPropagation()}
+				className="flex h-[88vh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl"
+			>
+				<div className="flex items-center justify-between border-b border-gray-200 px-4 py-3">
+					<span className="truncate text-sm font-semibold text-gray-800">{state.name}</span>
+					<div className="flex items-center gap-3 flex-shrink-0">
+						<a href={state.url} target="_blank" rel="noreferrer" title="Open in new tab"
+							className="text-gray-400 hover:text-blue-600 transition-colors">
+							<svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+								<path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+									d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+							</svg>
+						</a>
+						<button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-lg leading-none">
+							✕
+						</button>
+					</div>
+				</div>
+
+				<div className="flex-1 overflow-hidden p-5">
+					{isImage && !imgError ? (
+						<img
+							src={state.url}
+							alt={state.name}
+							className="h-full w-full object-contain"
+							onError={() => setImgError(true)}
+						/>
+					) : isPdf ? (
+						<iframe title={state.name} src={state.url} className="h-full w-full border-0" />
+					) : (
+						<div className="flex h-full flex-col items-center justify-center text-center">
+							<p className="mb-3 text-sm text-gray-500">
+								{imgError ? "Failed to load image." : "Preview not available for this file type."}
+							</p>
+						</div>
+					)}
+				</div>
+			</div>
+		</div>
+	);
+}
+
 const SalesEntryPage: React.FC = () => {
 	const navigate = useNavigate();
 	const [searchParams] = useSearchParams();
@@ -196,6 +264,7 @@ const SalesEntryPage: React.FC = () => {
 	const [filesByType, setFilesByType] = useState<Record<string, SalesFile[]>>({});
 	const [lainnya, setLainnya] = useState("");
 	const [uploading, setUploading] = useState<string | null>(null);
+	const [filePreview, setFilePreview] = useState<FilePreviewState>(FILE_PREVIEW_CLOSED);
 
 	const [notes, setNotes] = useState("");
 	const [savingNotes, setSavingNotes] = useState(false);
@@ -486,12 +555,16 @@ const SalesEntryPage: React.FC = () => {
 		}
 	};
 
-	const handleFileDownload = async (f: SalesFile) => {
+	const handleFilePreview = async (f: SalesFile) => {
 		try {
 			const r = await api.get(f.download_url);
-			window.open(r.data.url, "_blank", "noopener,noreferrer");
+			setFilePreview({
+				open: true,
+				name: r.data.file_name || `${f.file_nm}${f.file_ext ? `.${f.file_ext}` : ""}`,
+				url: r.data.url,
+			});
 		} catch {
-			setMsg("doc", { type: "error", text: "Failed to get download link." });
+			setMsg("doc", { type: "error", text: "Failed to get preview link." });
 		}
 	};
 
@@ -518,6 +591,7 @@ const SalesEntryPage: React.FC = () => {
 
 	return (
 		<div className="min-h-screen bg-gradient-to-br from-gray-50 to-gray-100 p-4 md:p-6">
+			<FilePreviewModal state={filePreview} onClose={() => setFilePreview(FILE_PREVIEW_CLOSED)} />
 			<div className="mx-auto max-w-6xl">
 
 				<div className="mb-4 flex items-center justify-between">
@@ -649,7 +723,7 @@ const SalesEntryPage: React.FC = () => {
 												value={main.certain_per ? main.certain_per.split("-").reverse().join("-") : ""}
 												disabled={isView}
 												onChange={e => {
-													const v = e.target.value; // YYYY-MM-DD
+													const v = e.target.value;
 													if (v) {
 														const [y, m, d] = v.split("-");
 														onMain("certain_per", `${d}-${m}-${y}`);
@@ -1099,94 +1173,109 @@ const SalesEntryPage: React.FC = () => {
 								const isUploading = uploading === doc.key;
 
 								return (
-									<tr className="border-b border-gray-100 align-top">
-										<td className="py-3 pr-4 w-56 text-sm text-gray-700">
-											{doc.label}
-											{doc.hasLainnya && (
-												<input
-													className="mt-1 block w-full border border-gray-300 rounded px-2 py-1 text-xs
-                                     focus:ring-1 focus:ring-blue-500 disabled:bg-gray-100"
-													placeholder="Keterangan…"
-													value={lainnya}
-													disabled={isView}
-													onChange={e => setLainnya(e.target.value)}
-												/>
-											)}
-										</td>
-										<td className="py-3">
-											{!isView && (
-												<label className={`
-														inline-flex items-center gap-1.5 cursor-pointer rounded-lg border border-dashed
-														border-blue-300 bg-blue-50 hover:bg-blue-100 px-3 py-1.5 text-xs text-blue-700
-														transition-colors ${isUploading ? "opacity-60 cursor-not-allowed" : ""}
-														`}>
-													<svg className={`w-4 h-4 ${isUploading ? "animate-spin" : ""}`}
-														fill="none" viewBox="0 0 24 24" stroke="currentColor">
-														{isUploading
-															? <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-															: <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
-														}
-													</svg>
-													{isUploading ? "Uploading…" : "Choose File(s)"}
-													<input type="file" multiple className="hidden"
-														disabled={isUploading}
-														onChange={e => {
-															if (e.target.files?.length) {
-																handleFileUpload(doc.key, e.target.files);
-																e.target.value = "";
-															}
-														}} />
-												</label>
-											)}
+									<div className="rounded-xl border border-gray-200 bg-white p-4 transition-colors hover:border-gray-300">
+										<div className="flex flex-col gap-3 sm:flex-row sm:items-start">
+											<div className="flex-shrink-0 sm:w-56">
+												<p className="text-sm font-medium text-gray-700">{doc.label}</p>
+												{doc.hasLainnya && (
+													<input
+														className="mt-1.5 block w-full rounded border border-gray-300 px-2 py-1 text-xs
+															focus:ring-1 focus:ring-blue-500 disabled:bg-gray-100"
+														placeholder="Keterangan…"
+														value={lainnya}
+														disabled={isView}
+														onChange={e => setLainnya(e.target.value)}
+													/>
+												)}
+											</div>
 
-											{filesForType.length > 0 && (
-												<div className="mt-2 space-y-1">
-													{filesForType.map(f => (
-														<div key={f.id}
-															className="flex items-center gap-2 rounded-lg bg-gray-50 border border-gray-200 px-3 py-1.5">
-															<svg className="w-4 h-4 flex-shrink-0 text-gray-400" fill="none"
-																viewBox="0 0 24 24" stroke="currentColor">
-																<path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-																	d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-															</svg>
-															<span className="text-xs text-gray-700 flex-1 truncate">
-																{f.file_nm}{f.file_ext ? `.${f.file_ext}` : ""}
-															</span>
-															{f.created_date && (
-																<span className="text-xs text-gray-400 whitespace-nowrap">{f.created_date}</span>
-															)}
-															<button onClick={() => handleFileDownload(f)}
-																className="text-xs text-blue-600 hover:text-blue-800 font-medium whitespace-nowrap">
-																Download
-															</button>
-															{!isView && (
-																<button
-																	onClick={() => handleFileDelete(f.id)}
-																	className="text-xs text-red-500 hover:text-red-700 font-medium whitespace-nowrap">
-																	Delete
-																</button>
-															)}
-														</div>
-													))}
-												</div>
-											)}
-										</td>
-									</tr>
+											<div className="min-w-0 flex-1">
+												{!isView && (
+													<label className={`
+															inline-flex items-center gap-1.5 cursor-pointer rounded-lg border border-dashed
+															border-blue-300 bg-blue-50 hover:bg-blue-100 px-3 py-1.5 text-xs text-blue-700
+															transition-colors ${isUploading ? "opacity-60 cursor-not-allowed" : ""}
+															`}>
+														<svg className={`w-4 h-4 ${isUploading ? "animate-spin" : ""}`}
+															fill="none" viewBox="0 0 24 24" stroke="currentColor">
+															{isUploading
+																? <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+																: <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+															}
+														</svg>
+														{isUploading ? "Uploading…" : "Choose File(s)"}
+														<input type="file" multiple className="hidden"
+															disabled={isUploading}
+															onChange={e => {
+																if (e.target.files?.length) {
+																	handleFileUpload(doc.key, e.target.files);
+																	e.target.value = "";
+																}
+															}} />
+													</label>
+												)}
+
+												{filesForType.length > 0 ? (
+													<div className={`flex flex-wrap gap-2 ${!isView ? "mt-2.5" : ""}`}>
+														{filesForType.map(f => {
+															const fullName = `${f.file_nm}${f.file_ext ? `.${f.file_ext}` : ""}`;
+															return (
+																<div key={f.id}
+																	className="flex items-center gap-2 rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5">
+																	<button
+																		onClick={() => handleFilePreview(f)}
+																		className="inline-flex items-center gap-1.5 rounded-md border border-blue-300
+																			bg-blue-50 px-2.5 py-1 text-xs font-medium text-blue-700 transition-colors
+																			hover:border-blue-400 hover:bg-blue-100"
+																	>
+																		<svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+																			<path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+																				d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+																			<path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+																				d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+																		</svg>
+																		View
+																	</button>
+																	<span className="max-w-[180px] truncate text-xs text-gray-700" title={fullName}>
+																		{fullName}
+																	</span>
+																	{f.created_date && (
+																		<span className="whitespace-nowrap text-[11px] text-gray-400">{f.created_date}</span>
+																	)}
+																	{!isView && (
+																		<button
+																			onClick={() => handleFileDelete(f.id)}
+																			title="Delete"
+																			className="text-gray-300 transition-colors hover:text-red-500"
+																		>
+																			<svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+																				<path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+																			</svg>
+																		</button>
+																	)}
+																</div>
+															);
+														})}
+													</div>
+												) : isView ? (
+													<span className="text-xs italic text-gray-400">No file uploaded</span>
+												) : null}
+											</div>
+										</div>
+									</div>
 								);
 							};
 
 							return (
 								<div>
 									<h2 className="text-base font-semibold text-gray-700 mb-4 pb-2 border-b">{title}</h2>
-									<table className="w-full">
-										<tbody>
-											{docs.map(doc => (
-												<React.Fragment key={doc.key}>
-													<FileRow doc={doc} />
-												</React.Fragment>
-											))}
-										</tbody>
-									</table>
+									<div className="space-y-3">
+										{docs.map(doc => (
+											<React.Fragment key={doc.key}>
+												<FileRow doc={doc} />
+											</React.Fragment>
+										))}
+									</div>
 									{showNpwpNote && (
 										<p className="mt-4 text-xs italic text-gray-500">
 											*) Khusus jika terdapat perubahan Status NPWP atau Perubahan Nomor NPWP

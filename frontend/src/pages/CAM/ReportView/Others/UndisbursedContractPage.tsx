@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo } from "react";
 import * as XLSX from "xlsx";
 import api from "../../../../api/axiosInstance";
 import { DEFAULT_PAGE_LIMIT } from "../../../../constants/DefaultValue";
+import Pagination from "../../../../helpers/Pagination";
 
 interface Branch {
 	branch_cd: string;
@@ -42,13 +43,6 @@ function fmtDate(dateStr: string | null): string {
 	if (!dateStr) return "";
 	const d = new Date(dateStr);
 	return d.toLocaleDateString("id-ID", { day: "2-digit", month: "long", year: "numeric" });
-}
-
-function getPageNumbers(current: number, total: number): (number | "…")[] {
-	if (total <= 7) return Array.from({ length: total }, (_, i) => i + 1);
-	if (current <= 4) return [1, 2, 3, 4, 5, "…", total];
-	if (current >= total - 3) return [1, "…", total - 4, total - 3, total - 2, total - 1, total];
-	return [1, "…", current - 1, current, current + 1, "…", total];
 }
 
 function exportExcel(data: UndisburseRow[], branchName: string): void {
@@ -147,11 +141,6 @@ const UndisburseContractPage: React.FC = () => {
 		const start = (currentPage - 1) * ROWS_PER_PAGE;
 		return data.slice(start, start + ROWS_PER_PAGE);
 	}, [data, currentPage]);
-
-	const pageNumbers = useMemo(
-		() => getPageNumbers(currentPage, totalPages),
-		[currentPage, totalPages],
-	);
 
 	return (
 		<div className="min-h-screen bg-gray-50 p-4 md:p-6">
@@ -305,44 +294,14 @@ const UndisburseContractPage: React.FC = () => {
 							</div>
 
 							{totalPages > 1 && (
-								<div className="flex items-center justify-center gap-1.5 py-3 border-t border-gray-200 flex-wrap">
-									<button
-										onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
-										disabled={currentPage === 1}
-										className="px-3 py-1 text-sm rounded border border-gray-300
-											disabled:opacity-40 disabled:cursor-not-allowed hover:bg-gray-50 transition-colors"
-									>
-										Previous
-									</button>
-
-									{pageNumbers.map((p, i) =>
-										p === "…" ? (
-											<span key={`ellipsis-${i}`} className="px-2 py-1 text-sm text-gray-400">
-												…
-											</span>
-										) : (
-											<button
-												key={p}
-												onClick={() => setCurrentPage(p as number)}
-												className={`px-3 py-1 text-sm rounded border transition-colors ${currentPage === p
-													? "bg-blue-600 text-white border-blue-600"
-													: "border-gray-300 hover:bg-gray-50"
-													}`}
-											>
-												{p}
-											</button>
-										),
-									)}
-
-									<button
-										onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
-										disabled={currentPage === totalPages}
-										className="px-3 py-1 text-sm rounded border border-gray-300
-											disabled:opacity-40 disabled:cursor-not-allowed hover:bg-gray-50 transition-colors"
-									>
-										Next
-									</button>
-								</div>
+								<Pagination
+									page={currentPage}
+									totalPages={totalPages}
+									onPageChange={setCurrentPage}
+									totalItems={data.length}
+									itemsPerPage={ROWS_PER_PAGE}
+									className="border-t border-gray-200"
+								/>
 							)}
 						</div>
 					</>

@@ -8,11 +8,6 @@ export interface PrecheckingViewModalProps {
 	onClose: () => void;
 }
 
-/**
- * Modal wrapper around ViewPrecheckingPage — same pattern as the CAM detail
- * modal: wide panel, no close-on-backdrop-click, scroll lock while open.
- * The only way to dismiss it is the "Close" button inside the page header.
- */
 const PrecheckingViewModal: React.FC<PrecheckingViewModalProps> = ({
 	open,
 	apless,
@@ -32,12 +27,6 @@ const PrecheckingViewModal: React.FC<PrecheckingViewModalProps> = ({
 
 	return (
 		<div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-			{/*
-				No onClick on this backdrop — on purpose. Clicking outside the
-				panel must NOT dismiss this modal. The only way out is the
-				"Close" button inside ViewPrecheckingPage's header, wired to
-				onClose below.
-			*/}
 			<div
 				role="dialog"
 				aria-modal="true"

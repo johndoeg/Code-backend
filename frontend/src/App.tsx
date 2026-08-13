@@ -1,8 +1,8 @@
 import "react-datepicker/dist/react-datepicker.css";
-import { lazy, Suspense } from "react";
-import { BrowserRouter, Navigate, Outlet, Route, Routes, useLocation } from "react-router-dom";
+import { lazy, Suspense, useMemo, useState } from "react";
+import { MemoryRouter, Navigate, Outlet, Route, Routes, useLocation } from "react-router-dom";
 
-import { AuthProvider } from "./contexts/AuthContext";
+import { AuthProvider, useAuth } from "./contexts/AuthContext";
 import { CamProvider } from "./contexts/CamContext";
 import CAMTabs from "./components/CAMTabs";
 import Dashboard from "./pages/Dashboard";
@@ -14,41 +14,54 @@ import Sidebar from "./components/Sidebar";
 import MaintenancePage from "./components/MaintenancePage";
 import MaintenanceGate from "./components/MaintenanceGate";
 
-function makeRoute(path, importFn, props = {}) {
+import type { ComponentType, ReactElement, LazyExoticComponent } from "react";
+
+type RouteImportFn = () => Promise<{ default: ComponentType<any> }>;
+
+interface RouteDef {
+	path: string;
+	importFn: RouteImportFn;
+	element: ReactElement;
+	Component: LazyExoticComponent<ComponentType<any>>;
+}
+
+function makeRoute(path: string, importFn: RouteImportFn, props: Record<string, any> = {}): RouteDef {
 	const Component = lazy(importFn);
 	return { path, importFn, element: <Component {...props} />, Component };
 }
 
 const CAM_CORE_ROUTES = [
-	makeRoute("/index", () => import("./pages/CAM/Add CAM/AddCAMCustomerForm")),
-	makeRoute("/index-guarantor", () => import("./pages/CAM/Add CAM/AddCAMGuarantorForm")),
+	makeRoute("/index", () => import("./pages/CAM/AddCAM/AddCAMCustomerForm")),
+	makeRoute("/index-guarantor", () => import("./pages/CAM/AddCAM/AddCAMGuarantorForm")),
 	makeRoute("/CAMForm", () => import("./pages/CAM/CAMForm"), {
 		apless: "", precheckingId: "", lesseeTp: "PR",
 	}),
-	makeRoute("/cam-onhand", () => import("./pages/CAM/Onprocess/View/CAMOnhandPage")),
-	makeRoute("/cam-inprogress", () => import("./pages/CAM/Onprocess/View/CAMInProgressPage")),
-	makeRoute("/cam-approved", () => import("./pages/CAM/Onprocess/View/CAMApprovedPage")),
+	makeRoute("/cam-onhand", () => import("./pages/CAM/Onprocess/Onhand/CAMOnhandPage")),
+	makeRoute("/cam-inprogress", () => import("./pages/CAM/Onprocess/Inprogress/CAMInProgressPage")),
+	makeRoute("/cam-approved", () => import("./pages/CAM/Onprocess/Approved/CAMApprovedPage")),
 ];
 
 const CAM_PRECHECKING_ROUTES = [
-	makeRoute("/PrecheckingIndividuPage", () => import("./pages/CAM/Prechecking/PrecheckingIndividuPage")),
-	makeRoute("/PrecheckingCorporatePage", () => import("./pages/CAM/Prechecking/PrecheckingCorporatePage")),
-	makeRoute("/PrecheckingGuarantorIndividuPage", () => import("./pages/CAM/Prechecking/PrecheckingGuarantorIndividuPage")),
-	makeRoute("/PrecheckingGuarantorCorporatePage", () => import("./pages/CAM/Prechecking/PrecheckingGuarantorCorporatePage")),
+	makeRoute("/PrecheckingIndividuPage", () => import("./pages/CAM/Prechecking/Individu/PrecheckingIndividuPage")),
+	makeRoute("/PrecheckingCorporatePage", () => import("./pages/CAM/Prechecking/Corporate/PrecheckingCorporatePage")),
+	makeRoute("/PrecheckingGuarantorIndividuPage", () => import("./pages/CAM/Prechecking/Individu/PrecheckingGuarantorIndividuPage")),
+	makeRoute("/PrecheckingGuarantorCorporatePage", () => import("./pages/CAM/Prechecking/Corporate/PrecheckingGuarantorCorporatePage")),
 	makeRoute("/cam-request-onhand", () => import("./pages/CAM/Prechecking/PrecheckingOnhandPage")),
 	makeRoute("/cam-request-inprogress", () => import("./pages/CAM/Prechecking/PrecheckingInProgressPage")),
 	makeRoute("/cam-request-approved", () => import("./pages/CAM/Prechecking/PrecheckingApprovedPage")),
 	makeRoute("/cam-request-rejected", () => import("./pages/CAM/Prechecking/PrecheckingRejectedPage")),
 	makeRoute("/view-prechecking", () => import("./pages/CAM/Prechecking/ViewPrecheckingPage")),
 	makeRoute("/cam-request-approval", () => import("./pages/CAM/Prechecking/ApprovalPrecheckingPage")),
+	makeRoute("/cam-request-edit-pr", () => import("./pages/CAM/Prechecking/Individu/CamRequestEditPRPage")),
+	makeRoute("/cam-request-onhand-detail", () => import("./pages/CAM/Prechecking/Approval/CamRequestOnhandDetailPage")),
 ];
 
 const CAM_REPORT_ROUTES = [
-	makeRoute("/rpt-in-progress-cam", () => import("./pages/CAM/ReportView/ListApprovedCAM/ListInprogressCAMPage")),
 	makeRoute("/report-nett-booking-appi", () => import("./pages/CAM/ReportView/Others/NettBookingAPPIPage")),
 	makeRoute("/undisbursecontract", () => import("./pages/CAM/ReportView/Others/UndisbursedContractPage")),
 	makeRoute("/report-list-cont-del-by-system", () => import("./pages/CAM/ReportView/Others/PendingContractWillBeDeletedBySystemPage")),
 	makeRoute("/report-his-bpkb-submit", () => import("./pages/CAM/ReportView/Others/HistoryBPKBSubmissionPage")),
+	makeRoute("/report-pelunasan-mobil", () => import("./pages/CAM/ReportView/Others/LaporanPelunasanMobilPage")),
 	makeRoute("/report-summary-cam-bycmo", () => import("./pages/CAM/ReportView/Others/MonthlySummaryCAMApprovedPage")),
 	makeRoute("/report-f6pd", () => import("./pages/CAM/ReportView/Others/F6PDReportPage")),
 	makeRoute("/rpt-top-customer", () => import("./pages/CAM/ReportView/Others/Top20CustomerPage")),
@@ -56,6 +69,34 @@ const CAM_REPORT_ROUTES = [
 	makeRoute("/customer-outstanding", () => import("./pages/CAM/ReportView/Others/CustomerOustandingPage")),
 	makeRoute("/summary-rundownosp", () => import("./pages/CAM/ReportView/Others/SummaryRunDownOSPPage")),
 	makeRoute("/history-mrp", () => import("./pages/CAM/ReportView/Others/HistoryMRPPage")),
+
+	makeRoute("/cam-ma", () => import("./pages/CAM/EditCAM/ByMA/CamEditContainer")),
+	makeRoute("/edit-insurance", () => import("./pages/CAM/EditCAM/Insurance/EditInsurancePage")),
+
+	makeRoute("/rpt-in-progress-cam", () => import("./pages/CAM/ReportView/ApprovedCAM/ListInprogressCAMPage")),
+	makeRoute("/rpt-cam-by-cust-group", () => import("./pages/CAM/ReportView/ApprovedCAM/ListCAMByCustomerGroupPage")),
+	makeRoute("/rpt-cam-by-app-date", () => import("./pages/CAM/ReportView/ApprovedCAM/ListCAMByApprovalDatePage")),
+	makeRoute("/rpt-cam-by-app", () => import("./pages/CAM/ReportView/ApprovedCAM/ListCAMByApproverPage")),
+	makeRoute("/rpt-approved-cam-by-car-cond", () => import("./pages/CAM/ReportView/ApprovedCAM/ListCAMByCarConditionPage")),
+	makeRoute("/rpt-cam-by-dealer", () => import("./pages/CAM/ReportView/ApprovedCAM/ListApprovedByDealerPerDisbursementDatePage")),
+	makeRoute("/rpt-rjt-cam", () => import("./pages/CAM/ReportView/ApprovedCAM/ListRejectedCAMPage")),
+	makeRoute("/rpt-sum-cam-by-month", () => import("./pages/CAM/ReportView/ApprovedCAM/SummaryApprovedCAMPage")),
+	makeRoute("/rpt-all-cam-data", () => import("./pages/CAM/ReportView/ApprovedCAM/AllCAMDataPage")),
+	makeRoute("/rpt-all-insurance-data", () => import("./pages/CAM/ReportView/ApprovedCAM/AllInsuranceDataPage")),
+	makeRoute("/rpt-cam-by-disb-date", () => import("./pages/CAM/ReportView/ApprovedCAM/ListCAMByDisbursementDatePage")),
+
+	makeRoute("/report-cmo-daily-productivity", () => import("./pages/CAM/ReportView/CMOReport/CmoDailyProductivityPage")),
+	makeRoute("/report-cmo-daily-productivity-by-branch", () => import("./pages/CAM/ReportView/CMOReport/CmoDailyProductivityByBranchPage")),
+	makeRoute("/report-cmo-daily-productivity-by-cmo", () => import("./pages/CAM/ReportView/CMOReport/CmoDailyProductivityByCmoPage")),
+
+	makeRoute("/hiscomm-incentivepayment-company", () => import("./pages/CAM/ReportView/Commission/Company/HistoryCommissionReportPage")),
+	makeRoute("/detcomm-incentivepayment-company", () => import("./pages/CAM/ReportView/Commission/Company/DetailCommissionReportPage")),
+
+	makeRoute("/hiscomm-incentivepayment-individu", () => import("./pages/CAM/ReportView/Commission/Individu/HistoryCommissionReportPage")),
+	makeRoute("/detcomm-incentivepayment-individu", () => import("./pages/CAM/ReportView/Commission/Individu/DetailCommissionReportPage")),
+
+	makeRoute("/report-monthly", () => import("./pages/CAM/ReportView/Incentive/HistoryIncentive3rdPartyReportPage")),
+	makeRoute("/detail-report-monthly", () => import("./pages/CAM/ReportView/Incentive/DetailIncentive3rdPartyReportPage")),
 ];
 
 const MASTER_DATA_ROUTES = [
@@ -81,7 +122,11 @@ const MASTER_DATA_ROUTES = [
 	makeRoute("/rpt-list-insurance", () => import("./pages/MasterData/Insurance/ListOfInsuranceReportPage")),
 	makeRoute("/wlist-entry", () => import("./pages/MasterData/Watchlist/WatchListEntryPage")),
 	makeRoute("/wlist-edit", () => import("./pages/MasterData/Watchlist/WatchListEditPage")),
+	makeRoute("/wlist-entry-by-corsec", () => import("./pages/MasterData/Watchlist/WatchListEntryByCorsec")),
+	makeRoute("/rpt-wlist", () => import("./pages/MasterData/Watchlist/WatchListReportPage")),
 	makeRoute("/blacklist-entry", () => import("./pages/MasterData/Blacklist/BlackListEntryPage")),
+	makeRoute("/rpt-blacklist", () => import("./pages/MasterData/Blacklist/BlackListReportPage")),
+	makeRoute("/blacklist-pel-ttot", () => import("./pages/MasterData/Blacklist/TtotReportPage")),
 	makeRoute("/master-data-threshold-level", () => import("./pages/MasterData/RatioAndDeviation/MasterDataThresholdLevelPage")),
 	makeRoute("/master-data-ratio", () => import("./pages/MasterData/RatioAndDeviation/MasterDataRatioPage")),
 	makeRoute("/master-data-ratio-view-edit", () => import("./pages/MasterData/RatioAndDeviation/MasterDataRatioViewEditPage")),
@@ -138,18 +183,27 @@ const ALL_PROTECTED_ROUTES = [
 	...ADMIN_ROUTES,
 ];
 
+const PROTECTED_ROUTE_ELEMENTS = ALL_PROTECTED_ROUTES.map(({ path, element }) => (
+	<Route key={path} path={path} element={element} />
+));
+
 const prefetchedPaths = new Set();
 const routePrefetchMap = new Map(
 	ALL_PROTECTED_ROUTES.map(({ path, importFn }) => [path, importFn]),
 );
+const prefetchPromises = new Map();
 
-export function prefetchRoute(path) {
-	if (prefetchedPaths.has(path)) return;
+export function prefetchRoute(path: string) {
+	if (prefetchedPaths.has(path)) return prefetchPromises.get(path);
 	const importFn = routePrefetchMap.get(path);
+	if (!importFn) return undefined;
 
-	if (!importFn) return;
 	prefetchedPaths.add(path);
-	importFn().catch(() => { });
+	const promise = importFn().catch(() => {
+		prefetchedPaths.delete(path);
+	});
+	prefetchPromises.set(path, promise);
+	return promise;
 }
 
 function PageLoader() {
@@ -163,11 +217,56 @@ function PageLoader() {
 	);
 }
 
+function TopHeader() {
+	const { user } = useAuth();
+	const dateOverride = new URLSearchParams(window.location.search).get("date");
+
+	const today = useMemo(
+		() =>
+			dateOverride ||
+			new Date().toLocaleDateString("id-ID", {
+				timeZone: "Asia/Jakarta",
+				weekday: "long",
+				year: "numeric",
+				month: "long",
+				day: "numeric",
+			}),
+		[dateOverride],
+	);
+
+	return (
+		<header className="flex justify-between items-center bg-white shadow p-4 border-b shrink-0">
+			<div className="text-gray-700 font-medium">
+				{user ? (
+					<>
+						Hello,{" "}
+						<span className="font-semibold text-blue-800">{user.username}</span>
+						{" — "}
+						<span className="text-blue-700">{user.branch_name}</span>
+						{" — "}
+						<span className="text-gray-500">{today}</span>
+					</>
+				) : (
+					"Loading..."
+				)}
+			</div>
+		</header>
+	);
+}
+
 function AppLayout() {
+	const [sidebarOpen, setSidebarOpen] = useState(true);
+	const [sidebarMini, setSidebarMini] = useState(false);
+
 	return (
 		<div className="flex h-screen bg-gray-100">
-			<Sidebar />
+			<Sidebar
+				open={sidebarOpen}
+				mini={sidebarMini}
+				onClose={() => setSidebarOpen(false)}
+			/>
 			<div className="flex-1 flex flex-col overflow-y-auto">
+				<TopHeader />
 				<Suspense fallback={<PageLoader />}>
 					<Outlet />
 				</Suspense>
@@ -195,9 +294,8 @@ function CAMLayout() {
 	);
 }
 
-
-const AddCAMModal = lazy(() => import("./pages/CAM/Add CAM/AddCAMModal"));
-const AddCAMGuarantorModal = lazy(() => import("./pages/CAM/Add CAM/AddCAMGuarantorModal"));
+const AddCAMModal = lazy(() => import("./pages/CAM/AddCAM/AddCAMModal"));
+const AddCAMGuarantorModal = lazy(() => import("./pages/CAM/AddCAM/AddCAMGuarantorModal"));
 
 function AppRoutes() {
 	const location = useLocation();
@@ -226,9 +324,7 @@ function AppRoutes() {
 
 				<Route element={<ProtectedRoute><AppLayout /></ProtectedRoute>}>
 					<Route path="/" element={<Dashboard />} />
-					{ALL_PROTECTED_ROUTES.map(({ path, element }) => (
-						<Route key={path} path={path} element={element} />
-					))}
+					{PROTECTED_ROUTE_ELEMENTS}
 					<Route path="/cam" element={<CAMLayout />}>
 						<Route index element={<Navigate to="customer/detail" replace />} />
 						<Route path="*" element={<Navigate to="customer/detail" replace />} />
@@ -269,9 +365,9 @@ function App() {
 	return (
 		<MaintenanceGate>
 			<AuthProvider>
-				<BrowserRouter>
+				<MemoryRouter>
 					<AppRoutes />
-				</BrowserRouter>
+				</MemoryRouter>
 			</AuthProvider>
 		</MaintenanceGate>
 	);

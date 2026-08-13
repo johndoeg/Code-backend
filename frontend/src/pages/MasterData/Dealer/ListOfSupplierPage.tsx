@@ -20,6 +20,13 @@ interface SupplierRecord {
 	status: string;
 }
 
+const Spinner: React.FC = () => (
+	<svg className="h-4 w-4 animate-spin" fill="none" viewBox="0 0 24 24">
+		<circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+		<path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+	</svg>
+);
+
 const ListOfSalesPage: React.FC = () => {
 	const [branches, setBranches] = useState<Branch[]>([]);
 	const [selectedBranch, setSelectedBranch] = useState<string>('');
@@ -28,6 +35,9 @@ const ListOfSalesPage: React.FC = () => {
 	const [error, setError] = useState<string | null>(null);
 	const [page, setPage] = useState(1);
 	const [total, setTotal] = useState(0);
+	const [hasSearched, setHasSearched] = useState(false);
+	const [printing, setPrinting] = useState(false);
+	const [exporting, setExporting] = useState(false);
 	const limit = DEFAULT_PAGE_LIMIT;
 
 	useEffect(() => {
@@ -43,8 +53,11 @@ const ListOfSalesPage: React.FC = () => {
 		fetchBranches();
 	}, []);
 
-	const fetchSupplierRecords = useCallback(async () => {
-		if (!selectedBranch) {
+	const fetchSupplierRecords = useCallback(async (branchOverride?: string, pageOverride?: number) => {
+		const branchToUse = branchOverride ?? selectedBranch;
+		const pageToUse = pageOverride ?? page;
+
+		if (!branchToUse) {
 			setRecords([]);
 			setTotal(0);
 			return;
@@ -55,8 +68,8 @@ const ListOfSalesPage: React.FC = () => {
 		try {
 			const response = await api.get('/MasterData/api/dealer-list', {
 				params: {
-					branch_cd: selectedBranch,
-					page,
+					branch_cd: branchToUse,
+					page: pageToUse,
 					limit
 				},
 			});
@@ -75,36 +88,83 @@ const ListOfSalesPage: React.FC = () => {
 	}, [selectedBranch, page, limit]);
 
 	useEffect(() => {
+		if (!hasSearched) return;
 		fetchSupplierRecords();
-	}, [fetchSupplierRecords]);
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [page]);
 
 	const handlePreview = () => {
 		if (!selectedBranch.trim()) {
 			alert('Please select a branch');
 			return;
 		}
-		setPage(1);
-		fetchSupplierRecords();
+		setHasSearched(true);
+		if (page === 1) {
+			fetchSupplierRecords(selectedBranch, 1);
+		} else {
+			setPage(1);
+		}
 	};
 
 	const handleKeyPress = (e: React.KeyboardEvent) => {
 		if (e.key === 'Enter') handlePreview();
 	};
 
-	const handlePrint = () => {
+	const handlePrint = async () => {
 		if (!selectedBranch.trim()) {
 			alert('Please select a branch');
 			return;
 		}
-		window.open(`/MasterData/api/sales-list/print?branch_cd=${selectedBranch}`, '_blank');
+
+		const printWindow = window.open('', '_blank');
+		setPrinting(true);
+		try {
+			const res = await api.get('/MasterData/api/sales-list/print', {
+				params: { branch_cd: selectedBranch },
+				responseType: 'text',
+			});
+			if (printWindow) {
+				printWindow.document.open();
+				printWindow.document.write(res.data as unknown as string);
+				printWindow.document.close();
+			}
+		} catch (err) {
+			console.error('Failed to load print data:', err);
+			alert('Failed to load print data. Please try again.');
+			printWindow?.close();
+		} finally {
+			setPrinting(false);
+		}
 	};
 
-	const handleExportExcel = () => {
+	const handleExportExcel = async () => {
 		if (!selectedBranch.trim()) {
 			alert('Please select a branch');
 			return;
 		}
-		window.open(`/MasterData/api/sales-list/excel?branch_cd=${selectedBranch}`, '_blank');
+		setExporting(true);
+		try {
+			const res = await api.get('/MasterData/api/sales-list/excel', {
+				params: { branch_cd: selectedBranch },
+				responseType: 'blob',
+			});
+			const blob = new Blob([res.data], {
+				type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+			});
+			const url = window.URL.createObjectURL(blob);
+			const link = document.createElement('a');
+			link.href = url;
+			link.download = 'List_of_Dealer.xlsx';
+			document.body.appendChild(link);
+			link.click();
+			document.body.removeChild(link);
+			window.URL.revokeObjectURL(url);
+		} catch (err) {
+			console.error('Failed to export dealer list:', err);
+			alert('Failed to export. Please try again.');
+		} finally {
+			setExporting(false);
+		}
 	};
 
 	const totalPages = Math.ceil(total / limit);
@@ -117,7 +177,7 @@ const ListOfSalesPage: React.FC = () => {
 						<h1 className="text-2xl md:text-3xl font-bold text-gray-800">List of Dealer</h1>
 					</div>
 
-					<div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+					<div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6 items-end">
 						<div>
 							<label htmlFor="branch_cd" className="block text-sm font-medium text-gray-700 mb-1">
 								Branch
@@ -126,6 +186,7 @@ const ListOfSalesPage: React.FC = () => {
 								id="branch_cd"
 								value={selectedBranch}
 								onChange={(e) => setSelectedBranch(e.target.value)}
+								onKeyDown={handleKeyPress}
 								className="w-full px-4 py-3 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
 							>
 								<option value="">Select</option>
@@ -137,25 +198,36 @@ const ListOfSalesPage: React.FC = () => {
 							</select>
 						</div>
 
-						<div className="flex flex-wrap gap-3">
-							<button
-								onClick={handlePreview}
-								className="bg-gradient-to-r from-blue-600 to-indigo-700 hover:from-blue-700 hover:to-indigo-800 text-white px-6 py-3 rounded-lg font-medium shadow-md hover:shadow-lg transition-all"
-							>
-								Preview
-							</button>
-							<button
-								onClick={handlePrint}
-								className="bg-gradient-to-r from-gray-600 to-gray-700 hover:from-gray-700 hover:to-gray-800 text-white px-6 py-3 rounded-lg font-medium shadow-md hover:shadow-lg transition-all"
-							>
-								Print
-							</button>
-							<button
-								onClick={handleExportExcel}
-								className="bg-gradient-to-r from-green-600 to-emerald-700 hover:from-green-700 hover:to-emerald-800 text-white px-6 py-3 rounded-lg font-medium shadow-md hover:shadow-lg transition-all"
-							>
-								Export to Excel
-							</button>
+						<div>
+							<label className="block text-sm font-medium mb-1 invisible" aria-hidden="true">
+								Actions
+							</label>
+							<div className="flex flex-wrap gap-3">
+								<button
+									onClick={handlePreview}
+									disabled={loading}
+									className="inline-flex items-center gap-2 bg-gradient-to-r from-blue-600 to-indigo-700 hover:from-blue-700 hover:to-indigo-800 text-white px-6 py-3 rounded-lg font-medium shadow-md hover:shadow-lg transition-all disabled:opacity-60 disabled:cursor-not-allowed"
+								>
+									{loading && <Spinner />}
+									{loading ? 'Loading…' : 'Preview'}
+								</button>
+								<button
+									onClick={handlePrint}
+									disabled={printing}
+									className="inline-flex items-center gap-2 bg-gradient-to-r from-gray-600 to-gray-700 hover:from-gray-700 hover:to-gray-800 text-white px-6 py-3 rounded-lg font-medium shadow-md hover:shadow-lg transition-all disabled:opacity-60 disabled:cursor-not-allowed"
+								>
+									{printing && <Spinner />}
+									{printing ? 'Preparing…' : 'Print'}
+								</button>
+								<button
+									onClick={handleExportExcel}
+									disabled={exporting}
+									className="inline-flex items-center gap-2 bg-gradient-to-r from-green-600 to-emerald-700 hover:from-green-700 hover:to-emerald-800 text-white px-6 py-3 rounded-lg font-medium shadow-md hover:shadow-lg transition-all disabled:opacity-60 disabled:cursor-not-allowed"
+								>
+									{exporting && <Spinner />}
+									{exporting ? 'Exporting…' : 'Export to Excel'}
+								</button>
+							</div>
 						</div>
 					</div>
 

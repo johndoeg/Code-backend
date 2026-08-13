@@ -125,10 +125,6 @@ const DocPreviewModal: React.FC<{
 							<p style={{ marginBottom: 12, color: "#64748b" }}>
 								{imgError ? "Failed to load image." : "Preview not available for this file type."}
 							</p>
-							<a href={state.url} target="_blank" rel="noreferrer"
-								style={{ color: "#2563eb", textDecoration: "underline" }}>
-								Open / Download File
-							</a>
 						</div>
 					)}
 				</div>
@@ -194,8 +190,8 @@ const DocSection: React.FC<{
 		}}>{label}</td>
 		<td style={{ padding: "10px 14px" }}>
 			{!docs || docs.length === 0 ? (
-				<span style={{ color: "#94A3B8", fontSize: ".82rem", fontStyle: "italic" }}>
-					No file uploaded
+				<span style={{ color: "#334155", fontSize: ".875rem" }}>
+					No file(s) uploaded.
 				</span>
 			) : (
 				<div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
@@ -299,7 +295,7 @@ const OcrTable: React.FC<{ title: string; data: OcrData }> = ({ title, data }) =
 							{["Field", "Value", "Confidence Rate", "Verification (Dukcapil)"].map((h) => (
 								<th
 									key={h}
-									className="px-4 py-2.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap"
+									className="px-4 py-2.5 text-left text-s font-bold text-gray-600 uppercase tracking-wider whitespace-nowrap"
 								>{h}</th>
 							))}
 						</tr>
@@ -324,10 +320,12 @@ const OcrTable: React.FC<{ title: string; data: OcrData }> = ({ title, data }) =
 									<img
 										src={`data:image/jpeg;base64,${data.photo}`}
 										alt="Foto"
-										className="h-24 w-[72px] object-cover rounded-lg border border-gray-200 shadow-sm"
+										className="object-cover rounded-lg border border-gray-200 shadow-sm"
 									/>
 								) : (
-									<div className="h-24 w-[72px] bg-gray-100 rounded-lg border-2 border-dashed border-gray-300 flex items-center justify-center text-gray-400 text-xs">
+									<div
+										className="bg-gray-100 rounded-lg border-2 border-dashed border-gray-300 flex items-center justify-center text-gray-400 text-xs"
+									>
 										No Photo
 									</div>
 								)}
@@ -340,10 +338,14 @@ const OcrTable: React.FC<{ title: string; data: OcrData }> = ({ title, data }) =
 									<img
 										src={`data:image/jpeg;base64,${data.signature}`}
 										alt="Tanda Tangan"
-										className="h-11 rounded border border-gray-200"
+										style={{ height: 44 }}
+										className="rounded border border-gray-200"
 									/>
 								) : (
-									<div className="h-11 w-28 bg-gray-100 rounded border-2 border-dashed border-gray-300" />
+									<div
+										style={{ height: 44, width: 120 }}
+										className="bg-gray-100 rounded border-2 border-dashed border-gray-300"
+									/>
 								)}
 							</td>
 						</tr>
@@ -366,6 +368,61 @@ const FieldRow: React.FC<{ label: string; value?: React.ReactNode }> = ({ label,
 	<div className="flex gap-4 py-2 border-b border-gray-50 last:border-0">
 		<span className="text-gray-500 text-sm w-48 flex-shrink-0">{label}</span>
 		<span className="text-gray-800 text-sm font-medium">{value ?? "—"}</span>
+	</div>
+);
+
+const DocRow: React.FC<{
+	label: string;
+	docs: Document[];
+	onPreview: (doc: Document) => void;
+}> = ({ label, docs, onPreview }) => (
+	<div className="flex gap-4 py-2 border-b border-gray-50 last:border-0 items-start">
+		<span className="text-gray-500 text-sm w-48 flex-shrink-0 pt-0.5">{label}</span>
+		<div>
+			{!docs || docs.length === 0 ? (
+				<span style={{ color: "#334155", fontSize: ".875rem" }}>No file(s) uploaded.</span>
+			) : (
+				<div className="flex flex-wrap gap-2">
+					{docs.map((doc) => (
+						<DocChip key={doc.id} doc={doc} onPreview={onPreview} />
+					))}
+				</div>
+			)}
+		</div>
+	</div>
+);
+
+const DisabledSelect: React.FC<{ label: string; value: string }> = ({ label, value }) => (
+	<div className="flex gap-4 py-2 border-b border-gray-50 last:border-0 items-center">
+		<span className="text-gray-500 text-sm w-48 flex-shrink-0">{label}</span>
+		<div className="relative w-full max-w-md">
+			<select
+				disabled
+				value={value}
+				className="w-full appearance-none bg-gray-100 border border-gray-200 text-gray-600 text-sm rounded-lg pl-3 pr-9 py-2 cursor-not-allowed"
+			>
+				<option>{value || "—"}</option>
+			</select>
+			<svg
+				className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400"
+				fill="none" stroke="currentColor" viewBox="0 0 24 24"
+			>
+				<path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+			</svg>
+		</div>
+	</div>
+);
+
+const DisabledTextarea: React.FC<{ label: string; value: string }> = ({ label, value }) => (
+	<div className="flex gap-4 py-2 border-b border-gray-50 last:border-0 items-start">
+		<span className="text-gray-500 text-sm w-48 flex-shrink-0 pt-2">{label}</span>
+		<textarea
+			disabled
+			readOnly
+			value={value}
+			rows={2}
+			className="w-full max-w-md bg-gray-100 border border-gray-200 text-gray-600 text-sm rounded-lg px-3 py-2 cursor-not-allowed resize-y"
+		/>
 	</div>
 );
 
@@ -436,6 +493,12 @@ const ApprovalHistory: React.FC<{ apless: string; precheckingId: string }> = ({
 			</table>
 		</div>
 	);
+};
+
+const spouseKtpDocType = (isIndividu: boolean, mainCitizen?: string): string => {
+	const isMainWna = mainCitizen === "WNA";
+	if (isIndividu) return isMainWna ? "cust-wna-spouse-ktp" : "cust-spouse-ktp";
+	return isMainWna ? "guarantor-wna-spouse-ktp" : "guarantor-spouse-ktp";
 };
 
 export interface ViewPrecheckingPageProps {
@@ -535,8 +598,7 @@ const ViewPrecheckingPage: React.FC<ViewPrecheckingPageProps> = ({
 				onClose={() => setPreview(PREVIEW_CLOSED)}
 			/>
 
-			<div className={embedded ? "w-full space-y-6" : "max-w-5xl mx-auto space-y-6"}>
-
+			<div className={embedded ? "w-full space-y-6" : "max-w-7xl mx-auto space-y-6"}>
 				<div className="bg-gradient-to-r from-blue-900 via-blue-800 to-blue-600 rounded-2xl p-6 shadow-lg flex flex-col md:flex-row md:items-center md:justify-between gap-4">
 					<div>
 						<h1 className="text-white text-2xl font-bold">View Prechecking Data</h1>
@@ -598,17 +660,13 @@ const ViewPrecheckingPage: React.FC<ViewPrecheckingPageProps> = ({
 										value={data.new_ro === "1" ? "Repeat Order" : "New"} />
 									<FieldRow label="Temp. Customer No."
 										value={<span className="font-mono">{data.apless}</span>} />
-									<FieldRow label="Nationality" value={data.nationality} />
-									<FieldRow label="Reference"
-										value={data.is_carro === "1" ? "Carro" : "Non Carro"} />
 								</div>
 								<div>
+									<FieldRow label="Nationality" value={data.nationality} />
 									<FieldRow label="Last Prechecking Date"
 										value={data.last_checking_date || "—"} />
 									<FieldRow label="Outstanding"
 										value={`IDR ${data.outstanding.toLocaleString("id-ID")}`} />
-									<FieldRow label="Marital Status" value={data.marital} />
-									<FieldRow label="Note" value={data.note} />
 								</div>
 							</div>
 						</section>
@@ -630,7 +688,7 @@ const ViewPrecheckingPage: React.FC<ViewPrecheckingPageProps> = ({
 
 						{(isIndividu || isGuarnPR) && data.customer?.citizen === "WNA" && (
 							<section>
-								<SectionHeader title="Customer WNA" />
+								<SectionHeader title={isIndividu ? "Customer WNA" : "Guarantor WNA"} />
 								<FieldRow label="Nama" value={data.wna_name} />
 								<FieldRow label="ID Card No." value={data.wna_idcard} />
 								<div className="mt-3 rounded-xl border border-gray-200 overflow-hidden">
@@ -638,7 +696,7 @@ const ViewPrecheckingPage: React.FC<ViewPrecheckingPageProps> = ({
 										<tbody>
 											<DocSection
 												label="ID Card (KITAS/Passport)"
-												docs={docs["cust-kitas"] ?? []}
+												docs={docs[isIndividu ? "cust-kitas" : "guarantor-kitas"] ?? []}
 												onPreview={handlePreview}
 												loadingId={fetchingId}
 											/>
@@ -652,7 +710,7 @@ const ViewPrecheckingPage: React.FC<ViewPrecheckingPageProps> = ({
 							<section>
 								<SectionHeader title="Spouse KTP (OCR)" />
 								<KtpFileChips
-									docs={docs["cust-spouse-ktp"] ?? []}
+									docs={docs[spouseKtpDocType(isIndividu, data.customer?.citizen)] ?? []}
 									onPreview={handlePreview}
 									loadingId={fetchingId}
 								/>
@@ -670,7 +728,7 @@ const ViewPrecheckingPage: React.FC<ViewPrecheckingPageProps> = ({
 										<tbody>
 											<DocSection
 												label="Spouse KITAS"
-												docs={docs["cust-spouse-kitas"] ?? []}
+												docs={docs[isIndividu ? "cust-spouse-kitas" : "guarantor-spouse-kitas"] ?? []}
 												onPreview={handlePreview}
 												loadingId={fetchingId}
 											/>
@@ -681,30 +739,27 @@ const ViewPrecheckingPage: React.FC<ViewPrecheckingPageProps> = ({
 						)}
 
 						<section>
-							<SectionHeader title="Supporting Documents" />
-							<div className="rounded-xl border border-gray-200 overflow-hidden">
-								<table className="w-full text-sm">
-									<tbody>
-										<DocSection
-											label="KK (Kartu Keluarga)"
-											docs={docs["cust-kk"] ?? []}
-											onPreview={handlePreview}
-											loadingId={fetchingId}
-										/>
-										<DocSection
-											label="NPWP"
-											docs={docs["cust-npwp"] ?? []}
-											onPreview={handlePreview}
-											loadingId={fetchingId}
-										/>
-										<DocSection
-											label="Akta Cerai / Akta Kematian"
-											docs={docs["cust-marriage-or-death-statement"] ?? []}
-											onPreview={handlePreview}
-											loadingId={fetchingId}
-										/>
-									</tbody>
-								</table>
+							<SectionHeader title="Marital Status, Documents &amp; Notes" />
+							<div className="max-w-2xl">
+								<DisabledSelect label="Marital Status" value={data.marital} />
+								<DocRow
+									label="KK (Kartu Keluarga)"
+									docs={docs[isIndividu ? "cust-kk" : "guarantor-kk"] ?? []}
+									onPreview={handlePreview}
+								/>
+								<DocRow
+									label="NPWP"
+									docs={docs[isIndividu ? "cust-npwp" : "guarantor-npwp"] ?? []}
+									onPreview={handlePreview}
+								/>
+								<DocRow
+									label="Akta Cerai / Akta Kematian"
+									docs={docs[isIndividu ? "cust-marriage-or-death-statement" : "guarantor-marriage-or-death-statement"] ?? []}
+									onPreview={handlePreview}
+								/>
+								<DisabledSelect label="Reference"
+									value={data.is_carro === "1" ? "Carro" : "Non Carro"} />
+								<DisabledTextarea label="Note for Prechecking" value={data.note} />
 							</div>
 						</section>
 

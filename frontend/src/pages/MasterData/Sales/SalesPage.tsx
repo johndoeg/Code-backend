@@ -1,8 +1,10 @@
-import React, { useEffect, useState, useCallback } from "react";
-import { useNavigate } from "react-router-dom";
+import React, { useState } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import api from "../../../api/axiosInstance";
 import Pagination from "../../../helpers/Pagination";
 import { DEFAULT_PAGE_LIMIT } from "../../../constants/DefaultValue";
+import { useCachedGet } from "../../../hooks/useCachedGet";
+import { invalidateCache } from "../../../utils/requestCache";
 
 interface Sales {
 	SALES_NO: string;
@@ -12,6 +14,7 @@ interface Sales {
 	Status: string;
 	Sales_Type: string;
 	IsSalesTV: boolean;
+	CopiedToSalesNo: string;
 }
 
 type SearchBy = "" | "1" | "2" | "3";
@@ -29,6 +32,14 @@ interface CopyTvInfo {
 	new_name: string;
 	created_by: string;
 }
+
+interface SalesResponse {
+	data: Sales[];
+	total: number;
+	akses?: string | number;
+}
+
+const SALES_API = "/MasterData/api/sales";
 
 function CopyTvModal({
 	info,
@@ -91,15 +102,14 @@ function CopyTvModal({
 
 const SalesPage: React.FC = () => {
 	const navigate = useNavigate();
+	const [searchParams] = useSearchParams();
+	const menuId = searchParams.get("menu_id") || "";
 
-	const [sales, setSales] = useState<Sales[]>([]);
 	const [search, setSearch] = useState("");
+	const [searchInput, setSearchInput] = useState("");
 	const [searchBy, setSearchBy] = useState<SearchBy>("1");
 	const [page, setPage] = useState(1);
-	const [total, setTotal] = useState(0);
-	const [loading, setLoading] = useState(false);
-	const [error, setError] = useState<string | null>(null);
-	const [akses, setAkses] = useState("");
+	const [formError, setFormError] = useState<string | null>(null);
 
 	const [copyTvInfo, setCopyTvInfo] = useState<CopyTvInfo | null>(null);
 	const [copyTvTarget, setCopyTvTarget] = useState<string>("");
@@ -107,29 +117,24 @@ const SalesPage: React.FC = () => {
 
 	const limit = DEFAULT_PAGE_LIMIT;
 
-	const fetchSales = useCallback(async () => {
-		setLoading(true);
-		setError(null);
-		try {
-			const res = await api.get("/MasterData/api/sales", {
-				params: { search_val: search, search_by: searchBy, page, limit },
-			});
-			setSales(res.data.data ?? []);
-			setTotal(res.data.total ?? 0);
-			if (res.data.akses !== undefined) setAkses(String(res.data.akses));
-		} catch (err) {
-			console.error(err);
-			setError("Failed to load sales data. Please try again.");
-		} finally {
-			setLoading(false);
-		}
-	}, [search, searchBy, page, limit]);
+	const { data, loading, error, refetch } = useCachedGet<SalesResponse>(
+		SALES_API,
+		{ search_val: search, search_by: searchBy, page, limit, menu_id: menuId },
+	);
 
-	useEffect(() => { fetchSales(); }, [fetchSales]);
+	const sales = data?.data ?? [];
+	const total = data?.total ?? 0;
+	const akses = data?.akses !== undefined ? String(data.akses) : "";
+	const totalPages = Math.ceil(total / limit);
 
 	const handleSearch = () => {
+		if (searchInput.trim().length === 0) {
+			setFormError("Please fill the search field");
+			return;
+		}
+		setFormError(null);
 		setPage(1);
-		fetchSales();
+		setSearch(searchInput);
 	};
 
 	const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -139,18 +144,18 @@ const SalesPage: React.FC = () => {
 	const canEdit = (s: Sales) => akses === "9" && !s.IsSalesTV;
 
 	const handleView = (s: Sales) =>
-		navigate(`/sales-entry?id=View&salesno=${s.SALES_NO}&sal_type=${s.Sales_Type}`);
+		navigate(`/sales-entry?id=View&salesno=${s.SALES_NO}&sal_type=${s.Sales_Type}&menu_id=${menuId}`);
 
 	const handleEdit = (s: Sales) =>
-		navigate(`/sales-entry?id=Edit&salesno=${s.SALES_NO}&sal_type=${s.Sales_Type}`);
+		navigate(`/sales-entry?id=Edit&salesno=${s.SALES_NO}&sal_type=${s.Sales_Type}&menu_id=${menuId}`);
 
 	const handleCopyTvOpen = async (salesNo: string) => {
 		try {
-			const res = await api.get(`/MasterData/api/sales/copy-tv-info/${salesNo}`);
+			const res = await api.get(`${SALES_API}/copy-tv-info/${salesNo}`);
 			setCopyTvInfo(res.data);
 			setCopyTvTarget(salesNo);
 		} catch {
-			setError("Failed to load Copy TV info.");
+			setFormError("Failed to load Copy TV info.");
 		}
 	};
 
@@ -158,24 +163,35 @@ const SalesPage: React.FC = () => {
 		if (!copyTvTarget) return;
 		setCopyTvBusy(true);
 		try {
-			const res = await api.post("/MasterData/api/sales/copy-tv", {
+			const res = await api.post(`${SALES_API}/copy-tv`, {
 				initial_sales_no: copyTvTarget,
 			});
 			if (res.data.success) {
 				setCopyTvInfo(null);
 				setCopyTvTarget("");
-				fetchSales();
+				invalidateCache(SALES_API);
+				refetch();
 			} else {
-				setError(res.data.message || "Copy failed.");
+				setFormError(res.data.message || "Copy failed.");
 			}
-		} catch {
-			setError("Failed to copy Sales TV.");
+		} catch (err: any) {
+			setFormError(err?.response?.data?.message || "Failed to copy Sales TV.");
+			if (err?.response?.status === 409) {
+				setCopyTvInfo(null);
+				setCopyTvTarget("");
+				invalidateCache(SALES_API);
+				refetch();
+			}
 		} finally {
 			setCopyTvBusy(false);
 		}
 	};
 
-	const totalPages = Math.ceil(total / limit);
+	const handleAlreadyCopied = (copiedSalesNo: string) => {
+		alert(`Sales sudah pernah disalin dengan nomor: ${copiedSalesNo}`);
+	};
+
+	const displayError = formError || error;
 
 	return (
 		<div className="min-h-screen bg-gradient-to-br from-gray-50 to-gray-100 p-4 md:p-6">
@@ -193,7 +209,7 @@ const SalesPage: React.FC = () => {
 							</span>
 							{akses === "9" && (
 								<button
-									onClick={() => navigate("/sales-entry?id=Add&new=baru")}
+									onClick={() => navigate(`/sales-entry?id=Add&new=baru&menu_id=${menuId}`)}
 									className="flex items-center gap-2 rounded-lg bg-gradient-to-r from-green-500 to-emerald-600 px-4 py-2 text-sm font-medium text-white shadow hover:from-green-600 hover:to-emerald-700"
 								>
 									<svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -230,8 +246,8 @@ const SalesPage: React.FC = () => {
 										: searchBy === "2" ? "Search by Name…"
 											: "Search by ID Card (KTP)…"
 								}
-								value={search}
-								onChange={e => setSearch(e.target.value)}
+								value={searchInput}
+								onChange={e => setSearchInput(e.target.value)}
 								onKeyDown={handleKeyDown}
 								className="w-full rounded-lg border border-gray-300 py-3 pl-10 pr-4 focus:border-blue-500 focus:ring-2 focus:ring-blue-500"
 							/>
@@ -261,10 +277,10 @@ const SalesPage: React.FC = () => {
 						</button>
 					</div>
 
-					{error && (
+					{displayError && (
 						<div className="mb-4 rounded-lg border border-red-200 bg-red-50 p-4 text-red-700">
-							{error}
-							<button onClick={fetchSales} className="ml-4 underline text-red-900">
+							{displayError}
+							<button onClick={() => refetch()} className="ml-4 underline text-red-900">
 								Retry
 							</button>
 						</div>
@@ -327,8 +343,8 @@ const SalesPage: React.FC = () => {
 												</td>
 												<td className="whitespace-nowrap px-6 py-4">
 													<span className={`inline-flex rounded-full px-3 py-1 text-xs font-semibold leading-5 ${s.Status === "Active"
-															? "bg-green-100 text-green-800"
-															: "bg-red-100 text-red-800"
+														? "bg-green-100 text-green-800"
+														: "bg-red-100 text-red-800"
 														}`}>
 														{s.Status}
 													</span>
@@ -351,14 +367,24 @@ const SalesPage: React.FC = () => {
 															</button>
 														)}
 
-														{/* {akses === "9" && !s.IsSalesTV && (
-															<button
-																onClick={() => handleCopyTvOpen(s.SALES_NO)}
-																className="rounded px-3 py-1 text-xs bg-purple-500 text-white hover:bg-purple-600"
-															>
-																Copy TV
-															</button>
-														)} */}
+														{akses === "9" && !s.IsSalesTV && (
+															s.CopiedToSalesNo ? (
+																<button
+																	onClick={() => handleAlreadyCopied(s.CopiedToSalesNo)}
+																	className="rounded px-3 py-1 text-xs bg-gray-200 text-gray-500 hover:bg-gray-300"
+																	title={`Already copied as ${s.CopiedToSalesNo}`}
+																>
+																	Copied
+																</button>
+															) : (
+																<button
+																	onClick={() => handleCopyTvOpen(s.SALES_NO)}
+																	className="rounded px-3 py-1 text-xs bg-purple-500 text-white hover:bg-purple-600"
+																>
+																	Copy TV
+																</button>
+															)
+														)}
 													</div>
 												</td>
 											</tr>

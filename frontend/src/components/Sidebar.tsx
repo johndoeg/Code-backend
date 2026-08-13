@@ -12,6 +12,12 @@ interface MenuItem {
 	children?: MenuItem[];
 }
 
+interface SidebarProps {
+    open: boolean;
+    mini: boolean;
+    onClose: () => void;
+}
+
 const EXPANDED_W = 260;
 const COLLAPSED_W = 52;
 
@@ -68,7 +74,7 @@ const css = `
   .sb-header {
     flex-shrink: 0;
     display: flex; align-items: center;
-    height: 52px; padding: 0 4px 0 12px;
+    height: 100px; padding: 0 4px 0 12px;
     border-bottom: 1px solid var(--sb-border);
     position: relative; z-index: 1;
   }
@@ -129,8 +135,8 @@ const css = `
   .sb-logo-fb  { font-size: .8rem; font-weight: 700; color: #fff; letter-spacing: -.02em; display: none; }
   .sb-logo img[style*="none"] ~ .sb-logo-fb { display: block; }
   .sb-appname  { flex: 1; overflow: hidden; min-width: 0; }
-  .sb-appname-title { font-size: .86rem; font-weight: 600; color: var(--sb-text); white-space: nowrap; line-height: 1.2; }
-  .sb-appname-sub   { font-size: .62rem; color: var(--sb-muted); white-space: nowrap; text-transform: uppercase; letter-spacing: .06em; margin-top: 1px; }
+  .sb-appname-title { font-size: 1rem; font-weight: 600; color: var(--sb-text); white-space: nowrap; line-height: 1.2; }
+  .sb-appname-sub   { font-size: .8rem; color: var(--sb-muted); white-space: nowrap; text-transform: uppercase; letter-spacing: .06em; margin-top: 1px; }
 
   /* ── Nav scroll ── */
   .sb-scroll {
@@ -274,6 +280,42 @@ const css = `
   .sb-hamburger:active { transform: scale(.94); }
 `;
 
+function SidebarLink({
+	to,
+	className,
+	dataTip,
+	title,
+	style,
+	onNavigate,
+	navState,
+	children,
+}: {
+	to: string;
+	className?: string;
+	dataTip?: string;
+	title?: string;
+	style?: React.CSSProperties;
+	onNavigate?: () => void;
+	navState?: { background: Location };
+	children: React.ReactNode;
+}) {
+	const navigate = useNavigate();
+
+	const handleClick = (e: React.MouseEvent<HTMLAnchorElement>) => {
+		if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+
+		e.preventDefault();
+		navigate(to, navState ? { state: navState } : undefined);
+		onNavigate?.();
+	};
+
+	return (
+		<a href="/" className={className} data-tip={dataTip} title={title} style={style} onClick={handleClick}>
+			{children}
+		</a>
+	);
+}
+
 if (!document.getElementById("sb-styles")) {
 	const s = document.createElement("style");
 	s.id = "sb-styles";
@@ -356,11 +398,14 @@ function MenuNode({ item, collapsed, depth = 0, resetKey, currentPath, onNavigat
 		return (
 			<li style={{ listStyle: "none" }}>
 				{normalizedUrl && !hasChildren
-					? <Link to={normalizedUrl} className={`sb-item${isActive ? " active" : ""}`}
-						data-tip={collapsed ? item.menu_desc : undefined}
-						onClick={onNavigate}
-						state={normalizedUrl && MODAL_ROUTES.has(normalizedUrl) ? { background: modalBackground } : undefined}
-						style={{ textDecoration: "none" }}>{row}</Link>
+					? <SidebarLink
+						to={normalizedUrl}
+						className={`sb-item${isActive ? " active" : ""}`}
+						dataTip={collapsed ? item.menu_desc : undefined}
+						onNavigate={onNavigate}
+						navState={normalizedUrl && MODAL_ROUTES.has(normalizedUrl) ? { background: modalBackground } : undefined}
+						style={{ textDecoration: "none" }}
+					>{row}</SidebarLink>
 					: <div className={`sb-item${isActive ? " active" : ""}`}
 						data-tip={collapsed ? item.menu_desc : undefined}
 						onClick={hasChildren ? toggle : undefined}
@@ -419,21 +464,24 @@ function MenuNode({ item, collapsed, depth = 0, resetKey, currentPath, onNavigat
 					</div>
 				</>
 			) : (
-				<Link to={childUrl}
+				<SidebarLink
+					to={childUrl}
 					className={`sb-child-item${childActive ? " active" : ""}`}
 					title={item.menu_desc}
-					onClick={onNavigate}
-					state={MODAL_ROUTES.has(childUrl) ? { background: modalBackground } : undefined}
-					style={{ textDecoration: "none" }}>
+					onNavigate={onNavigate}
+					navState={MODAL_ROUTES.has(childUrl) ? { background: modalBackground } : undefined}
+					style={{ textDecoration: "none" }}
+				>
 					<span className="sb-child-dot" />
 					{item.menu_desc}
-				</Link>
+				</SidebarLink>
 			)}
 		</li>
 	);
 }
 
-export default function Sidebar() {
+export default function Sidebar({ open: _open, mini: _mini, onClose: _onClose }: SidebarProps) {
+		
 	if (window.self !== window.top) return null;
 
 	const navigate = useNavigate();
@@ -521,6 +569,7 @@ export default function Sidebar() {
 		} catch (e) {
 			console.error("Logout failed:", e);
 		} finally {
+			setIsLoggingOut(false);
 			navigate("/login", { replace: true });
 		}
 	}, [isLoggingOut, logout, navigate]);
@@ -635,7 +684,7 @@ export default function Sidebar() {
 								</svg>
 								: <IconLogout />}
 						</span>
-						<span className="sb-label">{isLoggingOut ? "Logging out..." : ""}</span>
+						<span className="sb-label">{isLoggingOut ? "Logging out..." : "Logout"}</span>
 					</button>
 				</div>
 			</div>

@@ -462,7 +462,7 @@ const HistoryPaymentReportPage: React.FC = () => {
 
 	return (
 		<div className="min-h-screen bg-gradient-to-br from-gray-50 to-gray-100 p-4 md:p-6">
-			<div className="max-w-7xl mx-auto">
+			<div className="max-w-[1920px] mx-auto">
 				<div className="bg-white rounded-2xl shadow-lg p-6 mb-6">
 
 					<div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 mb-6">
@@ -517,7 +517,7 @@ const HistoryPaymentReportPage: React.FC = () => {
 											type="text"
 											value={searchTerm}
 											onChange={(e) => setSearchTerm(e.target.value)}
-											onKeyPress={(e) => handleKeyPress(e, ["1", "2", "3", "5"].includes(printBy) ? "numeric" : "alphanumeric")}
+											onKeyPress={(e) => handleKeyPress(e, ["2", "3", "5"].includes(printBy) ? "numeric" : "alphanumeric")}
 											onKeyDown={(e) => { if (e.key === "Enter") handleSearch(); }}
 											placeholder={getSearchFieldPlaceholder()}
 											className="flex-1 px-3 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all"

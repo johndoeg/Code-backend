@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo, useCallback } from "react";
 import * as XLSX from "xlsx";
 import api from "../../../../api/axiosInstance";
 import { DEFAULT_PAGE_LIMIT } from "../../../../constants/DefaultValue";
+import Pagination from "../../../../helpers/Pagination";
 
 interface Branch { branch_cd: string; branch_name: string; }
 interface Dealer { supp: string; name: string; nickname: string; address: string; phone: string; contact: string; }
@@ -64,13 +65,6 @@ function getRowValues(row: BPKBRow, mode: PrintBy): (string | number)[] {
 	if (mode === "0") return [row.dealer_name, row.lessee_nm, row.lease_no, row.branch_name, exec, recv, row.status, row.remark];
 	if (mode === "1") return [row.dealer_name, row.lessee_nm, row.lease_no, exec, recv, row.status, row.remark];
 	return [row.lessee_nm, row.lease_no, row.branch_name, exec, recv, row.status, row.remark];
-}
-
-function getPageNumbers(current: number, total: number): (number | "…")[] {
-	if (total <= 7) return Array.from({ length: total }, (_, i) => i + 1);
-	if (current <= 4) return [1, 2, 3, 4, 5, "…", total];
-	if (current >= total - 3) return [1, "…", total - 4, total - 3, total - 2, total - 1, total];
-	return [1, "…", current - 1, current, current + 1, "…", total];
 }
 
 function exportExcel(data: BPKBRow[], mode: PrintBy, period: string, subjudul: string): void {
@@ -333,7 +327,6 @@ const HistoryBPKBSubmissionPage: React.FC = () => {
 
 	const totalPages = Math.ceil(data.length / ROWS_PER_PAGE);
 	const paginatedData = useMemo(() => data.slice((currentPage - 1) * ROWS_PER_PAGE, currentPage * ROWS_PER_PAGE), [data, currentPage]);
-	const pageNumbers = useMemo(() => getPageNumbers(currentPage, totalPages), [currentPage, totalPages]);
 
 	const headers = ["No.", ...HEADERS[printBy]];
 	const centerCols = new Set([0, ...CENTER_COLS[printBy].map((c) => c + 1)]);
@@ -525,26 +518,14 @@ const HistoryBPKBSubmissionPage: React.FC = () => {
 								</div>
 
 								{totalPages > 1 && (
-									<div className="flex items-center justify-center gap-1.5 py-3 border-t border-gray-200 flex-wrap">
-										<button onClick={() => setCurrentPage((p) => Math.max(1, p - 1))} disabled={currentPage === 1}
-											className="px-3 py-1 text-sm rounded border border-gray-300 disabled:opacity-40 disabled:cursor-not-allowed hover:bg-gray-50">
-											Previous
-										</button>
-										{pageNumbers.map((p, i) =>
-											p === "…" ? (
-												<span key={`el-${i}`} className="px-2 py-1 text-sm text-gray-400">…</span>
-											) : (
-												<button key={p} onClick={() => setCurrentPage(p as number)}
-													className={`px-3 py-1 text-sm rounded border transition-colors ${currentPage === p ? "bg-blue-600 text-white border-blue-600" : "border-gray-300 hover:bg-gray-50"}`}>
-													{p}
-												</button>
-											),
-										)}
-										<button onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))} disabled={currentPage === totalPages}
-											className="px-3 py-1 text-sm rounded border border-gray-300 disabled:opacity-40 disabled:cursor-not-allowed hover:bg-gray-50">
-											Next
-										</button>
-									</div>
+									<Pagination
+										page={currentPage}
+										totalPages={totalPages}
+										onPageChange={setCurrentPage}
+										totalItems={data.length}
+										itemsPerPage={ROWS_PER_PAGE}
+										className="border-t border-gray-200"
+									/>
 								)}
 							</div>
 						</>

@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useCallback } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import api from "../../../api/axiosInstance";
+import { isImageFile } from "../../../constants/DefaultValue";
 
 type Mode = "AddCF" | "Edit" | "View";
 type Tab = "main" | "tax" | "bank" | "add" | "dev" | "doc" | "notes";
@@ -195,8 +196,8 @@ function StatusBanner({ msg }: { msg?: { type: "success" | "error"; text: string
     if (!msg) return null;
     return (
         <div className={`mt-4 p-3 rounded-lg text-sm border flex items-start gap-2 ${msg.type === "success"
-                ? "bg-green-50 border-green-200 text-green-700"
-                : "bg-red-50   border-red-200   text-red-700"
+            ? "bg-green-50 border-green-200 text-green-700"
+            : "bg-red-50   border-red-200   text-red-700"
             }`}>
             <svg className="w-4 h-4 mt-0.5 flex-shrink-0" fill="none" viewBox="0 0 24 24"
                 stroke="currentColor">
@@ -207,6 +208,73 @@ function StatusBanner({ msg }: { msg?: { type: "success" | "error"; text: string
                         d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />}
             </svg>
             <span>{msg.text}</span>
+        </div>
+    );
+}
+
+interface FilePreviewState {
+    open: boolean;
+    name: string;
+    url: string;
+}
+
+const FILE_PREVIEW_CLOSED: FilePreviewState = { open: false, name: "", url: "" };
+
+function FilePreviewModal({ state, onClose }: { state: FilePreviewState; onClose: () => void }) {
+    const [imgError, setImgError] = useState(false);
+
+    useEffect(() => { setImgError(false); }, [state.url]);
+
+    if (!state.open) return null;
+
+    const cleanName = state.name.split("?")[0];
+    const isImage = isImageFile(cleanName);
+    const isPdf = cleanName.split(".").pop()?.toLowerCase() === "pdf";
+
+    return (
+        <div
+            onClick={onClose}
+            className="fixed inset-0 z-[60] flex items-center justify-center bg-black/70 p-4"
+        >
+            <div
+                onClick={e => e.stopPropagation()}
+                className="flex h-[88vh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl"
+            >
+                <div className="flex items-center justify-between border-b border-gray-200 px-4 py-3">
+                    <span className="truncate text-sm font-semibold text-gray-800">{state.name}</span>
+                    <div className="flex flex-shrink-0 items-center gap-3">
+                        <a href={state.url} target="_blank" rel="noreferrer" title="Open in new tab"
+                            className="text-gray-400 transition-colors hover:text-blue-600">
+                            <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                                    d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                            </svg>
+                        </a>
+                        <button onClick={onClose} className="text-lg leading-none text-gray-400 hover:text-gray-600">
+                            ✕
+                        </button>
+                    </div>
+                </div>
+
+                <div className="flex-1 overflow-hidden p-5">
+                    {isImage && !imgError ? (
+                        <img
+                            src={state.url}
+                            alt={state.name}
+                            className="h-full w-full object-contain"
+                            onError={() => setImgError(true)}
+                        />
+                    ) : isPdf ? (
+                        <iframe title={state.name} src={state.url} className="h-full w-full border-0" />
+                    ) : (
+                        <div className="flex h-full flex-col items-center justify-center text-center">
+                            <p className="mb-3 text-sm text-gray-500">
+                                {imgError ? "Failed to load image." : "Preview not available for this file type."}
+                            </p>
+                        </div>
+                    )}
+                </div>
+            </div>
         </div>
     );
 }
@@ -270,6 +338,7 @@ const SupplierEntryPage: React.FC = () => {
     const [docFiles, setDocFiles] = useState<Record<string, DealerFile[]>>({});
     const [docLainnya, setDocLainnya] = useState("");
     const [uploading, setUploading] = useState<string | null>(null);
+    const [filePreview, setFilePreview] = useState<FilePreviewState>(FILE_PREVIEW_CLOSED);
 
     const [notes, setNotes] = useState("");
     const [savingNotes, setSavingNotes] = useState(false);
@@ -646,6 +715,19 @@ const SupplierEntryPage: React.FC = () => {
         }
     };
 
+    const handleFilePreview = async (f: DealerFile) => {
+        try {
+            const r = await api.get(f.download_url);
+            setFilePreview({
+                open: true,
+                name: r.data.file_name || `${f.file_nm}${f.file_ext ? `.${f.file_ext}` : ""}`,
+                url: r.data.url,
+            });
+        } catch {
+            setMsg("doc", { type: "error", text: "Failed to get preview link." });
+        }
+    };
+
     const handleSaveNotes = async () => {
         setSavingNotes(true);
         setMsg("notes", undefined);
@@ -683,6 +765,7 @@ const SupplierEntryPage: React.FC = () => {
 
     return (
         <div className="min-h-screen bg-gradient-to-br from-gray-50 to-gray-100 p-4 md:p-6">
+            <FilePreviewModal state={filePreview} onClose={() => setFilePreview(FILE_PREVIEW_CLOSED)} />
             <div className="mx-auto max-w-6xl">
 
                 <div className="mb-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
@@ -1510,17 +1593,17 @@ const SupplierEntryPage: React.FC = () => {
                                     Upload Dealer Documents
                                 </h2>
 
-                                <table className="w-full">
-                                    <tbody>
-                                        {DEALER_DOCS.map(doc => {
-                                            const existing = docFiles[doc.key] || [];
-                                            const isUpl = uploading === doc.key;
+                                <div className="space-y-3">
+                                    {DEALER_DOCS.map(doc => {
+                                        const existing = docFiles[doc.key] || [];
+                                        const isUpl = uploading === doc.key;
 
-                                            return (
-                                                <tr key={doc.key}
-                                                    className="border-b border-gray-100 align-top">
-                                                    <td className="py-3 pr-5 w-52 text-sm text-gray-700">
-                                                        {doc.label}
+                                        return (
+                                            <div key={doc.key}
+                                                className="rounded-xl border border-gray-200 bg-white p-4 transition-colors hover:border-gray-300">
+                                                <div className="flex flex-col gap-3 sm:flex-row sm:items-start">
+                                                    <div className="flex-shrink-0 sm:w-52">
+                                                        <p className="text-sm font-medium text-gray-700">{doc.label}</p>
                                                         {doc.hasLainnya && (
                                                             <input
                                                                 className={`${inp} mt-1.5`}
@@ -1529,8 +1612,9 @@ const SupplierEntryPage: React.FC = () => {
                                                                 value={docLainnya}
                                                                 onChange={e => setDocLainnya(e.target.value)} />
                                                         )}
-                                                    </td>
-                                                    <td className="py-3">
+                                                    </div>
+
+                                                    <div className="min-w-0 flex-1">
                                                         {canEdit && (
                                                             <label className={[
                                                                 "inline-flex items-center gap-1.5 cursor-pointer rounded-lg",
@@ -1560,47 +1644,57 @@ const SupplierEntryPage: React.FC = () => {
                                                             </label>
                                                         )}
 
-                                                        {existing.length > 0 && (
-                                                            <div className="mt-2 space-y-1">
-                                                                {existing.map(f => (
-                                                                    <div key={f.id}
-                                                                        className="flex items-center gap-2 rounded-lg bg-gray-50 border border-gray-200 px-3 py-1.5">
-                                                                        <svg className="w-4 h-4 flex-shrink-0 text-gray-400"
-                                                                            fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                                                            <path strokeLinecap="round" strokeLinejoin="round"
-                                                                                strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0
-                                                                                    01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414
-                                                                                    5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                                                                        </svg>
-                                                                        <span className="text-xs text-gray-700 flex-1 truncate">
-                                                                            {f.file_nm}{f.file_ext ? `.${f.file_ext}` : ""}
-                                                                        </span>
-                                                                        {f.created_date && (
-                                                                            <span className="text-xs text-gray-400 whitespace-nowrap">
-                                                                                {f.created_date}
-                                                                            </span>
-                                                                        )}
-                                                                        <a href={f.download_url} target="_blank" rel="noreferrer"
-                                                                            className="text-xs text-blue-600 hover:text-blue-800 font-medium whitespace-nowrap">
-                                                                            Download
-                                                                        </a>
-                                                                        {canEdit && (
+                                                        {existing.length > 0 ? (
+                                                            <div className={`flex flex-wrap gap-2 ${canEdit ? "mt-2.5" : ""}`}>
+                                                                {existing.map(f => {
+                                                                    const fullName = `${f.file_nm}${f.file_ext ? `.${f.file_ext}` : ""}`;
+                                                                    return (
+                                                                        <div key={f.id}
+                                                                            className="flex items-center gap-2 rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5">
                                                                             <button
-                                                                                onClick={() => handleFileDelete(f.id)}
-                                                                                className="text-xs text-red-500 hover:text-red-700 font-medium whitespace-nowrap">
-                                                                                Delete
+                                                                                onClick={() => handleFilePreview(f)}
+                                                                                className="inline-flex items-center gap-1.5 rounded-md border border-blue-300
+                                                                                    bg-blue-50 px-2.5 py-1 text-xs font-medium text-blue-700 transition-colors
+                                                                                    hover:border-blue-400 hover:bg-blue-100"
+                                                                            >
+                                                                                <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                                                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                                                                                        d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                                                                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                                                                                        d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                                                                                </svg>
+                                                                                View
                                                                             </button>
-                                                                        )}
-                                                                    </div>
-                                                                ))}
+                                                                            <span className="max-w-[180px] truncate text-xs text-gray-700" title={fullName}>
+                                                                                {fullName}
+                                                                            </span>
+                                                                            {f.created_date && (
+                                                                                <span className="whitespace-nowrap text-[11px] text-gray-400">{f.created_date}</span>
+                                                                            )}
+                                                                            {canEdit && (
+                                                                                <button
+                                                                                    onClick={() => handleFileDelete(f.id)}
+                                                                                    title="Delete"
+                                                                                    className="text-gray-300 transition-colors hover:text-red-500"
+                                                                                >
+                                                                                    <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                                                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                                                                                    </svg>
+                                                                                </button>
+                                                                            )}
+                                                                        </div>
+                                                                    );
+                                                                })}
                                                             </div>
-                                                        )}
-                                                    </td>
-                                                </tr>
-                                            );
-                                        })}
-                                    </tbody>
-                                </table>
+                                                        ) : !canEdit ? (
+                                                            <span className="text-xs italic text-gray-400">No file uploaded</span>
+                                                        ) : null}
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
 
                                 <StatusBanner msg={msgs.doc} />
                             </div>

@@ -1,6 +1,5 @@
 import React, { useState, useRef, useCallback, useEffect } from "react";
-import axios from "axios";
-
+import api from '../api/axiosInstance';
 export interface CustomerData {
 	idCardNo: string;
 	name: string;
@@ -25,6 +24,13 @@ export interface CustomerData {
 export type ConfidenceMap = Partial<Record<keyof CustomerData, string>>;
 export type VerifiedMap = Partial<Record<keyof CustomerData, string>>;
 
+export interface DukcapilVerification {
+	checked: boolean;
+	status: boolean | null;
+	reason: string;
+}
+const DUKCAPIL_UNCHECKED: DukcapilVerification = { checked: false, status: null, reason: "" };
+
 interface UploadedDoc {
 	id: number;
 	name: string;
@@ -47,8 +53,8 @@ interface Props {
 	title: string;
 	nationality?: "WNI" | "WNA";
 	lesseeType?: string;
-	onDataChange?: (data: CustomerData, conf: ConfidenceMap) => void;
-	onHistoryModal?: (msg: string, apless: string, type: string, pid: string) => void;
+	maritalStatus?: string;
+	onDataChange?: (data: CustomerData, conf: ConfidenceMap, verified: VerifiedMap, verification: DukcapilVerification) => void;
 }
 
 const EMPTY_DATA = (): CustomerData => ({
@@ -60,8 +66,14 @@ const EMPTY_DATA = (): CustomerData => ({
 
 const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "gif", "bmp", "heic", "heif", "tiff", "tif", "webp"]);
 
-const API_OCR = "/CAM/OCR/scanOCRCustomer";
-const API_BASE = "/CAM/Prechecking";
+const _normCitizen = (value?: string): "WNI" | "WNA" => {
+	const v = (value ?? "").trim().toUpperCase();
+	if (v === "WNA" || v === "ASING" || v.startsWith("FOREIGN")) return "WNA";
+	return "WNI";
+};
+
+const API_OCR = "/Prechecking/OCR/scanOCRCustomer";
+const API_BASE = "/Prechecking/OCR";
 
 const ROUTES: Record<OcrFor, {
 	upload: string; list: string; del: string; view: string;
@@ -70,11 +82,11 @@ const ROUTES: Record<OcrFor, {
 	customer: { upload: "/upload-document", list: "/documents", del: "/delete-document", view: "/view-document", custType: "PR", orgType: "PR", ocrForCode: "C" },
 	spouse: { upload: "/upload-document", list: "/documents", del: "/delete-document", view: "/view-document", custType: "PR", orgType: "PR", ocrForCode: "S" },
 	wna_spouse: { upload: "/upload-document", list: "/documents", del: "/delete-document", view: "/view-document", custType: "PR", orgType: "PR", ocrForCode: "S" },
-	guarantor: { upload: "/upload-document-guarantor", list: "/documents-guarantor", del: "/delete-document-guarantor", view: "/view-document-guarantor", custType: "PR", orgType: "GUARNPR", ocrForCode: "G" },
-	guarantor_spouse: { upload: "/upload-document-guarantor", list: "/documents-guarantor", del: "/delete-document-guarantor", view: "/view-document-guarantor", custType: "PR", orgType: "GUARNPR", ocrForCode: "S" },
-	guarantor_wna_spouse: { upload: "/upload-document-guarantor", list: "/documents-guarantor", del: "/delete-document-guarantor", view: "/view-document-guarantor", custType: "PR", orgType: "GUARNPR", ocrForCode: "S" },
-	corporate: { upload: "/upload-document-corporate", list: "/documents-corporate", del: "/delete-document-corporate", view: "/view-document-corporate", custType: "PT", orgType: "PT", ocrForCode: "P" },
-	corporate_guarantor: { upload: "/upload-document-guarantor-corporate", list: "/documents-guarantor-corporate", del: "/delete-document-guarantor-corporate", view: "/view-document-guarantor-corporate", custType: "PT", orgType: "GUARNPT", ocrForCode: "G" },
+	guarantor: { upload: "/upload-document", list: "/documents", del: "/delete-document", view: "/view-document", custType: "PR", orgType: "GUARNPR", ocrForCode: "G" },
+	guarantor_spouse: { upload: "/upload-document", list: "/documents", del: "/delete-document", view: "/view-document", custType: "PR", orgType: "GUARNPR", ocrForCode: "S" },
+	guarantor_wna_spouse: { upload: "/upload-document", list: "/documents", del: "/delete-document", view: "/view-document", custType: "PR", orgType: "GUARNPR", ocrForCode: "S" },
+	corporate: { upload: "/upload-document", list: "/documents", del: "/delete-document", view: "/view-document", custType: "PT", orgType: "PT", ocrForCode: "P" },
+	corporate_guarantor: { upload: "/upload-document", list: "/documents", del: "/delete-document", view: "/view-document", custType: "PT", orgType: "GUARNPT", ocrForCode: "G" },
 };
 
 const Spinner: React.FC<{ dark?: boolean; size?: number }> = ({ dark, size = 16 }) => (
@@ -103,10 +115,11 @@ const ConfBadge: React.FC<{ value?: string }> = ({ value }) => {
 	return <span style={badge(bg, color, border)}>{value}</span>;
 };
 
-const VerBadge: React.FC<{ value?: string }> = ({ value }) =>
-	value
-		? <span style={badge("#ECFDF5", "#065F46", "#A7F3D0")}>{value}</span>
-		: <span style={badge("#F8FAFF", "#94A3B8", "#E2E8F0")}>—</span>;
+const VerBadge: React.FC<{ value?: string }> = ({ value }) => {
+	if (!value) return <span style={badge("#F8FAFF", "#94A3B8", "#E2E8F0")}>—</span>;
+	if (value === "NOT MATCH") return <span style={badge("#FEE2E2", "#B91C1C", "#FECACA")}>NOT MATCH</span>;
+	return <span style={badge("#ECFDF5", "#065F46", "#A7F3D0")}>{value}</span>;
+};
 
 function badge(bg: string, color: string, border: string): React.CSSProperties {
 	return {
@@ -196,8 +209,8 @@ const OCRUploadSection: React.FC<Props> = ({
 	title,
 	nationality = "WNI",
 	lesseeType,
+	maritalStatus,
 	onDataChange,
-	onHistoryModal,
 }) => {
 	const route = ROUTES[ocrFor];
 
@@ -210,20 +223,22 @@ const OCRUploadSection: React.FC<Props> = ({
 	const [uploading, setUploading] = useState(false);
 	const [deleting, setDeleting] = useState<Set<number>>(new Set());
 	const [showVerify, setShowVerify] = useState(false);
+	
+	const [dukcapilResult, setDukcapilResult] = useState<DukcapilVerification>(DUKCAPIL_UNCHECKED);
 	const [previewDoc, setPreviewDoc] = useState<UploadedDoc | null>(null);
 	const [previewLoadingId, setPreviewLoadingId] = useState<number | null>(null);
 
 	const fileRef = useRef<HTMLInputElement>(null);
 
 	useEffect(() => {
-		onDataChange?.(data, conf);
+		onDataChange?.(data, conf, ver, dukcapilResult);
 		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [data, conf]);
+	}, [data, conf, ver, dukcapilResult]);
 
 	const refreshDocs = useCallback(async (newPreviewUrl?: string, newDocName?: string) => {
 		if (!apless || !precheckingId) return;
 		try {
-			const res = await axios.get(`${API_BASE}${route.list}`, {
+			const res = await api.get(`${API_BASE}${route.list}`, {
 				params: { apless, prechecking_id: precheckingId },
 			});
 			const fetched: UploadedDoc[] = (res.data ?? []).filter((d: UploadedDoc) => d.type === docType);
@@ -262,15 +277,12 @@ const OCRUploadSection: React.FC<Props> = ({
 			fd.append("prechecking_id", precheckingId);
 			fd.append("document_type", type);
 			fd.append("cust_type", route.custType);
+			fd.append("organization_type", route.orgType);
 			if (ocrFor === "corporate" || ocrFor === "corporate_guarantor") {
 				fd.append("lessee_type", lesseeType ?? "");
-			} else {
-				fd.append("organization_type", route.orgType);
 			}
 
-			const res = await axios.post(`${API_BASE}${route.upload}`, fd, {
-				headers: { "Content-Type": "multipart/form-data" },
-			});
+			const res = await api.post(`${API_BASE}${route.upload}`, fd);
 
 			if (!res.data?.success) {
 				alert(res.data?.message ?? "Upload gagal.");
@@ -298,7 +310,7 @@ const OCRUploadSection: React.FC<Props> = ({
 			qFD.append("param", "check_qualities");
 			qFD.append("prechecking_id", precheckingId);
 
-			const qRes = await axios.post(API_OCR, qFD, { headers: { "Content-Type": "multipart/form-data" } });
+			const qRes = await api.post(API_OCR, qFD);
 			const qData = qRes.data;
 			if (
 				qData.status !== "SUCCESS" ||
@@ -319,7 +331,7 @@ const OCRUploadSection: React.FC<Props> = ({
 			oFD.append("repeat_order", "0");
 			oFD.append("ocr_for", route.ocrForCode);
 
-			const oRes = await axios.post(API_OCR, oFD, { headers: { "Content-Type": "multipart/form-data" } });
+			const oRes = await api.post(API_OCR, oFD);
 			const r = oRes.data;
 			if (r.status !== "SUCCESS" || !r.read) { alert(r.reason || "OCR gagal."); return; }
 
@@ -343,7 +355,7 @@ const OCRUploadSection: React.FC<Props> = ({
 				province: read.provinsi?.value ?? "",
 				religion: read.agama?.value ?? "",
 				job: read.pekerjaan?.value ?? "",
-				citizen: read.kewarganegaraan?.value || "WNI",
+				citizen: _normCitizen(read.kewarganegaraan?.value),
 				photo: images.photo ?? "",
 				signature: images.sign ?? "",
 			};
@@ -363,24 +375,9 @@ const OCRUploadSection: React.FC<Props> = ({
 
 			setData(mapped);
 			setConf(newConf);
+			setVer({});
+			setDukcapilResult(DUKCAPIL_UNCHECKED);
 			setShowVerify(true);
-
-			if (mapped.idCardNo && nationality === "WNI" && ocrFor === "customer") {
-				try {
-					const hRes = await axios.post(`${API_BASE}/check-customer-history`, {
-						idNo: mapped.idCardNo, prechecking_id: precheckingId,
-						lesseeType: "PR", checking_for: "C",
-					});
-					const [msg, al, type, pid] = hRes.data;
-					if (msg) {
-						if (type === "expired") {
-							window.location.href = `/repeat-order?apless=${al}&prechecking_id=${pid}&types=P`;
-						} else {
-							onHistoryModal?.(msg, al, type, pid);
-						}
-					}
-				} catch {}
-			}
 
 			await uploadDoc(file, docType);
 
@@ -390,7 +387,7 @@ const OCRUploadSection: React.FC<Props> = ({
 		} finally {
 			setScanning(false);
 		}
-	}, [apless, precheckingId, ocrFor, docType, nationality, uploadDoc, onHistoryModal, route.custType, route.ocrForCode]);
+	}, [apless, precheckingId, ocrFor, docType, nationality, uploadDoc, route.custType, route.ocrForCode]);
 
 	const handleVerify = useCallback(async () => {
 		setVerifying(true);
@@ -405,36 +402,49 @@ const OCRUploadSection: React.FC<Props> = ({
 				["subdistrict", data.subdistrict], ["district", data.district],
 				["city", data.city], ["province", data.province], ["job_type", data.job],
 			];
+			if (maritalStatus) fields.push(["marital_status", maritalStatus]);
 			for (const [k, v] of fields) fd.append(k, v);
 
-			const res = await axios.post(API_OCR, fd, { headers: { "Content-Type": "multipart/form-data" } });
-			const result = res.data?.result ?? {};
+			const res = await api.post(API_OCR, fd);
+			const body = res.data ?? {};
+			const result = body.result ?? {};
+			const toLabel = (v: unknown): string =>
+				v === true ? "MATCH" : v === false ? "NOT MATCH" : "";
 
 			setVer({
-				idCardNo: result.nik ?? "",
-				name: result.name ?? "",
-				placeOfBirth: result.place_of_birth ?? "",
-				dateOfBirth: result.date_of_birth ?? "",
-				gender: result.gender ?? "",
-				address: result.address ?? "",
-				rt: result.rt ?? "",
-				rw: result.rw ?? "",
-				subdistrict: result.subdistrict ?? "",
-				district: result.district ?? "",
-				city: result.city ?? "",
-				province: result.province ?? "",
-				job: result.job_type ?? "",
+				idCardNo: toLabel(result.nik),
+				name: toLabel(result.name),
+				placeOfBirth: toLabel(result.place_of_birth),
+				dateOfBirth: toLabel(result.date_of_birth),
+				gender: toLabel(result.gender),
+				address: toLabel(result.address),
+				rt: toLabel(result.rt),
+				rw: toLabel(result.rw),
+				subdistrict: toLabel(result.subdistrict),
+				district: toLabel(result.district),
+				city: toLabel(result.city),
+				province: toLabel(result.province),
+				job: toLabel(result.job_type),
 			});
-		} catch { alert("Verification failed."); }
+
+			setDukcapilResult({
+				checked: true,
+				status: typeof body.verification_status === "boolean" ? body.verification_status : false,
+				reason: body.reason ?? "",
+			});
+		} catch {
+			alert("Verification failed. Please try again.");
+			setDukcapilResult(DUKCAPIL_UNCHECKED);
+		}
 		finally { setVerifying(false); }
-	}, [data, precheckingId]);
+	}, [data, precheckingId, maritalStatus]);
 
 	const handlePreviewClick = useCallback(async (doc: UploadedDoc) => {
 		if (doc.previewUrl) { setPreviewDoc(doc); return; }
 		if (doc.view_url) { setPreviewDoc({ ...doc, previewUrl: doc.view_url }); return; }
 		setPreviewLoadingId(doc.id);
 		try {
-			const res = await axios.get(`${API_BASE}${route.view}`, {
+			const res = await api.get(`${API_BASE}${route.view}`, {
 				params: { customer_document_id: doc.id },
 			});
 			if (res.data?.success && res.data?.view_url) {
@@ -456,7 +466,7 @@ const OCRUploadSection: React.FC<Props> = ({
 			const doc = docs.find((d) => d.id === docId);
 			if (doc?.previewUrl?.startsWith("blob:")) URL.revokeObjectURL(doc.previewUrl);
 
-			const res = await axios.post(`${API_BASE}${route.del}`, {
+			const res = await api.post(`${API_BASE}${route.del}`, {
 				customer_document_id: docId,
 				prechecking_id: precheckingId,
 				nik: data.idCardNo,
@@ -469,8 +479,10 @@ const OCRUploadSection: React.FC<Props> = ({
 		}
 	}, [docs, precheckingId, refreshDocs, route.del, data.idCardNo]);
 
-	const upd = (field: keyof CustomerData) => (v: string) =>
+	const upd = (field: keyof CustomerData) => (v: string) => {
 		setData((prev) => ({ ...prev, [field]: v }));
+		setDukcapilResult(DUKCAPIL_UNCHECKED);
+	};
 
 	return (
 		<>
@@ -615,6 +627,43 @@ const OCRUploadSection: React.FC<Props> = ({
 					</div>
 				</div>
 
+				{showVerify && (
+					<div style={{
+						padding: "9px 20px",
+						fontSize: ".76rem",
+						fontWeight: 700,
+						display: "flex",
+						alignItems: "center",
+						gap: 7,
+						background: !dukcapilResult.checked ? "#FEF2F2" : dukcapilResult.status ? "#ECFDF5" : "#FFFBEB",
+						color: !dukcapilResult.checked ? "#B91C1C" : dukcapilResult.status ? "#065F46" : "#92400E",
+						borderBottom: "1px solid #DDE3F0",
+					}}>
+						{!dukcapilResult.checked ? (
+							<>
+								<svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M12 9v4m0 4h.01M10.29 3.86l-8.18 14.18A2 2 0 004.02 21h15.96a2 2 0 001.91-2.96L13.71 3.86a2 2 0 00-3.42 0z" />
+								</svg>
+								Click "Verify Dukcapil" below — required before this form can be submitted
+							</>
+						) : dukcapilResult.status ? (
+							<>
+								<svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+								</svg>
+								Verified — data matches Dukcapil{dukcapilResult.reason ? ` (${dukcapilResult.reason})` : ""}
+							</>
+						) : (
+							<>
+								<svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M12 8v4m0 4h.01M12 3l9 16H3l9-16z" />
+								</svg>
+								Verified — Dukcapil returned a false result{dukcapilResult.reason ? `: ${dukcapilResult.reason}` : ""}. Please review the data below before submitting.
+							</>
+						)}
+					</div>
+				)}
+
 				{docs.length > 0 && (
 					<div style={{
 						padding: "10px 16px", borderBottom: "1px solid #DDE3F0",
@@ -710,7 +759,9 @@ const OCRUploadSection: React.FC<Props> = ({
 													onClick={handleVerify}
 													disabled={verifying}
 													style={{
-														background: "linear-gradient(135deg,#10B981,#059669)",
+														background: dukcapilResult.checked
+															? "linear-gradient(135deg,#64748B,#475569)"
+															: "linear-gradient(135deg,#10B981,#059669)",
 														border: "none", borderRadius: 8, padding: "6px 14px",
 														color: "#fff", fontSize: ".75rem", fontWeight: 700,
 														fontFamily: "inherit", cursor: "pointer",
@@ -724,7 +775,7 @@ const OCRUploadSection: React.FC<Props> = ({
 																d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
 														</svg>
 													)}
-													Verify Dukcapil
+													{dukcapilResult.checked ? "Re-verify Dukcapil" : "Verify Dukcapil"}
 												</button>
 											) : (
 												<span style={{ fontSize: ".72rem", color: "#64748B" }}>Verified (Dukcapil)</span>
@@ -794,7 +845,7 @@ const OCRUploadSection: React.FC<Props> = ({
 								<td colSpan={3} style={{ padding: "10px 14px", verticalAlign: "middle" }}>
 									{data.photo
 										? <img src={`data:image/jpeg;base64,${data.photo}`} alt="Photo" style={{ height: 96, width: 72, objectFit: "cover", borderRadius: 8, border: "2px solid #DDE3F0" }} />
-										: <div style={{ height: 96, width: 72, background: "#F4F7FF", borderRadius: 8, border: "2px dashed #DDE3F0", display: "flex", alignItems: "center", justifyContent: "center", fontSize: ".65rem", color: "#94A3B8", textAlign: "center" }}>No Photo</div>
+										: <div style={{ background: "#F4F7FF", borderRadius: 8, border: "2px dashed #DDE3F0", display: "flex", alignItems: "center", justifyContent: "center", fontSize: ".65rem", color: "#94A3B8", textAlign: "center" }}>No Photo</div>
 									}
 								</td>
 							</tr>
@@ -806,7 +857,7 @@ const OCRUploadSection: React.FC<Props> = ({
 								<td colSpan={3} style={{ padding: "10px 14px", verticalAlign: "middle" }}>
 									{data.signature
 										? <img src={`data:image/jpeg;base64,${data.signature}`} alt="Signature" style={{ height: 44, borderRadius: 6, border: "1.5px solid #DDE3F0" }} />
-										: <div style={{ height: 44, width: 120, background: "#F8FAFF", borderRadius: 6, border: "2px dashed #DDE3F0" }} />
+										: <div style={{ background: "#F8FAFF", borderRadius: 6, border: "2px dashed #DDE3F0" }} />
 									}
 								</td>
 							</tr>

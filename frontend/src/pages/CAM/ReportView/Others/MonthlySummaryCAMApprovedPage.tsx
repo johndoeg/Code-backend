@@ -239,7 +239,6 @@ const MonthlySummaryCAMApprovedPage: React.FC = () => {
 					@page { size: landscape; margin: 8mm; }
 				}
 				@media screen { .print-only { display: none; } }
-				/* Sticky columns for screen table */
 				.sticky-no   { position: sticky; left: 0; z-index: 2; }
 				.sticky-name { position: sticky; left: ${NO_W}px; z-index: 2; }
 			`}</style>

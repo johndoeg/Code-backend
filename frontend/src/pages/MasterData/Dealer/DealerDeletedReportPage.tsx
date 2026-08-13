@@ -103,8 +103,21 @@ const DealerDeletedReportPage: React.FC = () => {
 		<div className="min-h-screen bg-gradient-to-br from-gray-50 to-gray-100 p-4 md:p-6">
 			<style>{`
 				@media print {
+					body * { visibility: hidden; }
+					.print-section, .print-section * { visibility: visible; }
+					.print-section {
+						position: absolute;
+						top: 0;
+						left: 0;
+						width: 100%;
+						margin: 0;
+						padding: 0 !important;
+						box-shadow: none !important;
+						border-radius: 0 !important;
+					}
+					.print-section .overflow-x-auto { overflow: visible !important; }
+					.print-section table { width: 100%; }
 					.no-print { display: none !important; }
-					.print-only { display: block !important; }
 					body { font-size: 11px; }
 				}
 				.print-only { display: none; }
@@ -269,7 +282,7 @@ const DealerDeletedReportPage: React.FC = () => {
 				)}
 
 				{searched && (
-					<div ref={printRef} className="bg-white rounded-2xl shadow-lg p-6">
+					<div ref={printRef} className="print-section bg-white rounded-2xl shadow-lg p-6">
 						<div className="hidden print:block text-center mb-4">
 							<p className="text-lg font-bold">DEALER DELETED REPORT</p>
 							<p className="text-sm">

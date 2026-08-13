@@ -221,7 +221,7 @@ const LaporanPelunasanMobilPage: React.FC = () => {
 		setLoading(true);
 		setError(null);
 		try {
-			const res = await api.get<ReportData>("/LaporanPelunasan/api/data", { params: { bulan, tahun } });
+			const res = await api.get<ReportData>("/CAM/Others/LaporanPelunasan/api/data", { params: { bulan, tahun } });
 			setData(res.data);
 			return res.data;
 		} catch {
@@ -391,7 +391,6 @@ const LaporanPelunasanMobilPage: React.FC = () => {
 
 			{data && (
 				<div className="print-only" style={{ fontFamily: "Tahoma, Arial, sans-serif", fontSize: 11, padding: "10px 20px" }}>
-
 					<table border={0} cellPadding={2} cellSpacing={0} style={{ width: "100%", borderCollapse: "collapse", marginBottom: 8 }}>
 						<tbody>
 							<tr>

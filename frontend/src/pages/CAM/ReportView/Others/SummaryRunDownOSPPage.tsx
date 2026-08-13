@@ -45,7 +45,7 @@ function DetailModal({ periode, bulan, params, onClose }: DetailModalProps) {
 	const [error, setError] = useState<string | null>(null);
 
 	useEffect(() => {
-		api.get<DetailRow[]>("/SummaryRundownOSP/api/detail", {
+		api.get<DetailRow[]>("/CAM/Others/SummaryRundownOSP/api/detail", {
 			params: { ...params, bulan: periode },
 		})
 			.then((res) => setRows(res.data))
@@ -128,7 +128,7 @@ const SummaryRundownOSP: React.FC = () => {
 	const [detailRow, setDetailRow] = useState<SummaryRow | null>(null);
 
 	useEffect(() => {
-		api.get<Branch[]>("/SummaryRundownOSP/api/branches")
+		api.get<Branch[]>("/CAM/Others/SummaryRundownOSP/api/branches")
 			.then((res) => setBranches(res.data))
 			.catch(() => { })
 			.finally(() => setBranchLoading(false));
@@ -148,7 +148,7 @@ const SummaryRundownOSP: React.FC = () => {
 		setCurrentPage(1);
 		setHasSearched(true);
 		try {
-			const res = await api.get<SummaryRow[]>("/SummaryRundownOSP/api/summary", {
+			const res = await api.get<SummaryRow[]>("/CAM/Others/SummaryRundownOSP/api/summary", {
 				params: filterParams,
 			});
 			setSummaryRows(res.data);

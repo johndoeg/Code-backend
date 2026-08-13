@@ -1,19 +1,26 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import CustomerDetailView from './CustomerDetailView';
-import FinancialInfoView from './FinancialInfoView';
-import BusinessHistoryView from './BusinessHistoryView';
-import CustomerSurveyFileView from './CustomerSurveyFileView';
-import EquipmentView from './EquipmentView';
-import EquipmentSurveyFileView from './EquipmentSurveyFileView';
-import FinancingView from './FinancingView';
-import DeviationView from './DeviationView';
-import SurveyView from './SurveyView';
-import { CamNotesView, OtherNotesView } from './NotesView';
-import ApuPptView from './ApuPptView';
-import HistoryPaymentView from './HistoryPaymentView';
-import AllFilesView from './AllFilesView';
-import ApprovalView from './ApprovalView';
-import ReportCamView from './ReportCamView';
+
+import CustomerDetailView from './Customer/CustomerDetailView';
+import CorporateDetailView from './Customer/CorporateDetailView';
+import FinancialInfoView from './Customer/FinancialInfoView';
+import BusinessHistoryView from './Customer/BusinessHistoryView';
+import CustomerSurveyFileView from './Customer/CustomerSurveyFileView';
+
+import EquipmentView from './Equipment/EquipmentView';
+import EquipmentSurveyFileView from './Equipment/EquipmentSurveyFileView';
+
+import FinancingView from './Financing/FinancingView';
+import DeviationView from './Deviation/DeviationView';
+import SurveyView from './Survey/SurveyView';
+import ApuPptView from './APUPPT/ApuPptView';
+import { CamNotesView, OtherNotesView } from './Other/NotesView';
+import HistoryPaymentView from './HistoryPayment/HistoryPaymentView';
+import ReportCamView from './ReportCAM/ReportCamView';
+import AllFilesView from './AllFiles/AllFilesView';
+import ApprovalView from './Approval/ApprovalView';
+import CreditRecommendationView from './Approval/CreditRecomendationView';
+
+import BusinessProfileView from './Customer/BusinessProfileView';
 
 export interface CamCtx {
 	finType: string;
@@ -27,13 +34,19 @@ export interface CamCtx {
 	contType: string;
 	apless: string;
 	applno: string;
+	boa?: string;
+	bot?: string;
+	akseskhusus?: boolean;
+	restructuringChange?: string;
+	goPublic?: string;
 }
 
 type ViewKey =
 	| 'customer_detail'
-	| 'corp_detail'
+	| 'corporate_detail'
 	| 'guarantor'
 	| 'financial_info'
+	| 'business_profile'
 	| 'business_history'
 	| 'business_profile'
 	| 'survey_file_customer'
@@ -49,7 +62,8 @@ type ViewKey =
 	| 'history_payment'
 	| 'report_cam'
 	| 'all_files'
-	| 'approval';
+	| 'approval'
+	| 'credit_recommendation';
 
 interface SubmenuItem {
 	key: string;
@@ -63,11 +77,12 @@ const TOP_MENU: { key: number; label: string }[] = [
 	{ key: 3, label: 'Financing' },
 	{ key: 4, label: 'Deviation' },
 	{ key: 5, label: 'Survey' },
-	{ key: 6, label: 'Other' },
-	{ key: 7, label: 'History Payment' },
-	{ key: 8, label: 'Report CAM' },
-	{ key: 9, label: 'All Files' },
-	{ key: 10, label: 'Approval' },
+	{ key: 6, label: 'APU PPT' },
+	{ key: 7, label: 'Other' },
+	{ key: 8, label: 'History Payment' },
+	{ key: 9, label: 'Report CAM' },
+	{ key: 10, label: 'All Files' },
+	{ key: 11, label: 'Approval' },
 ];
 
 function getSubmenu(menu: number, ctx: CamCtx): SubmenuItem[] {
@@ -75,7 +90,7 @@ function getSubmenu(menu: number, ctx: CamCtx): SubmenuItem[] {
 		case 1: {
 			const items: SubmenuItem[] = [
 				ctx.indCor === '2'
-					? { key: 'detail', label: 'Detail', view: 'corp_detail' }
+					? { key: 'detail', label: 'Detail', view: 'corporate_detail' }
 					: { key: 'detail', label: 'Detail', view: 'customer_detail' },
 			];
 			if (ctx.guarantor === '2') {
@@ -105,19 +120,23 @@ function getSubmenu(menu: number, ctx: CamCtx): SubmenuItem[] {
 		case 5:
 			return [{ key: 'survey', label: 'Survey', view: 'survey' }];
 		case 6:
-			return [
-				{ key: 'notes', label: 'Notes', view: 'notes' },
-				{ key: 'other_notes', label: 'Other Notes', view: 'other_notes' },
-				{ key: 'apu_ppt', label: 'APU PPT', view: 'apu_ppt' },
-			];
+			return [{ key: 'apu_ppt', label: 'APU PPT', view: 'apu_ppt' }];
 		case 7:
-			return [{ key: 'history_payment', label: 'History Payment', view: 'history_payment' }];
+			return [
+				{ key: 'notes', label: 'CAM Notes', view: 'notes' },
+				{ key: 'other_notes', label: 'Other Notes', view: 'other_notes' },
+			];
 		case 8:
-			return [{ key: 'report', label: 'Report CAM', view: 'report_cam' }];
+			return [{ key: 'history_payment', label: 'History Payment', view: 'history_payment' }];
 		case 9:
-			return [{ key: 'files', label: 'All Files', view: 'all_files' }];
+			return [{ key: 'report', label: 'Report CAM', view: 'report_cam' }];
 		case 10:
-			return [{ key: 'approval', label: 'Approval', view: 'approval' }];
+			return [{ key: 'files', label: 'All Files', view: 'all_files' }];
+		case 11:
+			return [
+				{ key: 'approval', label: 'Approval', view: 'approval' },
+				{ key: 'credit_recommendation', label: 'Credit Recommendation', view: 'credit_recommendation' },
+			];
 		default:
 			return [];
 	}
@@ -125,7 +144,9 @@ function getSubmenu(menu: number, ctx: CamCtx): SubmenuItem[] {
 
 const IMPLEMENTED_VIEWS: Partial<Record<ViewKey, React.FC<{ ctx: CamCtx }>>> = {
 	customer_detail: CustomerDetailView,
+	corporate_detail: CorporateDetailView,
 	financial_info: FinancialInfoView,
+	business_profile: BusinessProfileView,
 	business_history: BusinessHistoryView,
 	survey_file_customer: CustomerSurveyFileView,
 	equipment: EquipmentView,
@@ -140,6 +161,7 @@ const IMPLEMENTED_VIEWS: Partial<Record<ViewKey, React.FC<{ ctx: CamCtx }>>> = {
 	all_files: AllFilesView,
 	approval: ApprovalView,
 	report_cam: ReportCamView,
+	credit_recommendation: CreditRecommendationView,
 };
 
 function readCtxFromUrl(): CamCtx {
@@ -209,8 +231,8 @@ export default function CamViewTabs({ ctx: ctxProp, initialMenu, initialSubmenu,
 	};
 
 	return (
-		<div className={`bg-slate-100 p-6 ${embedded ? '' : 'min-h-screen'}`}>
-			<div className={embedded ? 'w-full' : 'mx-auto max-w-6xl'}>
+		<div className="fixed inset-0 z-50 w-screen h-screen overflow-y-auto bg-slate-100 p-6">
+			<div className="w-full">
 				<div className="mb-4 flex items-center justify-between rounded-2xl bg-gradient-to-r from-blue-600 to-blue-700 px-6 py-4 text-white shadow">
 					<div>
 						<h1 className="text-lg font-semibold">CAM Review</h1>

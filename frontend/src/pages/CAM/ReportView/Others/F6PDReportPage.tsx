@@ -135,7 +135,7 @@ const F6PDReportPage: React.FC = () => {
 		setData(null);
 		setRawPage(1);
 		try {
-			const res = await api.get<ReportData>("/F6PD/api/data", { params });
+			const res = await api.get<ReportData>("/CAM/Others/F6PD/api/data", { params });
 			setData(res.data);
 		} catch {
 			setError("Gagal memuat data. Silakan coba lagi.");
@@ -148,7 +148,7 @@ const F6PDReportPage: React.FC = () => {
 		setExporting(true);
 		setError(null);
 		try {
-			const res = await api.get("/F6PD/api/excel", {
+			const res = await api.get("/CAM/Others/F6PD/api/excel", {
 				params,
 				responseType: "blob",
 			});

@@ -99,7 +99,7 @@ const ApprovalPrecheckingPage: React.FC = () => {
 
 	return (
 		<div className="min-h-screen bg-gradient-to-br from-gray-50 to-gray-100 p-4 md:p-6">
-			<div className="max-w-4xl mx-auto space-y-6">
+			<div className="max-w-6xl mx-auto space-y-6">
 
 				<div className="bg-gradient-to-r from-blue-900 via-blue-800 to-blue-600 rounded-2xl p-6 shadow-lg flex items-center justify-between">
 					<div>

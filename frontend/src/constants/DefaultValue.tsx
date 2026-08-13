@@ -1,7 +1,7 @@
 export const DEFAULT_PAGE_LIMIT = 25;
 export const DEFAULT_PAGE = 1;
 export const MAX_EXPORT_ROWS = 10000;
-export const MAX_FILE_LIMIT = 2;
+export const MAX_FILE_LIMIT = 2 * 1024 * 1024;
 
 export const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "gif", "bmp", "heic", "heif", "tiff", "tif", "webp",]);
 
