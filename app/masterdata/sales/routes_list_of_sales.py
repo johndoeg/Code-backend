@@ -1,13 +1,36 @@
-from flask import Blueprint, jsonify, request, current_app, send_file
+from flask import Blueprint, jsonify, request, current_app, send_file, session
 from app import db
+from app.auth.decorators import login_required
 from sqlalchemy import text
 import io
 import pandas as pd
+from openpyxl.styles import Font
 from datetime import datetime
 
 sales_report_bp = Blueprint('sales_report', __name__, url_prefix='/MasterData')
 
-@sales_report_bp.route('/api/branches')
+_ACCOUNT_APPLY = """
+    OUTER APPLY (
+        SELECT TOP 1 b.Acc_No, b.Acc_Bank, b.Acc_BankBranch
+        FROM BeneficiaryAccount b WITH(NOLOCK)
+        WHERE b.BeneficiaryID = a.SALES_NO AND b.Category = 'Sales'
+        ORDER BY b.[Default] DESC, b.Acc_No
+    ) acct
+    LEFT JOIN UMFBANK bank WITH(NOLOCK)
+        ON acct.Acc_Bank = bank.Bank_Code
+"""
+
+_TAX_APPLY = """
+    OUTER APPLY (
+        SELECT TOP 1 d.NPWP_No
+        FROM BeneficiaryTax d WITH(NOLOCK)
+        WHERE d.BeneficiaryID = a.SALES_NO AND d.Category = 'Sales'
+        ORDER BY d.DateStart DESC, d.NPWP_No
+    ) tax
+"""
+
+@sales_report_bp.route('/branches')
+@login_required
 def get_branches():
     try:
         query = text("""
@@ -28,8 +51,9 @@ def get_branches():
     except Exception as e:
         current_app.logger.exception("Failed to load branches")
         return jsonify([]), 500
-    
-@sales_report_bp.route('/api/sales-list')
+
+@sales_report_bp.route('/sales-list')
+@login_required
 def get_sales_list():
     page = request.args.get('page', 1, type=int)
     limit = request.args.get('limit', 25, type=int)
@@ -39,21 +63,16 @@ def get_sales_list():
         return jsonify({"data": [], "total": 0})
 
     try:
-        where_clause = ""
-        params = {}
         if branch_cd == '000':
             where_clause = "1=1"
+            params = {}
         else:
             where_clause = "a.BRANCH_CD = :branch_cd"
-            params["branch_cd"] = branch_cd
+            params = {"branch_cd": branch_cd}
 
         count_query = text(f"""
             SELECT COUNT(*) as total
             FROM CLFSALES a WITH(NOLOCK)
-            LEFT JOIN BeneficiaryAccount b WITH(NOLOCK) 
-                ON a.sales_no = b.BeneficiaryID AND b.Category = 'Sales'
-            LEFT JOIN BeneficiaryTax d WITH(NOLOCK) 
-                ON a.sales_no = d.BeneficiaryID AND d.Category = 'Sales'
             WHERE {where_clause}
         """)
         
@@ -78,17 +97,13 @@ def get_sales_list():
                     a.NAME,
                     a.ADDRESS,
                     a.Status,
-                    b.Acc_No,
-                    c.[Desc] as bank_name,
-                    b.Acc_BankBranch,
-                    d.NPWP_No
+                    acct.Acc_No,
+                    bank.[Desc] as bank_name,
+                    acct.Acc_BankBranch,
+                    tax.NPWP_No
                 FROM CLFSALES a WITH(NOLOCK)
-                LEFT JOIN BeneficiaryAccount b WITH(NOLOCK) 
-                    ON a.sales_no = b.BeneficiaryID AND b.Category = 'Sales'
-                LEFT JOIN UMFBANK c WITH(NOLOCK) 
-                    ON b.Acc_Bank = c.Bank_Code
-                LEFT JOIN BeneficiaryTax d WITH(NOLOCK) 
-                    ON a.sales_no = d.BeneficiaryID AND d.Category = 'Sales'
+                {_ACCOUNT_APPLY}
+                {_TAX_APPLY}
                 WHERE {where_clause}
             ) t
             WHERE t.RowNr BETWEEN :start_row AND :end_row
@@ -130,33 +145,30 @@ def get_sales_list():
         current_app.logger.exception("Sales list report error")
         return jsonify({"data": [], "total": 0}), 500
 
-@sales_report_bp.route('/api/sales-list/print')
+@sales_report_bp.route('/sales-list/print')
+@login_required
 def print_sales_list():
     branch_cd = request.args.get('branch_cd', '').strip()
     if not branch_cd:
-        return "Branch parameter required", 400
+        return jsonify({"success": False, "message": "branch_cd is required"}), 400
 
     try:
         where_clause = "1=1" if branch_cd == '000' else "a.BRANCH_CD = :branch_cd"
         params = {"branch_cd": branch_cd} if branch_cd != '000' else {}
-        
+
         query = text(f"""
             SELECT 
                 a.SALES_NO,
                 a.NAME,
                 a.ADDRESS,
                 a.Status,
-                b.Acc_No,
-                c.[Desc] as bank_name,
-                b.Acc_BankBranch,
-                d.NPWP_No
+                acct.Acc_No,
+                bank.[Desc] as bank_name,
+                acct.Acc_BankBranch,
+                tax.NPWP_No
             FROM CLFSALES a WITH(NOLOCK)
-            LEFT JOIN BeneficiaryAccount b WITH(NOLOCK) 
-                ON a.sales_no = b.BeneficiaryID AND b.Category = 'Sales'
-            LEFT JOIN UMFBANK c WITH(NOLOCK) 
-                ON b.Acc_Bank = c.Bank_Code
-            LEFT JOIN BeneficiaryTax d WITH(NOLOCK) 
-                ON a.sales_no = d.BeneficiaryID AND d.Category = 'Sales'
+            {_ACCOUNT_APPLY}
+            {_TAX_APPLY}
             WHERE {where_clause}
             ORDER BY a.SALES_NO
         """)
@@ -170,77 +182,25 @@ def print_sales_list():
                 "salesNo": row.SALES_NO or "",
                 "name": row.NAME or "",
                 "address": row.ADDRESS or "-",
-                "accNo": row.Acc_No or "-",
-                "bankName": row.bank_name or "-",
-                "bankBranch": row.Acc_BankBranch or "-",
-                "npwpNo": row.NPWP_No or "-",
+                "accNo": row.Acc_No or "",
+                "bankName": row.bank_name or "",
+                "bankBranch": row.Acc_BankBranch or "",
+                "npwpNo": row.NPWP_No or "",
                 "status": status_text
             })
 
-        branch_name = "All Branches"
-        if branch_cd != '000':
-            branch_query = text("SELECT BRANCH_NAME FROM UMFBRANCH WITH(NOLOCK) WHERE BRANCH_CD = :branch_cd")
-            branch_result = db.session.execute(branch_query, {"branch_cd": branch_cd})
-            branch_row = branch_result.fetchone()
-            if branch_row:
-                branch_name = branch_row.BRANCH_NAME
+        return jsonify({
+            "success": True,
+            "printBy": session.get('username') or '',
+            "records": records,
+        })
 
-        return f"""
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>Sales List Report</title>
-            <style>
-                body {{ font-family: Arial, sans-serif; margin: 20px; }}
-                h1 {{ text-align: center; margin-bottom: 30px; }}
-                table {{ width: 100%; border-collapse: collapse; margin-top: 20px; }}
-                th, td {{ border: 1px solid #000; padding: 8px; text-align: left; }}
-                th {{ background-color: #f2f2f2; }}
-                .status-active {{ color: green; }}
-                .status-inactive {{ color: red; }}
-            </style>
-        </head>
-        <body>
-            <h1>List of Sales - {branch_name}</h1>
-            <p>Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
-            <table>
-                <thead>
-                    <tr>
-                        <th>No.</th>
-                        <th>Sales No.</th>
-                        <th>Name</th>
-                        <th>Address</th>
-                        <th>Acc No.</th>
-                        <th>Bank</th>
-                        <th>Bank Branch</th>
-                        <th>NPWP</th>
-                        <th>Status</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {''.join(f'''
-                    <tr>
-                        <td>{r['no']}</td>
-                        <td>{r['salesNo']}</td>
-                        <td>{r['name']}</td>
-                        <td>{r['address']}</td>
-                        <td>{r['accNo']}</td>
-                        <td>{r['bankName']}</td>
-                        <td>{r['bankBranch']}</td>
-                        <td>{r['npwpNo']}</td>
-                        <td class="{'status-active' if r['status'] == 'Active' else 'status-inactive'}">{r['status']}</td>
-                    </tr>''' for r in records)}
-                </tbody>
-            </table>
-        </body>
-        </html>
-        """
-        
     except Exception as e:
         current_app.logger.exception("Print report error")
-        return "Error generating report", 500
+        return jsonify({"success": False, "message": "Failed to fetch print data"}), 500
 
-@sales_report_bp.route('/api/sales-list/excel')
+@sales_report_bp.route('/sales-list/excel')
+@login_required
 def export_sales_excel():
     branch_cd = request.args.get('branch_cd', '').strip()
     if not branch_cd:
@@ -249,24 +209,20 @@ def export_sales_excel():
     try:
         where_clause = "1=1" if branch_cd == '000' else "a.BRANCH_CD = :branch_cd"
         params = {"branch_cd": branch_cd} if branch_cd != '000' else {}
-        
+
         query = text(f"""
             SELECT 
                 a.SALES_NO,
                 a.NAME,
                 a.ADDRESS,
                 a.Status,
-                b.Acc_No,
-                c.[Desc] as bank_name,
-                b.Acc_BankBranch,
-                d.NPWP_No
+                acct.Acc_No,
+                bank.[Desc] as bank_name,
+                acct.Acc_BankBranch,
+                tax.NPWP_No
             FROM CLFSALES a WITH(NOLOCK)
-            LEFT JOIN BeneficiaryAccount b WITH(NOLOCK) 
-                ON a.sales_no = b.BeneficiaryID AND b.Category = 'Sales'
-            LEFT JOIN UMFBANK c WITH(NOLOCK) 
-                ON b.Acc_Bank = c.Bank_Code
-            LEFT JOIN BeneficiaryTax d WITH(NOLOCK) 
-                ON a.sales_no = d.BeneficiaryID AND d.Category = 'Sales'
+            {_ACCOUNT_APPLY}
+            {_TAX_APPLY}
             WHERE {where_clause}
             ORDER BY a.SALES_NO
         """)
@@ -279,7 +235,7 @@ def export_sales_excel():
                 "No.": i,
                 "Sales No.": row.SALES_NO or "",
                 "Name": row.NAME or "",
-                "Address": row.ADDRESS or "",
+                "Address": row.ADDRESS or "-",
                 "Acc No.": row.Acc_No or "",
                 "Bank": row.bank_name or "",
                 "Bank Branch": row.Acc_BankBranch or "",
@@ -287,9 +243,16 @@ def export_sales_excel():
                 "Status": status_text
             })
 
+        username = session.get('username') or ''
+        print_date = datetime.now().strftime('%d/%m/%Y')
+
         df = pd.DataFrame(records)
         output = io.BytesIO()
-        df.to_excel(output, index=False, sheet_name='Sales List')
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            df.to_excel(writer, index=False, sheet_name='Sales List', startrow=3)
+            worksheet = writer.sheets['Sales List']
+            worksheet.cell(row=1, column=1, value="List of Sales").font = Font(bold=True, size=14)
+            worksheet.cell(row=2, column=1, value=f"Print By - Date : {username} - {print_date}")
         output.seek(0)
         
         branch_name = "AllBranches"

@@ -1,5 +1,6 @@
 from flask import Blueprint, request, send_file, jsonify, current_app
 from app import db
+from app.auth.decorators import login_required
 from sqlalchemy import text
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
@@ -81,7 +82,8 @@ def _build_excel(data_rows: list[dict]) -> io.BytesIO:
     output.seek(0)
     return output
 
-@sipesat_bp.route('/api/export/excel')
+@sipesat_bp.route('/export/excel')
+@login_required
 def export_sipesat_excel():
     period = request.args.get('period')
     
@@ -121,7 +123,8 @@ def export_sipesat_excel():
         current_app.logger.exception("SIPESAT export error")
         return jsonify({'error': 'Failed to generate report'}), 500
 
-@sipesat_bp.route('/api/check-data')
+@sipesat_bp.route('/check-data')
+@login_required
 def check_sipesat_data():
     period = request.args.get('period')
     
@@ -147,7 +150,8 @@ def check_sipesat_data():
         current_app.logger.exception("SIPESAT check-data error")
         return jsonify({'error': 'Failed to check data'}), 500
 
-@sipesat_bp.route('/api/reprocess')
+@sipesat_bp.route('/reprocess')
+@login_required
 def reprocess_sipesat():
     period = request.args.get('period')
     

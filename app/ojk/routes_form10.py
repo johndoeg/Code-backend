@@ -1,5 +1,6 @@
 from flask import Blueprint, request, send_file, current_app
 from app import db
+from app.auth.decorators import login_required
 from sqlalchemy import text
 import io
 import openpyxl
@@ -86,7 +87,8 @@ def _build_workbook(rows: list[dict]) -> openpyxl.Workbook:
     ws.freeze_panes = 'A2'
     return wb
 
-@form10_bp.route('/api/excel')
+@form10_bp.route('/excel')
+@login_required
 def get_form10_excel():
     try:
         date_from = request.args.get('date_from')

@@ -1,10 +1,12 @@
 from flask import Blueprint, jsonify, request, current_app
 from app import db
+from app.auth.decorators import login_required
 from sqlalchemy import text
 
 group_report_bp = Blueprint('group_report', __name__, url_prefix='/MasterData')
 
-@group_report_bp.route('/api/group-report')
+@group_report_bp.route('/group-report')
+@login_required
 def get_group_report():
     page    = request.args.get('page', 1, type=int)
     limit   = request.args.get('limit', 25, type=int)
@@ -20,7 +22,7 @@ def get_group_report():
         total = db.session.execute(text("""
             SELECT COUNT(*) as total
             FROM CLFGROUP a WITH(NOLOCK)
-            LEFT JOIN CAFLESS b WITH(NOLOCK) ON a.GrpCode = b.GrpCode
+                LEFT JOIN CAFLESS b WITH(NOLOCK) ON a.GrpCode = b.GrpCode
             WHERE a.GrpName LIKE :grpname
               AND a.FLGDEL = '0'
         """), params).fetchone().total
@@ -35,19 +37,19 @@ def get_group_report():
                 b.CITY1,
                 ISNULL(SUM(latest_pay.OUTS_PRINC), 0) AS OUTS_TOTAL
             FROM CLFGROUP a WITH(NOLOCK)
-            LEFT JOIN CAFLESS b WITH(NOLOCK) ON a.GrpCode = b.GrpCode
-            OUTER APPLY (
-                SELECT SUM(lp.OUTS_PRINC) AS OUTS_PRINC
-                FROM CLFCONT cc WITH(NOLOCK)
-                INNER JOIN CAFCONT bc WITH(NOLOCK) ON cc.APPL_NO = bc.APPL_NO
+                LEFT JOIN CAFLESS b WITH(NOLOCK) ON a.GrpCode = b.GrpCode
                 OUTER APPLY (
-                    SELECT TOP 1 OUTS_PRINC
-                    FROM CLFPAY WITH(NOLOCK)
-                    WHERE LEASE_NO = cc.LEASE_NO
-                    ORDER BY DATE_PAY DESC
-                ) lp
-                WHERE bc.APLESS = b.APLESS
-            ) latest_pay
+                    SELECT SUM(lp.OUTS_PRINC) AS OUTS_PRINC
+                    FROM CLFCONT cc WITH(NOLOCK)
+                        INNER JOIN CAFCONT bc WITH(NOLOCK) ON cc.APPL_NO = bc.APPL_NO
+                    OUTER APPLY (
+                        SELECT TOP 1 OUTS_PRINC
+                        FROM CLFPAY WITH(NOLOCK)
+                        WHERE LEASE_NO = cc.LEASE_NO
+                        ORDER BY DATE_PAY DESC
+                    ) lp
+                    WHERE bc.APLESS = b.APLESS
+                ) latest_pay
             WHERE a.GrpName LIKE :grpname
               AND a.FLGDEL = '0'
             GROUP BY b.APLESS, b.LESSEE_NM, b.ADDRESS1, b.CITY1
@@ -70,19 +72,19 @@ def get_group_report():
         grand_total_row = db.session.execute(text("""
             SELECT ISNULL(SUM(latest_pay.OUTS_PRINC), 0) AS GRAND_TOTAL
             FROM CLFGROUP a WITH(NOLOCK)
-            LEFT JOIN CAFLESS b WITH(NOLOCK) ON a.GrpCode = b.GrpCode
-            OUTER APPLY (
-                SELECT SUM(lp.OUTS_PRINC) AS OUTS_PRINC
-                FROM CLFCONT cc WITH(NOLOCK)
-                INNER JOIN CAFCONT bc WITH(NOLOCK) ON cc.APPL_NO = bc.APPL_NO
+                LEFT JOIN CAFLESS b WITH(NOLOCK) ON a.GrpCode = b.GrpCode
                 OUTER APPLY (
-                    SELECT TOP 1 OUTS_PRINC
-                    FROM CLFPAY WITH(NOLOCK)
-                    WHERE LEASE_NO = cc.LEASE_NO
-                    ORDER BY DATE_PAY DESC
-                ) lp
-                WHERE bc.APLESS = b.APLESS
-            ) latest_pay
+                    SELECT SUM(lp.OUTS_PRINC) AS OUTS_PRINC
+                    FROM CLFCONT cc WITH(NOLOCK)
+                        INNER JOIN CAFCONT bc WITH(NOLOCK) ON cc.APPL_NO = bc.APPL_NO
+                    OUTER APPLY (
+                        SELECT TOP 1 OUTS_PRINC
+                        FROM CLFPAY WITH(NOLOCK)
+                        WHERE LEASE_NO = cc.LEASE_NO
+                        ORDER BY DATE_PAY DESC
+                    ) lp
+                    WHERE bc.APLESS = b.APLESS
+                ) latest_pay
             WHERE a.GrpName LIKE :grpname
               AND a.FLGDEL = '0'
         """), params).fetchone()
@@ -102,7 +104,8 @@ def get_group_report():
         return jsonify({"data": [], "total": 0, "grand_total": 0,
                         "error": str(e)}), 500
 
-@group_report_bp.route('/api/group-report/export')
+@group_report_bp.route('/group-report/export')
+@login_required
 def export_group_report():
     grpname = request.args.get('grpname', '').strip()
     if not grpname:
@@ -120,19 +123,19 @@ def export_group_report():
                 b.CITY1,
                 ISNULL(SUM(latest_pay.OUTS_PRINC), 0) AS OUTS_TOTAL
             FROM CLFGROUP a WITH(NOLOCK)
-            LEFT JOIN CAFLESS b WITH(NOLOCK) ON a.GrpCode = b.GrpCode
-            OUTER APPLY (
-                SELECT SUM(lp.OUTS_PRINC) AS OUTS_PRINC
-                FROM CLFCONT cc WITH(NOLOCK)
-                INNER JOIN CAFCONT bc WITH(NOLOCK) ON cc.APPL_NO = bc.APPL_NO
+                LEFT JOIN CAFLESS b WITH(NOLOCK) ON a.GrpCode = b.GrpCode
                 OUTER APPLY (
-                    SELECT TOP 1 OUTS_PRINC
-                    FROM CLFPAY WITH(NOLOCK)
-                    WHERE LEASE_NO = cc.LEASE_NO
-                    ORDER BY DATE_PAY DESC
-                ) lp
-                WHERE bc.APLESS = b.APLESS
-            ) latest_pay
+                    SELECT SUM(lp.OUTS_PRINC) AS OUTS_PRINC
+                    FROM CLFCONT cc WITH(NOLOCK)
+                        INNER JOIN CAFCONT bc WITH(NOLOCK) ON cc.APPL_NO = bc.APPL_NO
+                    OUTER APPLY (
+                        SELECT TOP 1 OUTS_PRINC
+                        FROM CLFPAY WITH(NOLOCK)
+                        WHERE LEASE_NO = cc.LEASE_NO
+                        ORDER BY DATE_PAY DESC
+                    ) lp
+                    WHERE bc.APLESS = b.APLESS
+                ) latest_pay
             WHERE a.GrpName LIKE :grpname
               AND a.FLGDEL = '0'
             GROUP BY b.APLESS, b.LESSEE_NM, b.ADDRESS1, b.CITY1

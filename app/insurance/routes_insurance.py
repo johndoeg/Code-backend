@@ -1,10 +1,12 @@
 from flask import Blueprint, jsonify, request, current_app
 from app import db
+from app.auth.decorators import login_required
 from sqlalchemy import text
 
 insurance_bp = Blueprint('insurance', __name__, url_prefix='/Insurance')
 
-@insurance_bp.route('/api/simas/invoice')
+@insurance_bp.route('/simas/invoice')
+@login_required
 def get_simas_invoice_summary():
     page = request.args.get('page', 1, type=int)
     limit = request.args.get('limit', 25, type=int)
@@ -43,11 +45,12 @@ def get_simas_invoice_summary():
             "total": total
         })
 
-    except Exception as e:
+    except Exception:
         current_app.logger.exception("Simas invoice summary error")
         return jsonify({"data": [], "total": 0}), 500
         
-@insurance_bp.route('/api/simas/detail')
+@insurance_bp.route('/simas/detail')
+@login_required
 def get_simas_invoice_detail():
     invoice_no = request.args.get('id')
     filter_param = request.args.get('filter', '')
@@ -104,11 +107,12 @@ def get_simas_invoice_detail():
 
         return jsonify(details)
 
-    except Exception as e:
+    except Exception:
         current_app.logger.exception("Simas invoice detail error")
         return jsonify([])
     
-@insurance_bp.route('/api/raksa/invoice')
+@insurance_bp.route('/raksa/invoice')
+@login_required
 def get_raksa_invoice_summary():
     page = request.args.get('page', 1, type=int)
     limit = request.args.get('limit', 25, type=int)
@@ -145,11 +149,12 @@ def get_raksa_invoice_summary():
             "total": total
         })
 
-    except Exception as e:
+    except Exception:
         current_app.logger.exception("Raksa invoice summary error")
         return jsonify({"data": [], "total": 0}), 500
 
-@insurance_bp.route('/api/raksa/detail')
+@insurance_bp.route('/raksa/detail')
+@login_required
 def get_raksa_invoice_detail():
     invoice_no = request.args.get('id')
     filter_param = request.args.get('filter', '')
@@ -206,6 +211,6 @@ def get_raksa_invoice_detail():
 
         return jsonify(details)
 
-    except Exception as e:
+    except Exception:
         current_app.logger.exception("Raksa invoice detail error")
         return jsonify([])

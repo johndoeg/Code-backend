@@ -1,5 +1,6 @@
 from flask import Blueprint, jsonify, request, current_app, session
 from app import db
+from app.auth.decorators import login_required
 from sqlalchemy import text
 
 onhand_cam_bp = Blueprint("onhand_cam_bp", __name__, url_prefix="/CAM")
@@ -14,7 +15,7 @@ def _get_session_ctx() -> dict:
 
 def _call_onhand_sp(emp_id: str, username: str, offset: int, end: int,
                     order: str, search_by: str, search_val: str):
-  
+
     if search_val and search_by == "1":
         sp = ("EXEC USP_CAM_ONHANDSEARCHBYCAM "
               ":emp_id, :username, :offset, :end, :order, :search_val")
@@ -30,18 +31,18 @@ def _call_onhand_sp(emp_id: str, username: str, offset: int, end: int,
               ":emp_id, :username, :offset, :end, :order")
         params = dict(emp_id=emp_id, username=username,
                       offset=offset, end=end, order=order)
-
+        
     result   = db.session.execute(text(sp), params)
     all_rows = result.mappings().all()
 
     if not all_rows:
         return 0, []
 
-    total    = int(all_rows[0].get("TOTAL", 0)) if "TOTAL" in all_rows[0] else 0
-    data_rows = all_rows[1:] if total else all_rows
-    return total, data_rows
+    total = int(all_rows[0]["TOTAL"]) if "TOTAL" in all_rows[0] else 0
+    return total, all_rows
 
-@onhand_cam_bp.route("/api/onhand")
+@onhand_cam_bp.route("/onhand")
+@login_required
 def get_cam_onhand():
     ctx         = _get_session_ctx()
     emp_id      = ctx["emp_id"]
@@ -56,6 +57,8 @@ def get_cam_onhand():
     offset = (page - 1) * limit
     end    = page * limit
     order  = "CMO" if access_level == "CMO" else ""
+
+    is_approver_row = access_level not in ("CMO", "HD")
 
     try:
         total, rows = _call_onhand_sp(
@@ -78,14 +81,20 @@ def get_cam_onhand():
                 else ""
             )
 
-            namacmo = str(row.get("NAMACMO", "") or "")
-            color   = "default"
+            str_revisi   = str(row.get("str_revisi",   "") or "")
+            str_multiple = str(row.get("str_multiple", "") or "")
+
+            namacmo_raw = str(row.get("NAMACMO", "") or "")
+            can_manage = namacmo_raw in ("NAMACMO", "Reject")
+
+            namacmo = namacmo_raw
+            color = "revise" if str_revisi else "default"
             reject_person  = ""
             reject_comment = ""
 
-            if namacmo == "NAMACMO":
+            if namacmo_raw == "NAMACMO":
                 namacmo = username
-            elif namacmo == "Reject":
+            elif namacmo_raw == "Reject":
                 rj = db.session.execute(
                     text("SELECT TOP 1 appr_id, LEFT(comment,10) AS comment "
                          "FROM MCMOCAMStatus WITH(NOLOCK) "
@@ -107,79 +116,36 @@ def get_cam_onhand():
                     reject_person  = rj["appr_id"]
                     reject_comment = rj["comment"]
                     color = "reject"
-                    namacmo = ""
+                namacmo = ""
 
-            str_revisi  = str(row.get("str_revisi",  "") or "")
-            str_multiple = str(row.get("str_multiple", "") or "")
-            if str_revisi:
-                color = "revise"
-
-            if color == "default":
-                peer_rejects = db.session.execute(
-                    text("SELECT DISTINCT APPR_STS, APPR_ID "
-                         "FROM Mcmocamstatus WITH(NOLOCK) "
-                         "WHERE APPR_STS LIKE '%R%' AND APPL_NO=:appl "
-                         "AND APPR_ID IN (SELECT APPR_ID FROM MCMOCAMStatus "
-                         "               WHERE APPL_NO=:appl AND APPR_STS LIKE '%R%')"),
-                    {"appl": appl_no}
-                ).mappings().all()
-
-                for pr in peer_rejects:
-                    appr_id = pr["APPR_ID"]
-                    peer_cam = db.session.execute(
-                        text("SELECT ACCESSCAM FROM APP_USRMST WHERE USERNAME=:uid"),
-                        {"uid": appr_id}
-                    ).scalar()
-                    own_cam = db.session.execute(
-                        text("SELECT ACCESSCAM FROM APP_USRMST WHERE USERNAME=:uid"),
-                        {"uid": username}
-                    ).scalar()
-                    if (peer_cam and peer_cam == own_cam) or appr_id == username:
-                        color = "reject"
-                        break
-
-            bo_row = db.session.execute(
-                text("SELECT BO_TYPE FROM BENEFICIARY_LINK WITH(NOLOCK) "
-                     "WHERE APPL_NO=:appl"),
+            peer_rejects = db.session.execute(
+                text("SELECT DISTINCT APPR_STS, APPR_ID "
+                     "FROM Mcmocamstatus WITH(NOLOCK) "
+                     "WHERE APPR_STS LIKE '%R%' AND APPL_NO=:appl "
+                     "AND APPR_ID IN (SELECT APPR_ID FROM MCMOCAMStatus "
+                     "               WHERE APPL_NO=:appl AND APPR_STS LIKE '%R%')"),
                 {"appl": appl_no}
-            ).mappings().first()
+            ).mappings().all()
 
-            if bo_row:
-                bo_type = bo_row["BO_TYPE"]
-                boa     = 2
-                menmen  = 10
-                bot     = "1" if bo_type == "PR" else "2"
-            else:
-                boa    = 1
-                menmen = 9
-                bot    = ""
-
-            outs_row = db.session.execute(
-                text("SELECT SUM(OUTS) AS tot_outs FROM CAFCUST_OUTS WITH(NOLOCK) "
-                     "WHERE APPL_NO=:appl "
-                     "AND ASOF=(SELECT MAX(ASOF) FROM CAFCUST_OUTS WITH(NOLOCK) "
-                     "          WHERE APPL_NO=:appl)"),
-                {"appl": appl_no}
-            ).mappings().first()
-            tot_outs = float(outs_row["tot_outs"] or 0) if outs_row else 0.0
-
-            picked_by = ""
-            if access_level == "CRH":
-                pb = db.session.execute(
-                    text("SELECT Picked_by FROM MCMOCAMCOMPLETELIST "
-                         "WHERE APPL_NO=:appl"),
-                    {"appl": appl_no}
+            for pr in peer_rejects:
+                appr_id = pr["APPR_ID"]
+                peer_cam = db.session.execute(
+                    text("SELECT ACCESSCAM FROM APP_USRMST WHERE USERNAME=:uid"),
+                    {"uid": appr_id}
                 ).scalar()
-                picked_by = pb or ""
-
-            mstr_ca = db.session.execute(
-                text("SELECT MSTR_CA FROM TAMASTER WHERE APPL_NO=:appl"),
-                {"appl": appl_no}
-            ).scalar() or ""
+                own_cam = db.session.execute(
+                    text("SELECT ACCESSCAM FROM APP_USRMST WHERE USERNAME=:uid"),
+                    {"uid": username}
+                ).scalar()
+                if (peer_cam and peer_cam == own_cam) or appr_id == username:
+                    color = "reject"
+                    break
 
             extra = db.session.execute(
-                text("SELECT c.RESTRUCTURING_CHANGE, d.GO_PUBLIC "
+                text("SELECT c.RESTRUCTURING_CHANGE, b.LESSEE_NM, d.GO_PUBLIC "
                      "FROM CAFCONT a WITH(NOLOCK) "
+                     "LEFT JOIN CAFLESS b WITH(NOLOCK) "
+                     "       ON a.APLESS = b.APLESS "
                      "LEFT JOIN CAFCONT_RESTRUCTURING c WITH(NOLOCK) "
                      "       ON a.APPL_NO = c.APPL_NO "
                      "LEFT JOIN CAFLESS_DETAIL d WITH(NOLOCK) "
@@ -189,19 +155,55 @@ def get_cam_onhand():
             ).mappings().first()
             r_change  = str(extra["RESTRUCTURING_CHANGE"] or "") if extra else ""
             go_public = str(extra["GO_PUBLIC"]            or "") if extra else ""
+            lessee_nm = str(extra["LESSEE_NM"]             or "") if extra else ""
+
+            if is_approver_row:
+                bo_row = db.session.execute(
+                    text("SELECT BO_TYPE FROM BENEFICIARY_LINK WITH(NOLOCK) "
+                         "WHERE APPL_NO=:appl"),
+                    {"appl": appl_no}
+                ).mappings().first()
+
+                menmen = 10 if bo_row else 9
+
+                outs_row = db.session.execute(
+                    text("SELECT SUM(OUTS) AS tot_outs FROM CAFCUST_OUTS WITH(NOLOCK) "
+                         "WHERE APPL_NO=:appl "
+                         "AND ASOF=(SELECT MAX(ASOF) FROM CAFCUST_OUTS WITH(NOLOCK) "
+                         "          WHERE APPL_NO=:appl)"),
+                    {"appl": appl_no}
+                ).mappings().first()
+                tot_outs = float(outs_row["tot_outs"] or 0) if outs_row else 0.0
+
+                picked_by = db.session.execute(
+                    text("SELECT Picked_by FROM MCMOCAMCOMPLETELIST "
+                         "WHERE APPL_NO=:appl"),
+                    {"appl": appl_no}
+                ).scalar() or ""
+
+                mstr_ca = db.session.execute(
+                    text("SELECT MSTR_CA FROM TAMASTER WHERE APPL_NO=:appl"),
+                    {"appl": appl_no}
+                ).scalar() or ""
+            else:
+                menmen    = 0
+                tot_outs  = 0.0
+                picked_by = ""
+                mstr_ca   = ""
 
             data.append({
                 "appl_no":        appl_no,
                 "tgl":            tgl,
                 "cons_leas":      str(row.get("Cons_Leas", "") or ""),
-                "lessee_nm":      str(row.get("LESSEE_NM",  "") or ""),
+                "lessee_nm":      lessee_nm,
                 "namacmo":        namacmo,
+                "can_manage":     can_manage,
                 "reject_person":  reject_person,
                 "reject_comment": reject_comment,
                 "cbgnow":         str(row.get("cbgnow",  "") or ""),
                 "cmo_now":        str(row.get("CMOnow",  "") or ""),
                 "brch_code":      str(row.get("brch_code", "") or ""),
-                "color":          color,          # "default" | "revise" | "reject"
+                "color":          color,
                 "str_revisi":     str_revisi,
                 "str_multiple":   str_multiple,
                 "fin_type":       str(row.get("Cons_Leas",   "") or ""),
@@ -228,7 +230,8 @@ def get_cam_onhand():
         current_app.logger.exception("CAM onhand error")
         return jsonify({"error": "Failed to load data"}), 500
 
-@onhand_cam_bp.route("/api/onhand/send", methods=["POST"])
+@onhand_cam_bp.route("/onhand/send", methods=["POST"])
+@login_required
 def send_cam():
     ctx      = _get_session_ctx()
     body     = request.get_json(force=True) or {}
@@ -257,9 +260,9 @@ def send_cam():
                         )
                     ) AS cnt
                     FROM CAFEQUIP a WITH(NOLOCK)
-                    INNER JOIN CAFCONT       b  WITH(NOLOCK) ON a.APPL_NO = b.APPL_NO
-                    INNER JOIN CAFINSU       c  WITH(NOLOCK) ON b.APPL_NO = c.APPL_NO
-                    INNER JOIN cafdisbacc    zz             ON zz.APPL_NO = a.APPL_NO
+                        INNER JOIN CAFCONT       b  WITH(NOLOCK) ON a.APPL_NO = b.APPL_NO
+                        INNER JOIN CAFINSU       c  WITH(NOLOCK) ON b.APPL_NO = c.APPL_NO
+                        INNER JOIN cafdisbacc    zz             ON zz.APPL_NO = a.APPL_NO
                     WHERE b.APPL_NO IN ({in_clause})
                       AND zz.SPLIT = 'Dealer'
                 """)
@@ -285,7 +288,8 @@ def send_cam():
         "redirect": f"/cam_send_cmo?appl_nos={','.join(appl_nos)}&multiple={int(multiple)}",
     })
 
-@onhand_cam_bp.route("/api/onhand/pick", methods=["POST"])
+@onhand_cam_bp.route("/onhand/pick", methods=["POST"])
+@login_required
 def pick_cam():
     ctx     = _get_session_ctx()
     emp_id  = ctx["emp_id"]
@@ -307,33 +311,9 @@ def pick_cam():
         db.session.rollback()
         current_app.logger.exception("CRH pick error")
         return jsonify({"success": False, "message": "Save failed"}), 500
-
-@onhand_cam_bp.route("/api/onhand/validate", methods=["POST"])
-def validate_cam():
-    body    = request.get_json(force=True) or {}
-    appl_no = body.get("appl_no", "")
-
-    if not appl_no:
-        return jsonify({"valid": False, "message": "Missing appl_no"}), 400
-
-    try:
-        result = db.session.execute(
-            text("EXEC USP_VALIDATE_CAM :appl_no"),
-            {"appl_no": appl_no}
-        ).mappings().first()
-
-        if result and result.get("STATUS") == "OK":
-            return jsonify({
-                "valid":   False,
-                "message": result.get("MSG", ""),
-            })
-        return jsonify({"valid": True})
-
-    except Exception:
-        current_app.logger.exception("CAM validate error")
-        return jsonify({"valid": True})
     
-@onhand_cam_bp.route("/api/onhand/<appl_no>", methods=["DELETE"])
+@onhand_cam_bp.route("/onhand/<appl_no>", methods=["DELETE"])
+@login_required
 def delete_cam(appl_no: str):
     apless = request.args.get("apless", "")
     try:
@@ -348,7 +328,8 @@ def delete_cam(appl_no: str):
         current_app.logger.exception("CAM delete error")
         return jsonify({"success": False, "message": "Delete failed"}), 500
 
-@onhand_cam_bp.route("/api/onhand/<appl_no>/reject-watchlist", methods=["POST"])
+@onhand_cam_bp.route("/onhand/<appl_no>/reject-watchlist", methods=["POST"])
+@login_required
 def reject_watchlist(appl_no: str):
     apless = (request.get_json(force=True) or {}).get("apless", "")
     try:
@@ -362,3 +343,52 @@ def reject_watchlist(appl_no: str):
         db.session.rollback()
         current_app.logger.exception("Reject watchlist error")
         return jsonify({"success": False, "message": "Action failed"}), 500
+    
+@onhand_cam_bp.route('/onhand/validate', methods=['POST'])
+@login_required
+def validate_cam():
+    body = request.get_json(force=True) or {}
+    appl_no = body.get("appl_no")
+    if not appl_no:
+        return jsonify({"blocked": False})
+
+    access_level = session.get("accesslevel", "")
+    username = session.get("username", "")
+
+    if access_level in ("CMO", "NCH", "ODH"):
+        return jsonify({"blocked": False})
+
+    try:
+        row = db.session.execute(
+            text("""
+                SELECT TOP 1 APPR_STS, APPR_ID, APPR_ID_From
+                FROM MCMOCAMStatus WITH (NOLOCK)
+                WHERE APPL_NO = :appl_no
+                ORDER BY No DESC
+            """),
+            {"appl_no": appl_no},
+        ).mappings().first()
+
+        if row is None:
+            return jsonify({"blocked": False})
+
+        appr_sts = row["APPR_STS"]
+        appr_id = row["APPR_ID"]
+        appr_id_from = row["APPR_ID_From"]
+
+        if appr_sts == 'T' and appr_id == username:
+            return jsonify({
+                "blocked": True,
+                "message": f"this CAM has been withdraw by {appr_id_from}",
+            })
+        elif appr_sts == 'R' and appr_id != username:
+            return jsonify({
+                "blocked": True,
+                "message": f"this CAM has been rejected by {appr_id}",
+            })
+
+        return jsonify({"blocked": False})
+
+    except Exception:
+        current_app.logger.exception("validate_cam error")
+        return jsonify({"blocked": False})

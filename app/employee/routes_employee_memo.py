@@ -2,9 +2,10 @@ import os
 from datetime import datetime
 from flask import Blueprint, jsonify, request, current_app, session
 from app import db
+from app.auth.decorators import login_required
 from sqlalchemy import text
 
-employee_memo_bp = Blueprint("memo", __name__, url_prefix="/EmployeeMemo")
+employee_memo_bp = Blueprint("memo", __name__, url_prefix="/Employee")
 
 def _ddmm_to_iso(v: str) -> str:
     if not v:
@@ -14,7 +15,8 @@ def _ddmm_to_iso(v: str) -> str:
     except ValueError:
         return ""
 
-@employee_memo_bp.route("/api/role")
+@employee_memo_bp.route("/role")
+@login_required
 def get_role():
     employee = session.get("emp_id", "")
     try:
@@ -28,7 +30,8 @@ def get_role():
         current_app.logger.exception("Role error")
         return jsonify({"is_hr": False, "is_it": False})
 
-@employee_memo_bp.route("/api/memo-types")
+@employee_memo_bp.route("/memo-types")
+@login_required
 def get_memo_types():
     try:
         rows = db.session.execute(
@@ -39,7 +42,8 @@ def get_memo_types():
         current_app.logger.exception("Memo types error")
         return jsonify([]), 500
 
-@employee_memo_bp.route("/api/employees")
+@employee_memo_bp.route("/employees")
+@login_required
 def get_employees():
     try:
         rows = db.session.execute(
@@ -50,7 +54,8 @@ def get_employees():
         current_app.logger.exception("Employees error")
         return jsonify([]), 500
 
-@employee_memo_bp.route("/api/branches")
+@employee_memo_bp.route("/branches")
+@login_required
 def get_branches():
     try:
         rows = db.session.execute(
@@ -61,8 +66,8 @@ def get_branches():
         current_app.logger.exception("Branches error")
         return jsonify([]), 500
 
-
-@employee_memo_bp.route("/api/divisions")
+@employee_memo_bp.route("/divisions")
+@login_required
 def get_divisions():
     try:
         rows = db.session.execute(
@@ -73,7 +78,8 @@ def get_divisions():
         current_app.logger.exception("Divisions error")
         return jsonify([]), 500
 
-@employee_memo_bp.route("/api/positions")
+@employee_memo_bp.route("/positions")
+@login_required
 def get_positions():
     div_id = request.args.get("div_id", "")
     try:
@@ -86,7 +92,8 @@ def get_positions():
         current_app.logger.exception("Positions error")
         return jsonify([]), 500
 
-@employee_memo_bp.route("/api/positions-all")
+@employee_memo_bp.route("/positions-all")
+@login_required
 def get_positions_all():
     try:
         rows = db.session.execute(
@@ -94,7 +101,7 @@ def get_positions_all():
                 SELECT a.Position_ID,
                        CONCAT(b.Div_Desc, ' - ', a.Position_Desc) AS Position_Desc
                 FROM UMF_EMPOS a WITH(NOLOCK)
-                INNER JOIN UMF_DIV b WITH(NOLOCK) ON a.Div_Id = b.Div_Id
+                    INNER JOIN UMF_DIV b WITH(NOLOCK) ON a.Div_Id = b.Div_Id
                 ORDER BY b.Div_Desc, a.Position_Desc
             """)
         ).mappings().all()
@@ -103,7 +110,8 @@ def get_positions_all():
         current_app.logger.exception("Positions-all error")
         return jsonify([]), 500
 
-@employee_memo_bp.route("/api/search")
+@employee_memo_bp.route("/search")
+@login_required
 def search_memos():
     memo_from = request.args.get("memo_from", "")
     memo_to   = request.args.get("memo_to",   "")
@@ -140,7 +148,8 @@ def search_memos():
         current_app.logger.exception("Memo search error")
         return jsonify({"error": "Search failed"}), 500
 
-@employee_memo_bp.route("/api/employee/<employee_id>")
+@employee_memo_bp.route("/employee/<employee_id>")
+@login_required
 def get_employee_detail(employee_id: str):
     try:
         row = db.session.execute(
@@ -148,8 +157,8 @@ def get_employee_detail(employee_id: str):
                 SELECT a.Employee_ID, a.Employee_fullname, a.Branch_Cd,
                        a.Div_Id, a.Position_Id, b.Position_Desc
                 FROM EMPLOYEE_DATA a WITH(NOLOCK)
-                INNER JOIN UMF_EMPOS b WITH(NOLOCK)
-                    ON a.Div_Id = b.Div_Id AND a.Position_Id = b.Position_ID
+                    INNER JOIN UMF_EMPOS b WITH(NOLOCK)
+                        ON a.Div_Id = b.Div_Id AND a.Position_Id = b.Position_ID
                 WHERE a.Employee_ID = :emp_id
             """),
             {"emp_id": employee_id},
@@ -178,7 +187,8 @@ def get_employee_detail(employee_id: str):
         current_app.logger.exception("Employee detail error")
         return jsonify({"error": "Failed"}), 500
 
-@employee_memo_bp.route("/api/detail/<memo_id>")
+@employee_memo_bp.route("/detail/<memo_id>")
+@login_required
 def get_memo_detail(memo_id: str):
     try:
         row = db.session.execute(
@@ -191,8 +201,8 @@ def get_memo_detail(memo_id: str):
                        FORMAT(a.email_offdate, 'dd-MM-yyyy') AS email_offdate,
                        FORMAT(a.app_offdate,   'dd-MM-yyyy') AS app_offdate
                 FROM EMPLOYEE_MEMO a WITH(NOLOCK)
-                INNER JOIN UMF_EMPOS b WITH(NOLOCK)
-                    ON a.Div_Id = b.Div_Id AND a.Position_Id = b.Position_ID
+                    INNER JOIN UMF_EMPOS b WITH(NOLOCK)
+                        ON a.Div_Id = b.Div_Id AND a.Position_Id = b.Position_ID
                 WHERE a.id = :id
             """),
             {"id": memo_id},
@@ -230,7 +240,8 @@ def get_memo_detail(memo_id: str):
         current_app.logger.exception("Memo detail error")
         return jsonify({"error": "Failed"}), 500
 
-@employee_memo_bp.route("/api/save", methods=["POST"])
+@employee_memo_bp.route("/save", methods=["POST"])
+@login_required
 def save_memo():
     username = session.get("username", "")
     b = request.get_json(force=True) or {}
@@ -330,8 +341,8 @@ def save_memo():
         current_app.logger.exception("Memo save error")
         return jsonify({"success": False, "message": "Save failed"}), 500
 
-
-@employee_memo_bp.route("/api/cancel", methods=["POST"])
+@employee_memo_bp.route("/cancel", methods=["POST"])
+@login_required
 def cancel_memo():
     username = session.get("username", "")
     b        = request.get_json(force=True) or {}
@@ -349,8 +360,8 @@ def cancel_memo():
                 SELECT FORMAT(a.Memo_Date, 'dd-MM-yyyy') AS Memo_Date,
                        a.Employee_ID, a.Employee_Fullname, b.DESC_VALUE AS Memo_Type
                 FROM EMPLOYEE_MEMO a WITH(NOLOCK)
-                INNER JOIN MSTCOMBO b WITH(NOLOCK)
-                    ON a.Memo_Type = b.VALUE AND b.CAT_VALUE = 'MEMO_EMPLOYEE_TYPE'
+                    INNER JOIN MSTCOMBO b WITH(NOLOCK)
+                        ON a.Memo_Type = b.VALUE AND b.CAT_VALUE = 'MEMO_EMPLOYEE_TYPE'
                 WHERE a.Id = :id
             """),
             {"id": memo_id},
@@ -369,8 +380,8 @@ def cancel_memo():
         current_app.logger.exception("Memo cancel error")
         return jsonify({"success": False, "message": "Failed"}), 500
 
-
-@employee_memo_bp.route("/api/email", methods=["POST"])
+@employee_memo_bp.route("/email", methods=["POST"])
+@login_required
 def update_email():
     b       = request.get_json(force=True) or {}
     memo_id = b.get("memo_id", "")

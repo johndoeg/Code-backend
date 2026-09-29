@@ -1,10 +1,12 @@
 from flask import Blueprint, jsonify, current_app
 from sqlalchemy import text
 from app import db 
+from app.auth.decorators import login_required
 
 common_bp = Blueprint('common', __name__, url_prefix='/Common')
 
-@common_bp.route('/api/branches', methods=['GET'])
+@common_bp.route('/branches', methods=['GET'])
+@login_required
 def get_branches():
     try:
         data_query = text("""
@@ -32,12 +34,12 @@ def get_branches():
     except ValueError as e:
         current_app.logger.error(f"Invalid parameter in branches endpoint: {e}")
         return jsonify({"success": False, "message": "Invalid parameter value"}), 400
-    except Exception as e:
-        print(f"Error in get_branches: {e}")
+    except Exception:
         current_app.logger.exception("Failed to fetch branches")
         return jsonify({"success": False, "message": "Failed to fetch branches"}), 500
     
-@common_bp.route('/api/combo/<category>', methods=['GET'])
+@common_bp.route('/combo/<category>', methods=['GET'])
+@login_required
 def get_combos(category: str):
     try:
         category = category.strip()
@@ -66,8 +68,6 @@ def get_combos(category: str):
             "total": len(combos)
         })
         
-    except Exception as e:
-        print(f"Error in get_combos for category '{category}': {e}")
+    except Exception:
         current_app.logger.exception(f"Failed to fetch combos for category: {category}")
         return jsonify({"success": False, "message": "Failed to fetch combo data"}), 500
-    

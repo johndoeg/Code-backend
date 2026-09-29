@@ -1,5 +1,6 @@
 from flask import Blueprint, jsonify, request, current_app, session
 from app import db
+from app.auth.decorators import login_required
 from sqlalchemy import text
 
 uacc_bp = Blueprint('uacc', __name__, url_prefix='/SystemAdmin')
@@ -12,7 +13,8 @@ USER_RIGHT_LABELS = {
     9: "Full",
 }
 
-@uacc_bp.route('/api/uacc/access-options')
+@uacc_bp.route('/uacc/access-options')
+@login_required
 def get_access_options():
     try:
         result = db.session.execute(
@@ -23,8 +25,8 @@ def get_access_options():
         current_app.logger.exception("Access options error")
         return jsonify({"data": [], "error": str(e)}), 500
 
-
-@uacc_bp.route('/api/uacc/menu-rights')
+@uacc_bp.route('/uacc/menu-rights')
+@login_required
 def get_menu_rights():
    
     accesscam = request.args.get('accesscam', '').strip()
@@ -38,8 +40,8 @@ def get_menu_rights():
                 m.menu_desc,
                 ISNULL(a.userright, 0) AS userright
             FROM APP_CAMMNLST m WITH(NOLOCK)
-            LEFT JOIN APP_CAMMNACC a WITH(NOLOCK)
-                ON a.menu_id = m.menu_id AND a.ACCESSCAM = :accesscam
+                LEFT JOIN APP_CAMMNACC a WITH(NOLOCK)
+                    ON a.menu_id = m.menu_id AND a.ACCESSCAM = :accesscam
             WHERE m.url <> ''
             ORDER BY m.menu_id
         """), {"accesscam": accesscam})
@@ -61,8 +63,8 @@ def get_menu_rights():
         current_app.logger.exception("Menu rights error")
         return jsonify({"data": [], "error": str(e)}), 500
 
-
-@uacc_bp.route('/api/uacc/save', methods=['POST'])
+@uacc_bp.route('/uacc/save', methods=['POST'])
+@login_required
 def save_uacc():
     
     body      = request.get_json()

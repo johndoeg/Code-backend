@@ -1,6 +1,8 @@
 from flask import Blueprint, jsonify, request, current_app, send_file
 from app import db
+from app.auth.decorators import login_required
 from sqlalchemy import text
+
 from werkzeug.utils import secure_filename
 import openpyxl
 import io
@@ -18,7 +20,8 @@ DEFAULT_VENDOR_CONFIG = {'start_row': 8, 'chasis_col': 5}
 def _allowed_file(filename: str) -> bool:
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
-@gps_bp.route('/api/invoice/vendors')
+@gps_bp.route('/invoice/vendors')
+@login_required
 def get_gps_vendors():
     try:
         result = db.session.execute(text("""
@@ -33,7 +36,8 @@ def get_gps_vendors():
         current_app.logger.exception("GPS vendors error")
         return jsonify([])
 
-@gps_bp.route('/api/invoice')
+@gps_bp.route('/invoice')
+@login_required
 def get_invoice_summary():
     vendor = request.args.get('vendor')
     page  = request.args.get('page',  1,  type=int)
@@ -68,7 +72,8 @@ def get_invoice_summary():
         current_app.logger.exception("Invoice summary error")
         return jsonify({"error": "Failed to load invoice summary"}), 500
 
-@gps_bp.route('/api/invoice/detail')
+@gps_bp.route('/invoice/detail')
+@login_required
 def get_invoice_detail():
     asof   = request.args.get('asof')
     vendor = request.args.get('vendor')
@@ -98,7 +103,8 @@ def get_invoice_detail():
         current_app.logger.exception("Invoice detail error")
         return jsonify({"error": "Failed to load invoice details"}), 500
 
-@gps_bp.route('/api/invoice/upload', methods=['POST'])
+@gps_bp.route('/invoice/upload', methods=['POST'])
+@login_required
 def upload_invoice():
     try:
         file   = request.files.get('invoiceGPS')
@@ -128,8 +134,12 @@ def upload_invoice():
                 last_row = row_idx
 
         chasis_list = []
-        for row_idx in range(start_row, last_row + 1):
-            val = ws.cell(row=row_idx, column=chasis_col).value
+        for row_idx, row in enumerate(
+            ws.iter_rows(min_col=chasis_col, max_col=chasis_col, values_only=True), start=1
+        ):
+            if row_idx < start_row or row_idx > last_row:
+                continue
+            val = row[0]
             if val not in (None, ''):
                 chasis_list.append(str(val))
 

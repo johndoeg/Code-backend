@@ -1,10 +1,12 @@
 from flask import Blueprint, jsonify, request, current_app
 from app import db
+from app.auth.decorators import login_required
 from sqlalchemy import text
 
 insurance_list_bp = Blueprint("insurance_list", __name__, url_prefix="/MasterData")
 
-@insurance_list_bp.route("/api/companies")
+@insurance_list_bp.route("/companies")
+@login_required
 def get_companies():
     try:
         rows = db.session.execute(
@@ -15,7 +17,8 @@ def get_companies():
         current_app.logger.exception("Insurance companies error")
         return jsonify([]), 500
 
-@insurance_list_bp.route("/api/models")
+@insurance_list_bp.route("/models")
+@login_required
 def get_models():
     try:
         rows = db.session.execute(
@@ -31,7 +34,8 @@ def get_models():
         current_app.logger.exception("Insurance models error")
         return jsonify([]), 500
 
-@insurance_list_bp.route("/api/premi")
+@insurance_list_bp.route("/premi")
+@login_required
 def get_premi():
     ins_cd = request.args.get("ins_cd", "00")
     model  = request.args.get("model",  "00")
@@ -47,11 +51,11 @@ def get_premi():
                     a.PREMI,
                     d.Name        AS insurance_area
                 FROM CLFINSPRE a WITH(NOLOCK)
-                LEFT JOIN UMFINSCD         e WITH(NOLOCK) ON a.INS_CD = e.INS_CD
-                LEFT JOIN MSTCOMBO         b WITH(NOLOCK) ON a.MODEL  = b.VALUE
-                                                          AND b.CAT_VALUE = 'MODEL_ASURANSI'
-                LEFT JOIN mstTLOAR         c WITH(NOLOCK) ON a.TLO_AR = c.CODE
-                LEFT JOIN MSTINSURANCEAREA d WITH(NOLOCK) ON a.Insurance_Area = d.Code
+                    LEFT JOIN UMFINSCD         e WITH(NOLOCK) ON a.INS_CD = e.INS_CD
+                    LEFT JOIN MSTCOMBO         b WITH(NOLOCK) ON a.MODEL  = b.VALUE
+                                                            AND b.CAT_VALUE = 'MODEL_ASURANSI'
+                    LEFT JOIN mstTLOAR         c WITH(NOLOCK) ON a.TLO_AR = c.CODE
+                    LEFT JOIN MSTINSURANCEAREA d WITH(NOLOCK) ON a.Insurance_Area = d.Code
                 WHERE (a.INS_CD = :ins_cd OR :ins_cd = '00')
                   AND (a.MODEL  = :model  OR :model  = '00')
                 ORDER BY e.INS_CO, d.Name, b.DESC_VALUE
@@ -74,7 +78,8 @@ def get_premi():
         current_app.logger.exception("Insurance premi error")
         return jsonify({"error": "Failed to load premi data"}), 500
 
-@insurance_list_bp.route("/api/tpl")
+@insurance_list_bp.route("/tpl")
+@login_required
 def get_tpl():
     ins_cd = request.args.get("ins_cd", "00")
     model  = request.args.get("model",  "00")
@@ -89,9 +94,9 @@ def get_tpl():
                     a.TPL_FEE,
                     a.TPL_FEE2
                 FROM CLFINSTPL a WITH(NOLOCK)
-                LEFT JOIN UMFINSCD e WITH(NOLOCK) ON a.INS_CD = e.INS_CD
-                LEFT JOIN MSTCOMBO b WITH(NOLOCK) ON a.MODEL  = b.VALUE
-                                                  AND b.CAT_VALUE = 'MODEL_ASURANSI'
+                    LEFT JOIN UMFINSCD e WITH(NOLOCK) ON a.INS_CD = e.INS_CD
+                    LEFT JOIN MSTCOMBO b WITH(NOLOCK) ON a.MODEL  = b.VALUE
+                                                    AND b.CAT_VALUE = 'MODEL_ASURANSI'
                 WHERE (a.INS_CD = :ins_cd OR :ins_cd = '00')
                   AND (a.MODEL  = :model  OR :model  = '00')
                 ORDER BY e.INS_CO, b.DESC_VALUE
@@ -100,7 +105,6 @@ def get_tpl():
         ).mappings().all()
 
         def fmt(val) -> str:
-            """Replicate PHP number_format($val, 0)."""
             try:
                 return f"{int(val):,}"
             except (TypeError, ValueError):

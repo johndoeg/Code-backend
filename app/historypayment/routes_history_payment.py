@@ -1,6 +1,7 @@
 from flask import Blueprint, request, send_file, current_app, jsonify, session
 from sqlalchemy import text
 from app import db
+from app.auth.decorators import login_required
 import pandas as pd
 import io
 from datetime import datetime
@@ -16,14 +17,14 @@ def _fmt_date(value) -> str:
         return value.strftime("%d-%m-%Y")
     return str(value)
  
- 
 def _float(value) -> float:
     try:
         return float(value) if value is not None else 0.0
     except (TypeError, ValueError):
         return 0.0
 
-@history_payment_bp.route('/api/history-payment', methods=['GET'])
+@history_payment_bp.route('/history-payment', methods=['GET'])
+@login_required
 def get_history_payment_records():
     try:
         print_by = request.args.get('print_by', '').strip()
@@ -90,9 +91,9 @@ def get_history_payment_records():
             FROM (
                 SELECT a.LEASE_NO, b.LESSEE_NM, b.LESSEE_NO
                 FROM CLFCONT a WITH(NOLOCK)
-                LEFT JOIN CLFLESS b WITH(NOLOCK) ON a.LESSEE_NO = b.LESSEE_NO
-                LEFT JOIN CAFEQUIP eq WITH(NOLOCK) ON a.APPL_NO = eq.APPL_NO
-                LEFT JOIN TAMASTER d WITH(NOLOCK) ON a.LEASE_NO = d.LEASE_NO
+                    LEFT JOIN CLFLESS b WITH(NOLOCK) ON a.LESSEE_NO = b.LESSEE_NO
+                    LEFT JOIN CAFEQUIP eq WITH(NOLOCK) ON a.APPL_NO = eq.APPL_NO
+                    LEFT JOIN TAMASTER d WITH(NOLOCK) ON a.LEASE_NO = d.LEASE_NO
                 WHERE {where}
             ) AS subquery
         """.format(where=where_clause))
@@ -126,12 +127,12 @@ def get_history_payment_records():
                         a.UPD_STAT,
                         d.MSTR_CL
                     FROM CLFCONT a WITH(NOLOCK)
-                    LEFT JOIN CLFLESS b WITH(NOLOCK) ON a.LESSEE_NO = b.LESSEE_NO
-                    LEFT JOIN CAFEQUIP eq WITH(NOLOCK) ON a.APPL_NO = eq.APPL_NO
-                    LEFT JOIN CAFLESS_DETAIL_ADDRESS e WITH(NOLOCK) ON b.APLESS = e.APLESS
-                    LEFT JOIN Mst_Kecamatan f WITH(NOLOCK) ON e.KECAMATAN = f.Kecamatan_CD
-                    LEFT JOIN Mst_Kelurahan g WITH(NOLOCK) ON e.KELURAHAN = g.Kelurahan_CD
-                    LEFT JOIN TAMASTER d WITH(NOLOCK) ON a.LEASE_NO = d.LEASE_NO
+                        LEFT JOIN CLFLESS b WITH(NOLOCK) ON a.LESSEE_NO = b.LESSEE_NO
+                        LEFT JOIN CAFEQUIP eq WITH(NOLOCK) ON a.APPL_NO = eq.APPL_NO
+                        LEFT JOIN CAFLESS_DETAIL_ADDRESS e WITH(NOLOCK) ON b.APLESS = e.APLESS
+                        LEFT JOIN Mst_Kecamatan f WITH(NOLOCK) ON e.KECAMATAN = f.Kecamatan_CD
+                        LEFT JOIN Mst_Kelurahan g WITH(NOLOCK) ON e.KELURAHAN = g.Kelurahan_CD
+                        LEFT JOIN TAMASTER d WITH(NOLOCK) ON a.LEASE_NO = d.LEASE_NO
                     WHERE {where}
                 ) AS inner_query
             ) AS outer_query
@@ -170,7 +171,7 @@ def get_history_payment_records():
             "total": total,
             "page": page,
             "limit": limit,
-            "total_pages": (total + limit - 1)
+            "total_pages": (total + limit - 1) // limit if limit else 0
         })
         
     except ValueError as e:
@@ -181,7 +182,8 @@ def get_history_payment_records():
         current_app.logger.exception("History payment search error")
         return jsonify({"success": False, "message": "Failed to fetch payment history"}), 500
 
-@history_payment_bp.route('/api/amortization', methods=['GET'])
+@history_payment_bp.route('/amortization', methods=['GET'])
+@login_required
 def get_amortization_data():
     lease_no = request.args.get('lease_no', '').strip()
     
@@ -257,7 +259,7 @@ def get_amortization_data():
             "rows": rows
         })
         
-    except Exception as e:
+    except Exception:
         current_app.logger.exception(f"Amortization fetch error for {lease_no}")
         return jsonify({"error": "Failed to fetch amortization data"}), 500
 
@@ -270,6 +272,7 @@ def parse_asof_date(asof_str: str) -> str:
         raise ValueError("Invalid date format. Expected DD-MM-YYYY")
 
 @history_payment_bp.route('/export/aging-detail', methods=['GET'])
+@login_required
 def export_aging_detail_excel():
   
     try:
@@ -395,7 +398,7 @@ def export_aging_detail_excel():
             for col_idx, header in enumerate(headers, start=1):
                 col_letter = get_column_letter(col_idx)
                 max_len = max(len(str(header)), df.iloc[:, col_idx-1].astype(str).str.len().max() if not df.empty else 0)
-                worksheet.column_dimensions[col_letter].width = min(max_len + 2, 50)  # Cap at 50 chars
+                worksheet.column_dimensions[col_letter].width = min(max_len + 2, 50)
             
             totals_row = len(df) + 6
             total_labels = ['', '', '', '', '', '', '', 'TOTAL', '', '', '', '', '', '', '', '', '', '', 'TOTAL', '', '', '', '', '', '', '', '', '', '', '', '', '', 'TOTAL', 'TOTAL']
@@ -456,7 +459,8 @@ def export_aging_detail_excel():
         current_app.logger.exception(f"Excel export error: {e}")
         return jsonify({"error": "Failed to generate Excel file"}), 500
 
-@history_payment_bp.route('/api/history-payment/print', methods=['GET'])
+@history_payment_bp.route('/history-payment/print', methods=['GET'])
+@login_required
 def get_history_payment_print():
    
     try:
@@ -497,6 +501,7 @@ def get_history_payment_print():
                 f.MODEL_NM,
                 g.BRANCH_NAME,
                 h.BRAND_NM,
+                n.KAROSERI_DESC,
                 c.DATEBLOKIR,
                 c.NOPOLBLOKIR,
                 CASE
@@ -505,21 +510,21 @@ def get_history_payment_print():
                     WHEN a.UPD_STAT = 'F'                              THEN 'Finish'
                     ELSE 'Terminate'
                 END                         AS status_kontrak,
-                -- IIF in PHP checks <> '' but a LEFT JOIN miss gives NULL, so IS NOT NULL guard needed
                 IIF(m.lease_no IS NOT NULL AND m.lease_no <> '', '(JFG)', '') AS JFG
-            FROM      CLFCONT  a WITH(NOLOCK)
-            LEFT JOIN CLFLESS  b WITH(NOLOCK) ON a.LESSEE_NO   = b.LESSEE_NO
-            LEFT JOIN CLFEQUIP c WITH(NOLOCK) ON a.LEASE_NO    = c.LEASE_NO
-            LEFT JOIN CLFSUPP  d WITH(NOLOCK) ON c.SUPP        = d.SUPP
-            LEFT JOIN UMFTYPE  e WITH(NOLOCK) ON c.BRAND       = e.BRAND  AND c.TYPE  = e.TYPE
-            LEFT JOIN UMFMODEL f WITH(NOLOCK) ON c.MODEL       = f.MODEL
-            LEFT JOIN UMFBRANCH g WITH(NOLOCK) ON a.BRANCH_CD  = g.BRANCH_CD
-            LEFT JOIN UMFBRAND  h WITH(NOLOCK) ON c.BRAND      = h.BRAND
-            LEFT JOIN MSTCFFL   i WITH(NOLOCK) ON i.Cons_Leas  = a.Cons_Leas
-            LEFT JOIN CAFLESS_DETAIL_ADDRESS j WITH(NOLOCK) ON b.APLESS      = j.APLESS
-            LEFT JOIN Mst_Kecamatan k WITH(NOLOCK) ON j.KECAMATAN = k.Kecamatan_CD
-            LEFT JOIN Mst_Kelurahan l WITH(NOLOCK) ON j.KELURAHAN = l.Kelurahan_CD
-            LEFT JOIN JF_GANESHA m WITH(NOLOCK) ON a.lease_no  = m.lease_no
+            FROM CLFCONT  a WITH(NOLOCK)
+                LEFT JOIN CLFLESS  b WITH(NOLOCK) ON a.LESSEE_NO   = b.LESSEE_NO
+                LEFT JOIN CLFEQUIP c WITH(NOLOCK) ON a.LEASE_NO    = c.LEASE_NO
+                LEFT JOIN CLFSUPP  d WITH(NOLOCK) ON c.SUPP        = d.SUPP
+                LEFT JOIN UMFTYPE  e WITH(NOLOCK) ON c.BRAND       = e.BRAND  AND c.TYPE  = e.TYPE
+                LEFT JOIN UMFMODEL f WITH(NOLOCK) ON c.MODEL       = f.MODEL
+                LEFT JOIN UMFBRANCH g WITH(NOLOCK) ON a.BRANCH_CD  = g.BRANCH_CD
+                LEFT JOIN UMFBRAND  h WITH(NOLOCK) ON c.BRAND      = h.BRAND
+                LEFT JOIN MSTCFFL   i WITH(NOLOCK) ON i.Cons_Leas  = a.Cons_Leas
+                LEFT JOIN CAFLESS_DETAIL_ADDRESS j WITH(NOLOCK) ON b.APLESS      = j.APLESS
+                LEFT JOIN Mst_Kecamatan k WITH(NOLOCK) ON j.KECAMATAN = k.Kecamatan_CD
+                LEFT JOIN Mst_Kelurahan l WITH(NOLOCK) ON j.KELURAHAN = l.Kelurahan_CD
+                LEFT JOIN JF_GANESHA m WITH(NOLOCK) ON a.lease_no  = m.lease_no
+                LEFT JOIN UMFKAROSERI n WITH(NOLOCK) ON c.MODEL = n.MODEL AND c.KAROSERI = n.KAROSERI
             WHERE a.LEASE_NO = :lease_no
         """)
  
@@ -527,9 +532,13 @@ def get_history_payment_print():
         if row is None:
             return jsonify({"success": False, "message": "Contract not found"}), 404
  
-        type_nm = f"{row.BRAND_NM or ''} {row.TYPE_NM or ''}".strip()
- 
+        type_nm = f"{row.BRAND_NM or ''} {row.TYPE_NM or ''}"
+        karoseri_desc = (row.KAROSERI_DESC or "").strip()
+        if karoseri_desc:
+            type_nm = f"{type_nm} + {karoseri_desc}"
+
         contract_info = {
+            "COMPANY_NAME":   current_app.config.get("COMPANY_NAME", "PT Genie Finance Indonesia"),
             "LESSEE_NO":      row.LESSEE_NO      or "",
             "trans_code":     row.trans_code      or "",
             "LESSEE_NM":      row.LESSEE_NM       or "",

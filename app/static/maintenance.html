@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>Under Maintenance — GenieFinance</title>
+	<style>
+		:root {
+			--bg: #0B1220;
+			--bg-soft: #0F1A2E;
+			--card: #101B30;
+			--hairline: #223047;
+			--ink: #E8ECF3;
+			--ink-muted: #8CA0BC;
+			--ink-dim: #56698A;
+			--amber: #E8A33D;
+			--amber-dim: #6B5227;
+		}
+
+		* {
+			box-sizing: border-box;
+		}
+
+		html,
+		body {
+			margin: 0;
+			min-height: 100vh;
+			background: var(--bg);
+			color: var(--ink);
+			font-family: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+		}
+
+		body {
+			display: flex;
+			align-items: center;
+			justify-content: center;
+			padding: 24px;
+			background-image:
+				radial-gradient(ellipse 900px 500px at 50% -10%, rgba(232, 163, 61, 0.06), transparent);
+		}
+
+		.ticket {
+			width: 100%;
+			max-width: 460px;
+			background: var(--card);
+			border: 1px solid var(--hairline);
+			border-radius: 3px;
+			overflow: hidden;
+		}
+
+		.ticket-head {
+			padding: 22px 28px 18px;
+			border-bottom: 1px solid var(--hairline);
+			display: flex;
+			align-items: center;
+			justify-content: space-between;
+		}
+
+		.brand {
+			font-size: 13px;
+			letter-spacing: 0.08em;
+			text-transform: uppercase;
+			color: var(--ink-muted);
+			font-weight: 600;
+		}
+
+		.status-pill {
+			display: inline-flex;
+			align-items: center;
+			gap: 6px;
+			font-family: 'IBM Plex Mono', 'SF Mono', Consolas, monospace;
+			font-size: 11px;
+			letter-spacing: 0.05em;
+			color: var(--amber);
+			border: 1px solid var(--amber-dim);
+			border-radius: 2px;
+			padding: 4px 8px 4px 7px;
+		}
+
+		.status-dot {
+			width: 6px;
+			height: 6px;
+			border-radius: 50%;
+			background: var(--amber);
+			animation: pulse 1.8s ease-in-out infinite;
+		}
+
+		@keyframes pulse {
+
+			0%,
+			100% {
+				opacity: 1;
+			}
+
+			50% {
+				opacity: 0.35;
+			}
+		}
+
+		.ticket-body {
+			padding: 32px 28px 8px;
+		}
+
+		h1 {
+			margin: 0 0 14px;
+			font-size: 22px;
+			font-weight: 600;
+			letter-spacing: -0.01em;
+			color: var(--ink);
+		}
+
+		p.message {
+			margin: 0 0 6px;
+			font-size: 14.5px;
+			line-height: 1.6;
+			color: var(--ink-muted);
+		}
+
+		.divider {
+			height: 1px;
+			background: var(--hairline);
+			margin: 24px 0;
+		}
+
+		.eta-row {
+			display: flex;
+			align-items: baseline;
+			justify-content: space-between;
+			margin-bottom: 14px;
+		}
+
+		.eta-label {
+			font-size: 11px;
+			letter-spacing: 0.08em;
+			text-transform: uppercase;
+			color: var(--ink-dim);
+		}
+
+		.eta-clock {
+			font-family: 'IBM Plex Mono', 'SF Mono', Consolas, monospace;
+			font-size: 20px;
+			font-weight: 500;
+			color: var(--amber);
+			letter-spacing: 0.02em;
+		}
+
+		.ledger-bar {
+			width: 100%;
+			height: 3px;
+			background: var(--hairline);
+			border-radius: 2px;
+			overflow: hidden;
+			margin-bottom: 28px;
+		}
+
+		.ledger-fill {
+			height: 100%;
+			background: var(--amber);
+			width: 0%;
+			transition: width 1s linear;
+		}
+
+		.ticket-foot {
+			padding: 16px 28px 22px;
+			border-top: 1px solid var(--hairline);
+			font-size: 12.5px;
+			color: var(--ink-dim);
+			display: flex;
+			align-items: center;
+			justify-content: space-between;
+		}
+
+		.ticket-foot a {
+			color: var(--ink-muted);
+			text-decoration: none;
+			border-bottom: 1px solid var(--hairline);
+		}
+
+		.ticket-foot a:hover {
+			color: var(--amber);
+			border-color: var(--amber-dim);
+		}
+
+		.ref {
+			font-family: 'IBM Plex Mono', 'SF Mono', Consolas, monospace;
+			font-size: 11px;
+			color: var(--ink-dim);
+		}
+
+		@media (max-width: 420px) {
+
+			.ticket-head,
+			.ticket-body,
+			.ticket-foot {
+				padding-left: 20px;
+				padding-right: 20px;
+			}
+		}
+
+		@media (prefers-reduced-motion: reduce) {
+			.status-dot {
+				animation: none;
+			}
+
+			.ledger-fill {
+				transition: none;
+			}
+		}
+	</style>
+</head>
+
+<body>
+
+	<div class="ticket">
+		<div class="ticket-head">
+			<span class="brand">GenieFinance</span>
+			<span class="status-pill"><span class="status-dot"></span>MAINTENANCE</span>
+		</div>
+
+		<div class="ticket-body">
+			<h1>System temporarily unavailable</h1>
+			<p class="message">We're currently performing scheduled maintenance.</p>
+			<p class="message">Your data is safe. Access will resume automatically once work is complete.</p>
+
+			<div class="divider"></div>
+
+			<div class="eta-row">
+				<span class="eta-label">Estimated back online in</span>
+				<span class="eta-clock" id="clock">10:00</span>
+			</div>
+			<div class="ledger-bar">
+				<div class="ledger-fill" id="fill"></div>
+			</div>
+		</div>
+
+		<div class="ticket-foot">
+			<span>Urgent? <a href="mailto:support@geniefinance.com">support@geniefinance.com</a></span>
+			<span class="ref" id="ref"></span>
+		</div>
+	</div>
+
+	<script>
+		const RETRY_AFTER_SECONDS = 600;
+
+		const clockEl = document.getElementById('clock');
+		const fillEl = document.getElementById('fill');
+		const refEl = document.getElementById('ref');
+
+		const startedAt = Date.now();
+		refEl.textContent = 'REF ' + startedAt.toString(36).toUpperCase();
+
+		function formatTime(totalSeconds) {
+			const m = Math.floor(totalSeconds / 60).toString().padStart(2, '0');
+			const s = Math.floor(totalSeconds % 60).toString().padStart(2, '0');
+			return m + ':' + s;
+		}
+
+		function tick() {
+			const elapsed = (Date.now() - startedAt) / 1000;
+			const remaining = Math.max(0, RETRY_AFTER_SECONDS - elapsed);
+			clockEl.textContent = formatTime(remaining);
+			fillEl.style.width = Math.min(100, (elapsed / RETRY_AFTER_SECONDS) * 100) + '%';
+
+			if (remaining <= 0) {
+				clockEl.textContent = '00:00';
+				window.location.reload();
+				return;
+			}
+			requestAnimationFrame(() => setTimeout(tick, 1000));
+		}
+
+		tick();
+	</script>
+
+</body>
+
+</html>

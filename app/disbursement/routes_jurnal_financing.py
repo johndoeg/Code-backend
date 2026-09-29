@@ -1,5 +1,6 @@
 from flask import Blueprint, jsonify, request, current_app, session, make_response
 from app import db
+from app.auth.decorators import login_required
 import io
 from datetime import date, datetime
 
@@ -7,9 +8,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils  import get_column_letter
 
-jurnal_financing_bp = Blueprint(
-    'jurnal_financing', __name__, url_prefix='/JurnalFinancing'
-)
+jurnal_financing_bp = Blueprint('jurnal_financing', __name__, url_prefix='/JurnalFinancing')
 
 def _exec_sp(sp_name: str, params: list) -> list[dict]:
    
@@ -37,20 +36,17 @@ def _apply_default(cell):
     cell.border = _BORDER
     cell.font   = _FONT_DATA
 
-
 def _apply_right(cell):
     
     cell.border    = _BORDER
     cell.font      = _FONT_DATA
     cell.alignment = Alignment(horizontal='right', vertical='center')
 
-
 def _apply_left(cell):
     
     cell.border    = _BORDER
     cell.font      = _FONT_DATA
     cell.alignment = Alignment(horizontal='left', vertical='center')
-
 
 def _apply_header(cell):
     
@@ -66,7 +62,7 @@ _COLUMNS = [
     ('E',  ' Nama Debitur ',                'NamaDebitur',         _apply_default),
     ('F',  ' NIK Debitur ',                 'NIK',                 _apply_default),
     ('G',  ' Group ',                       'Grup',                _apply_default),
-    ('H',  ' Tempat, Tgl Lahir ',           '__BIRTH__',           _apply_default),  # combined
+    ('H',  ' Tempat, Tgl Lahir ',           '__BIRTH__',           _apply_default),
     ('I',  ' Tenor ',                       'tenor',               _apply_default),
     ('J',  ' Merek ',                       'Brand',               _apply_default),
     ('K',  ' Tipe ',                        'TypeSeries',          _apply_default),
@@ -190,7 +186,8 @@ def _build_excel(rows: list[dict], date_from: str, date_to: str,
     buf.seek(0)
     return buf.read()
 
-@jurnal_financing_bp.route('/api/excel')
+@jurnal_financing_bp.route('/excel')
+@login_required
 def export_excel():
     
     date_from = request.args.get('date_from', '').strip()

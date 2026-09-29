@@ -1,5 +1,6 @@
 from flask import Blueprint, request, jsonify, current_app
 from app import db
+from app.auth.decorators import login_required
 from sqlalchemy import text
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
@@ -32,7 +33,8 @@ def _parse_period(period_str: str) -> Optional[str]:
     except (ValueError, IndexError, TypeError):
         return None
 
-@slik_bp.route('/api/slik-backend', methods=['POST'])
+@slik_bp.route('/slik-backend', methods=['POST'])
+@login_required
 def slik_backend():
     try:
         if request.is_json:

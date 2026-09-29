@@ -1,10 +1,12 @@
 from flask import Blueprint, jsonify, request, current_app, session
 from app import db
+from app.auth.decorators import login_required
 from sqlalchemy import text
 
-menu_user_access_bp = Blueprint('menu', __name__, url_prefix='/SystemAdmin')
+menu_user_access_bp = Blueprint('menu_user_access', __name__, url_prefix='/SystemAdmin')
 
-@menu_user_access_bp.route('/api/menu')
+@menu_user_access_bp.route('/menu')
+@login_required
 def get_menu():
     page  = request.args.get('page', 1, type=int)
     limit = request.args.get('limit', 25, type=int)
@@ -26,7 +28,7 @@ def get_menu():
                     ELSE b.menu_desc
                 END AS parent_label
             FROM APP_CAMMNLST a WITH(NOLOCK)
-            LEFT JOIN APP_CAMMNLST b WITH(NOLOCK) ON a.menu_parent = b.menu_id
+                LEFT JOIN APP_CAMMNLST b WITH(NOLOCK) ON a.menu_parent = b.menu_id
             ORDER BY a.menu_id
             OFFSET :offset ROWS
             FETCH NEXT :limit ROWS ONLY
@@ -55,7 +57,8 @@ def get_menu():
         current_app.logger.exception("Menu list error")
         return jsonify({"data": [], "total": 0, "error": str(e)}), 500
 
-@menu_user_access_bp.route('/api/menu/parent-options')
+@menu_user_access_bp.route('/menu/parent-options')
+@login_required
 def get_parent_options():
     try:
         result = db.session.execute(
@@ -67,8 +70,8 @@ def get_parent_options():
         current_app.logger.exception("Parent options error")
         return jsonify({"data": [], "error": str(e)}), 500
 
-
-@menu_user_access_bp.route('/api/menu', methods=['POST'])
+@menu_user_access_bp.route('/menu', methods=['POST'])
+@login_required
 def save_menu():
     data        = request.get_json()
     menu_parent = (data.get('menu_parent') or '').strip()
@@ -123,8 +126,72 @@ def save_menu():
         current_app.logger.exception("Menu save error")
         return jsonify({"success": False, "message": "Failed", "error": str(e)}), 500
 
+@menu_user_access_bp.route('/menu/<path:menu_id>', methods=['GET'])
+@login_required
+def get_menu_detail(menu_id):
+   
+    try:
+        row = db.session.execute(text("""
+            SELECT
+                a.menu_id,
+                a.menu_desc,
+                a.menu_parent,
+                a.[url],
+                CASE
+                    WHEN a.menu_parent = '0' THEN 'Parent'
+                    ELSE b.menu_desc
+                END AS parent_label
+            FROM APP_CAMMNLST a WITH(NOLOCK)
+                LEFT JOIN APP_CAMMNLST b WITH(NOLOCK) ON a.menu_parent = b.menu_id
+            WHERE a.menu_id = :menu_id
+        """), {"menu_id": menu_id}).fetchone()
 
-@menu_user_access_bp.route('/api/menu/<path:menu_id>', methods=['DELETE'])
+        if not row:
+            return jsonify({"success": False, "message": "Menu not found"}), 404
+
+        data = {
+            "menu_id":      row.menu_id      or "",
+            "menu_desc":    row.menu_desc    or "",
+            "menu_parent":  row.menu_parent  or "",
+            "parent_label": row.parent_label or "",
+            "url":          row.url          or "",
+        }
+        return jsonify({"data": data})
+
+    except Exception as e:
+        current_app.logger.exception("Menu detail error")
+        return jsonify({"success": False, "message": str(e)}), 500
+
+@menu_user_access_bp.route('/menu/<path:menu_id>', methods=['PUT'])
+@login_required
+def update_menu(menu_id):
+  
+    data      = request.get_json()
+    menu_desc = (data.get('menu_desc') or '').strip()
+    url       = (data.get('url')       or '').strip()
+
+    if not menu_desc:
+        return jsonify({"success": False, "message": ["Menu Description must not be empty"]}), 400
+
+    try:
+        result = db.session.execute(
+            text("UPDATE APP_CAMMNLST SET menu_desc = :menu_desc, url = :url WHERE menu_id = :menu_id"),
+            {"menu_desc": menu_desc, "url": url, "menu_id": menu_id}
+        )
+        if result.rowcount == 0:
+            db.session.rollback()
+            return jsonify({"success": False, "message": "Menu not found"}), 404
+
+        db.session.commit()
+        return jsonify({"success": True, "message": "Successful"})
+
+    except Exception as e:
+        db.session.rollback()
+        current_app.logger.exception("Menu update error")
+        return jsonify({"success": False, "message": "Failed", "error": str(e)}), 500
+
+@menu_user_access_bp.route('/menu/<path:menu_id>', methods=['DELETE'])
+@login_required
 def delete_menu(menu_id):
    
     try:

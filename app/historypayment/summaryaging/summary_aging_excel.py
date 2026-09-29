@@ -12,19 +12,15 @@ _NUM    = '#,##0'
 def _ft(bold=False, size=7, name='Tahoma', color='000000'):
     return Font(bold=bold, size=size, name=name, color=color)
 
-
 def _al(h='left', v='center', wrap=False):
     return Alignment(horizontal=h, vertical=v, wrap_text=wrap)
 
-
 def _title(cell, value):
-    """styleArrayTitle — bold 12 Tahoma, left-aligned."""
     cell.value     = value
     cell.font      = _ft(bold=True, size=12)
     cell.alignment = _al('left', 'bottom')
 
 def _sub(cell, value=None):
-    """styleArraySubTitle — bold 8 Tahoma, centred, thin borders."""
     if value is not None:
         cell.value = value
     cell.font      = _ft(bold=True, size=8)
@@ -32,7 +28,6 @@ def _sub(cell, value=None):
     cell.border    = _BORDER
 
 def _data(cell, value=None, num=False):
-    """styleArrayAll — 7 Tahoma, thin borders, optional #,##0 format."""
     if value is not None:
         cell.value = value
     cell.font      = _ft()
@@ -55,14 +50,12 @@ def _fmt_date(d: str) -> str:
     except ValueError:
         return d
 
-
 def _safe_pct(num, denom, dec=2):
    
     try:
         return round((num or 0) / denom * 100, dec)
     except (ZeroDivisionError, TypeError):
         return 0.0
-
 
 def _apply_range(ws, row_start, row_end, col_start, col_end, fn, **kw):
    
@@ -85,9 +78,7 @@ _PERIODS_T2 = [
 _KEYS_T1  = ['curr', 'b1', 'b2', 'b3', 'b4', '90up']
 _KEYS_T2  = ['b5',   'b6', 'b7', '180up', 'od', 'tot']
 
-
 def _write_title_block(ws, company, subtitle, fmt_date):
-    """Rows 1-3 title block used on every sheet."""
     _title(ws['A1'], company)
     _title(ws['A2'], subtitle)
     _title(ws['A3'], 'CURRENCY : IDR')
@@ -104,7 +95,6 @@ def _period_header_4col(ws, row_merge, row_sub, col_start, periods, dim_col=None
         for lbl in _LABELS_4:
             _sub(ws.cell(row=row_sub, column=c), lbl)
             c += 1
-
 
 def _period_header_2col(ws, row_merge, row_sub, col_start, periods):
    
@@ -126,7 +116,6 @@ def _row_t1(r, keys=_KEYS_T1):
         vals += [r.get(f'acc_{k}', 0), r.get(f'amt_{k}', 0),
                  r.get(f'op_{k}', 0),  r.get(f'ar_{k}', 0)]
     return vals
-
 
 def _row_t2(r, keys=_KEYS_T2):
     return _row_t1(r, keys)
@@ -301,7 +290,6 @@ _W_CMO_S1 = {
 }
 _W_CMO_S2 = {k: 10 for k in list(_W_CMO_S1.keys())}
 _W_CMO_S2['A'] = 25
-
 
 def build_excel_by_person(rows: list[dict], rows_out: list[dict],
                           asof: str, company: str,

@@ -1,11 +1,12 @@
-from flask import Blueprint, request, jsonify, current_app, redirect
 from app import db
+from flask import Blueprint, request, jsonify, current_app, redirect
+from app.auth.decorators import login_required
 from sqlalchemy import text
 from datetime import datetime
-import boto3
 from botocore.client import Config
+import boto3
 
-customer_bp = Blueprint('customer', __name__, url_prefix='/Customer')
+customer_detail_bp = Blueprint('customer_detail', __name__, url_prefix='/CAM/CustomerDetail')
 
 def format_date_for_display(date_value):
     if not date_value:
@@ -33,13 +34,14 @@ def format_npwp_display(npwp_value):
     if not npwp_value:
         return ""
     
-    clean = ''.join(filter(str.isdigit), str(npwp_value))
+    clean = ''.join(filter(str.isdigit, str(npwp_value)))
     if len(clean) != 15:
         return npwp_value
     
     return f"{clean[0:2]}.{clean[2:5]}.{clean[5:8]}.{clean[8:9]}-{clean[9:12]}.{clean[12:16]}"
 
-@customer_bp.route('/api/detail', methods=['GET'])
+@customer_detail_bp.route('/detail', methods=['GET'])
+@login_required
 def get_customer_detail():
     apless = request.args.get('apless', '').strip()
 
@@ -255,38 +257,8 @@ def get_customer_detail():
         current_app.logger.exception(f"Customer detail fetch error for APLESS: {apless}")
         return jsonify({"success": False, "message": "Failed to fetch customer detail"}), 500
     
-
-# @customer_bp.route('/download_aws', methods=['GET'])
-# def download_aws():
-#     aws_key = request.args.get('aws_key')
-#     profile = request.args.get('profile', 'default')
-#     bucket = request.args.get('bucket')
-#     file_name = request.args.get('file_name')
-
-#     if not aws_key or not bucket:
-#         return jsonify({"error": "Missing aws_key or bucket parameter"}), 400
-
-#     try:
-#         session = boto3.Session(profile_name=profile)
-#         s3_client = session.client('s3', config=Config(signature_version='s3v4'))
-
-#         signed_url = s3_client.generate_presigned_url(
-#             'get_object',
-#             Params={
-#                 'Bucket': bucket,
-#                 'Key': aws_key
-#             },
-#             ExpiresIn=900
-#         )
-
-#         return redirect(signed_url)
-
-#     except Exception as e:
-#         current_app.logger.exception("AWS presigned URL generation failed")
-#         return jsonify({"error": "Failed to generate document link. Please check AWS configuration."}), 500
-
-
-@customer_bp.route('/download_aws', methods=['GET'])
+@customer_detail_bp.route('/download_aws', methods=['GET'])
+@login_required
 def download_aws():
     aws_key = request.args.get('aws_key')
     profile = request.args.get('profile', 'default')
@@ -298,21 +270,18 @@ def download_aws():
         return jsonify({"error": "Missing aws_key or bucket"}), 400
 
     try:
-        # Log for debugging
         current_app.logger.info(f"Generating presigned URL - Bucket: {bucket}, Key: {aws_key}, Profile: {profile}")
 
-        # Create session with explicit profile
         session = boto3.Session(profile_name=profile)
         s3_client = session.client('s3', config=Config(signature_version='s3v4'))
 
-        # Generate presigned URL
         signed_url = s3_client.generate_presigned_url(
             'get_object',
             Params={
                 'Bucket': bucket,
                 'Key': aws_key
             },
-            ExpiresIn=1800   # 30 minutes (increased for testing)
+            ExpiresIn=1800
         )
 
         current_app.logger.info(f"Presigned URL generated successfully for key: {aws_key}")

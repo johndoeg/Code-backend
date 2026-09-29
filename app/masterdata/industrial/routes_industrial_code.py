@@ -1,5 +1,6 @@
 from flask import Blueprint, jsonify, current_app
 from app import db
+from app.auth.decorators import login_required
 from sqlalchemy import text
 
 industry_bp = Blueprint('industry', __name__, url_prefix='/MasterData')
@@ -25,7 +26,8 @@ def build_tree(rows: list[dict], parent_code: str = '', parent_kepala: str = '')
 
     return children
 
-@industry_bp.route('/api/industry')
+@industry_bp.route('/industry')
+@login_required
 def get_industry():
     try:
         query = text("""

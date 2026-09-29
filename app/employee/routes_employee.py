@@ -1,10 +1,12 @@
 from flask import Blueprint, jsonify, request, current_app
 from app import db
+from app.auth.decorators import login_required
 from sqlalchemy import text
 
 employee_bp = Blueprint("employee", __name__, url_prefix="/Employee")
 
-@employee_bp.route("/api/search-options")
+@employee_bp.route("/search-options")
+@login_required
 def get_search_options():
     try:
         rows = db.session.execute(
@@ -20,7 +22,8 @@ def get_search_options():
         current_app.logger.exception("Employee search-options error")
         return jsonify([]), 500
 
-@employee_bp.route("/api/branches")
+@employee_bp.route("/branches")
+@login_required
 def get_branches():
     try:
         rows = db.session.execute(
@@ -31,7 +34,8 @@ def get_branches():
         current_app.logger.exception("Employee branches error")
         return jsonify([]), 500
 
-@employee_bp.route("/api/divisions")
+@employee_bp.route("/divisions")
+@login_required
 def get_divisions():
     try:
         rows = db.session.execute(
@@ -42,7 +46,8 @@ def get_divisions():
         current_app.logger.exception("Employee divisions error")
         return jsonify([]), 500
 
-@employee_bp.route("/api/positions")
+@employee_bp.route("/positions")
+@login_required
 def get_positions():
     try:
         rows = db.session.execute(
@@ -53,7 +58,8 @@ def get_positions():
         current_app.logger.exception("Employee positions error")
         return jsonify([]), 500
 
-@employee_bp.route("/api/search")
+@employee_bp.route("/search")
+@login_required
 def search_employees():
     search_by  = request.args.get("search_by",  "All")
     search_val = request.args.get("search_val", "").strip()
@@ -82,7 +88,8 @@ def search_employees():
         current_app.logger.exception("Employee search error")
         return jsonify({"error": "Search failed"}), 500
     
-@employee_bp.route('/api/detail')
+@employee_bp.route('/detail')
+@login_required
 def get_employee_detail():
     search_by = request.args.get('search_by')
     search_val = request.args.get('search_val')
@@ -109,7 +116,8 @@ def get_employee_detail():
         current_app.logger.exception("Employee detail error")
         return jsonify({"error": "Failed to load details"}), 500
 
-@employee_bp.route('/memo/api/details')
+@employee_bp.route('/memo/details')
+@login_required
 def get_employee_memo():
     memo_from = request.args.get('memo_from')
     memo_to = request.args.get('memo_to')

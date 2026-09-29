@@ -1,5 +1,6 @@
 from flask import Blueprint, jsonify, request, current_app
 from app import db
+from app.auth.decorators import login_required
 from sqlalchemy import text
 from datetime import datetime
 
@@ -12,8 +13,8 @@ def _fmt_date(value) -> str:
         return value.strftime("%d-%m-%Y")
     return str(value)
 
-
-@deleted_dealer_report_bp.route("/api/branches")
+@deleted_dealer_report_bp.route("/branches")
+@login_required
 def get_branches():
     branch_cd = request.args.get("branch_cd", "100")
     try:
@@ -41,7 +42,8 @@ def get_branches():
         current_app.logger.exception("Branch list error")
         return jsonify([]), 500
 
-@deleted_dealer_report_bp.route("/api/dealer-deleted-report")
+@deleted_dealer_report_bp.route("/dealer-deleted-report")
+@login_required
 def get_dealer_deleted_report():
     branch: str = request.args.get("branch", "").strip()
     cekcek: str = request.args.get("cekcek", "").strip()
@@ -61,9 +63,9 @@ def get_dealer_deleted_report():
                 del.delete_date,
                 del.reason
             FROM  clfsupp_delete del
-            INNER JOIN clfsupp    sup ON sup.supp        = del.supp
-            LEFT  JOIN umfbranch  br  ON br.branch_cd    = sup.branch_cd
-            INNER JOIN app_usrmst app ON app.employee_id = del.delete_by
+                INNER JOIN clfsupp    sup ON sup.supp        = del.supp
+                LEFT  JOIN umfbranch  br  ON br.branch_cd    = sup.branch_cd
+                INNER JOIN app_usrmst app ON app.employee_id = del.delete_by
             WHERE
                 (sup.branch_cd = :branch OR :branch = '000')
                 AND (

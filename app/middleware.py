@@ -1,4 +1,4 @@
-from flask import request, jsonify, g, current_app
+from flask import request, jsonify, g, current_app, render_template
 from datetime import datetime
 import ipaddress
 
@@ -41,7 +41,6 @@ def maintenance_mode_middleware(app):
                 "timestamp": datetime.utcnow().isoformat()
             }), 503
         
-        from flask import render_template
         return render_template('maintenance.html',
                             message=current_app.config['MAINTENANCE_MESSAGE'],
                             retry_after=current_app.config['MAINTENANCE_RETRY_AFTER'],

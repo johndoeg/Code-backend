@@ -1,8 +1,10 @@
 from flask import Blueprint, jsonify, request, current_app, session
 from app import db
+from app.auth.decorators import login_required
 from sqlalchemy import text
+from app.utils.helpers.aws_helpers import delete_object
 
-prechecking_onhand_bp = Blueprint('onhand', __name__, url_prefix='/Prechecking')
+prechecking_onhand_bp = Blueprint('onhand', __name__, url_prefix='/Prechecking/Onhand')
 
 def _exec_sp(sp_name: str, params: list):
     
@@ -14,7 +16,8 @@ def _exec_sp(sp_name: str, params: list):
     )
     return result.fetchall()
 
-@prechecking_onhand_bp.route('/api/onhand')
+@prechecking_onhand_bp.route('/data')
+@login_required
 def get_onhand():
     page        = request.args.get('page', 1, type=int)
     limit       = request.args.get('limit', 25, type=int)
@@ -42,10 +45,9 @@ def get_onhand():
                 sp   = 'USP_CAM_REQUEST_ONHAND'
                 args = [emp_id, username, offset, end, order, accesslevel]
 
-            rows = _exec_sp(sp, args)
-
-            total = int(rows[0].TOTAL) if rows and hasattr(rows[0], 'TOTAL') else 0
-            data_rows = rows[1:] if rows and hasattr(rows[0], 'TOTAL') else rows
+            rows      = _exec_sp(sp, args)
+            total     = len(rows)
+            data_rows = rows
 
             data = []
             for row in data_rows:
@@ -85,10 +87,9 @@ def get_onhand():
                 sp   = 'USP_CAM_REQUEST_ONHANDCR'
                 args = [emp_id, username, offset, end, order]
 
-            rows = _exec_sp(sp, args)
-
-            total     = int(rows[0].TOTAL) if rows and hasattr(rows[0], 'TOTAL') else 0
-            data_rows = rows[1:] if rows and hasattr(rows[0], 'TOTAL') else rows
+            rows      = _exec_sp(sp, args)
+            total     = len(rows)
+            data_rows = rows
 
             data = []
             for row in data_rows:
@@ -109,7 +110,7 @@ def get_onhand():
                     "tgl":             tgl,
                     "tgl_cek":         tgl_cek,
                 })
-
+                
             return jsonify({
                 "data":        data,
                 "total":       total,
@@ -125,3 +126,50 @@ def get_onhand():
     except Exception as e:
         current_app.logger.exception("Onhand list error")
         return jsonify({"data": [], "total": 0, "error": str(e)}), 500
+    
+@prechecking_onhand_bp.route('/delete', methods=['POST'])
+@login_required
+def delete_prechecking():
+    prechecking_id = None
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"success": False, "message": "Invalid JSON"}), 400
+
+        prechecking_id = (data.get('prechecking_id') or '').strip()
+        if not prechecking_id:
+            return jsonify({"success": False, "message": "prechecking_id required"}), 400
+
+        approval_row = db.session.execute(text("""
+            SELECT DocumentStatusCode FROM DocumentApproval WITH (NOLOCK)
+            WHERE DocumentNumber = :prechecking_id
+        """), {"prechecking_id": prechecking_id}).fetchone()
+
+        status = approval_row.DocumentStatusCode if approval_row else None
+        if status != 'draft':
+            return jsonify({"success": False, "message": "CAM Request cannot be deleted after submitted."}), 400
+
+        doc_rows = db.session.execute(text("""
+            SELECT CustomerDocumentId, AWSKey FROM TEMP_CUSTOMER_DOCUMENT WITH (NOLOCK)
+            WHERE Prechecking_Id = :prechecking_id
+        """), {"prechecking_id": prechecking_id}).fetchall()
+
+        for row in doc_rows:
+            if row.AWSKey:
+                delete_object(row.AWSKey)
+            db.session.execute(text("""
+                DELETE FROM TEMP_CUSTOMER_DOCUMENT WHERE CustomerDocumentId = :doc_id
+            """), {"doc_id": row.CustomerDocumentId})
+
+        db.session.execute(
+            text("EXEC USP_CAM_REQUEST_PROCDELETECAM :prechecking_id"),
+            {"prechecking_id": prechecking_id},
+        )
+
+        db.session.commit()
+        return jsonify({"success": True})
+
+    except Exception:
+        db.session.rollback()
+        current_app.logger.exception("Error deleting prechecking %s", prechecking_id)
+        return jsonify({"success": False, "message": "Failed to delete prechecking data"}), 500

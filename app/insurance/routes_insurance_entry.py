@@ -1,20 +1,17 @@
-from flask import Blueprint, jsonify, request, current_app
+from flask import Blueprint, jsonify, request, current_app, session
 from app import db
+from app.auth.decorators import login_required
 from sqlalchemy import text
 import re
 import httpx
 
 insurance_entry_bp = Blueprint('insurance_entry', __name__, url_prefix='/InsuranceEntry')
 
-_H2H_URLS = {
-    '01': 'https://ifc.sfintech.id:38888/Raksa/RegisterForm',
-    '02': 'https://ifc.sfintech.id:38888/Simas/RegisterForm',
-}
-
 def _clean_lease(lease_no: str) -> str:
     return re.sub(r'\s+', '', lease_no)
 
-@insurance_entry_bp.route('/api/companies')
+@insurance_entry_bp.route('/companies')
+@login_required
 def get_companies():
     try:
         result = db.session.execute(text("""
@@ -27,7 +24,8 @@ def get_companies():
         current_app.logger.exception("companies error")
         return jsonify([])
 
-@insurance_entry_bp.route('/api/list')
+@insurance_entry_bp.route('/list')
+@login_required
 def get_list():
     ins_cd     = request.args.get('ins_cd',     '00')
     search_val = request.args.get('search_val', '')
@@ -64,7 +62,8 @@ def get_list():
         current_app.logger.exception("insurance list error")
         return jsonify({"error": "Failed to load"}), 500
 
-@insurance_entry_bp.route('/api/contract')
+@insurance_entry_bp.route('/contract')
+@login_required
 def get_contract():
     lease_no = request.args.get('lease_no', '').strip()
     if not lease_no:
@@ -97,11 +96,12 @@ def get_contract():
         current_app.logger.exception("get contract error")
         return jsonify({"error": "Failed to fetch contract"}), 500
 
-@insurance_entry_bp.route('/api/save', methods=['POST'])
+@insurance_entry_bp.route('/save', methods=['POST'])
+@login_required
 def save_insurance():
     body       = request.get_json(force=True) or {}
     array_data = body.get('arrayData', [])
-    username   = getattr(request, 'user', {}).get('username', 'SYSTEM')
+    username   = session.get('username', 'SYSTEM')
 
     if not array_data:
         return jsonify({"error": "No data provided"}), 400
@@ -133,23 +133,27 @@ def save_insurance():
         db.session.rollback()
         current_app.logger.exception("save insurance error")
         return jsonify({"error": "Failed to save"}), 500
-
+    
 def _fire_h2h_requests(array_data: list[dict]) -> None:
-  
-    with httpx.Client(verify=False, timeout=30) as client:
+    h2h_urls = current_app.config.get("INSURANCE_H2H_URLS", {})
+    verify_ssl = current_app.config.get("INSURANCE_H2H_VERIFY_SSL", False)
+    timeout = current_app.config.get("INSURANCE_H2H_TIMEOUT", 30)
+
+    with httpx.Client(verify=verify_ssl, timeout=timeout) as client:
         for item in array_data:
             ins_cd   = item.get('ins_cd', '').strip()
             lease_no = _clean_lease(item.get('lease_no', ''))
-            url      = _H2H_URLS.get(ins_cd)
+            url      = h2h_urls.get(ins_cd)
             if not url:
-                current_app.logger.warning("Unknown ins_cd %s — skipping H2H call", ins_cd)
+                current_app.logger.warning("Unknown or unconfigured ins_cd %s — skipping H2H call", ins_cd)
                 continue
             try:
                 client.post(url, data={"lease_no": lease_no})
             except Exception:
                 current_app.logger.exception("H2H call failed for lease_no=%s", lease_no)
 
-@insurance_entry_bp.route('/api/cancel', methods=['POST'])
+@insurance_entry_bp.route('/cancel', methods=['POST'])
+@login_required
 def cancel_insurance():
     body     = request.get_json(force=True) or {}
     lease_no = _clean_lease(body.get('lease_no', ''))

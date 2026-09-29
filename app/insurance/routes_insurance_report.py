@@ -1,6 +1,8 @@
 from flask import Blueprint, request, send_file, current_app, jsonify
 from app import db
+from app.auth.decorators import login_required
 from sqlalchemy import text
+
 import io
 import re
 import openpyxl
@@ -32,7 +34,6 @@ COLUMNS = [
 FILTER_LABELS = {'1': 'Contract No. ', '2': 'Disbursement Date '}
 
 def _clean_message(raw: str) -> str:
-    """Mirrors PHP mb_convert_encoding + preg_replace cleanup."""
     if not raw:
         return '-'
     cleaned = re.sub(r'[\r\n\t]+', ' ', raw).strip()
@@ -51,7 +52,8 @@ def _run_sp(ins_cd, search_by, search_val, search_val1, search_val2):
     )
     return result
 
-@insurance_report_bp.route('/api/companies')
+@insurance_report_bp.route('/companies')
+@login_required
 def get_companies():
     try:
         result = db.session.execute(text("""
@@ -64,7 +66,8 @@ def get_companies():
         current_app.logger.exception("companies error")
         return jsonify([])
 
-@insurance_report_bp.route('/api/list')
+@insurance_report_bp.route('/list')
+@login_required
 def get_list():
     ins_cd      = request.args.get('ins_cd',      '')
     search_by   = request.args.get('search_by',   '')
@@ -99,7 +102,8 @@ def get_list():
         current_app.logger.exception("insurance report list error")
         return jsonify({"error": "Failed to load"}), 500
 
-@insurance_report_bp.route('/api/excel')
+@insurance_report_bp.route('/excel')
+@login_required
 def get_excel():
     ins_cd      = request.args.get('ins_cd',      '')
     search_by   = request.args.get('search_by',   '')
@@ -127,7 +131,6 @@ def get_excel():
     except Exception:
         current_app.logger.exception("insurance report excel error")
         return jsonify({"error": "Export failed"}), 500
-
 
 def _build_workbook(rows, search_by, search_val, search_val1, search_val2):
     wb = openpyxl.Workbook()

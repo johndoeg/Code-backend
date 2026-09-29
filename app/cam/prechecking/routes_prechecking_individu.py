@@ -1,23 +1,179 @@
-from flask import Blueprint, request, jsonify, current_app, session
+from flask import Blueprint, request, jsonify, current_app
 from sqlalchemy import text
 from datetime import datetime, date
-import base64, os, uuid
+import base64, os, mimetypes, re, calendar
+
+from botocore.exceptions import BotoCoreError, ClientError
 
 from app import db
+from app.auth.decorators import login_required
+from app.utils.helpers.aws_helpers import (
+    _aws_upload, _aws_delete, _aws_presign, _validate_file, copy_object
+)
+
+from app.utils.helpers.base_format import (
+    _username, _branch, _emp_id, _to_bit, _strip_non_digit,
+    fmt_date, parse_date, as_of_date, can_edit, format_threshold, get_combo,
+)
 
 prechecking_individu_bp = Blueprint("prechecking_individu", __name__, url_prefix="/CAM/Prechecking")
 
-def _username():
-    return session.get("username", "")
+_OCR_DOC_TYPES = {"cust-ktp", "cust-spouse-ktp", "cust-wna-spouse-ktp"}
+_WNA_ID_TYPES = ("KITAS", "KITAP")
 
-def _branch():
-    return session.get("branchcode", "")
+def _is_ocr_doc_type(document_type: str) -> bool:
+    return (document_type or "") in _OCR_DOC_TYPES
 
-def _emp_id():
-    return session.get("emp_id", "")
+def _norm_id_type(value: str, nationality: str) -> str:
+    if (nationality or "").strip().upper() != "WNA":
+        return "KTP"
+    v = (value or "").strip().upper()
+    return v if v in _WNA_ID_TYPES else "KITAS"
 
+def _sql_date(value: str):
+    v = (value or "").strip()
+    if not v:
+        return None
+    for fmt in ("%d-%m-%Y", "%Y-%m-%d", "%d/%m/%Y"):
+        try:
+            return datetime.strptime(v, fmt).strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+    return None
+
+def _apless_for_prechecking(prechecking_id: str) -> str:
+    if not prechecking_id:
+        return ""
+    row = db.session.execute(
+        text("""
+            SELECT TOP 1 Apless FROM TEMP_CAFLESS WITH(NOLOCK)
+            WHERE Prechecking_Id = :pid AND ISNULL(Apless, '') <> ''
+            ORDER BY CreatedDate DESC
+        """),
+        {"pid": prechecking_id},
+    ).fetchone()
+    return (row.Apless or "") if row else ""
+
+def _carried_source_filename(source_name: str) -> str:
+    stripped = re.sub(r"^[^-]*-[A-Z0-9_]+-", "", source_name or "", count=1)
+    return stripped or (source_name or "document")
+
+def _carry_over_documents(prechecking_id: str, apless: str, username: str, items) -> list:
+    failed = []
+
+    if not isinstance(items, list) or not prechecking_id:
+        return failed
+
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+
+        doc_id = item.get("customer_document_id")
+        target_type = (item.get("document_type") or "").strip()
+        if not doc_id or not target_type:
+            continue
+
+        src = db.session.execute(
+            text("""
+                SELECT CustomerDocumentId, DocumentName, DocumentType, AWSKey,
+                       OrganizationType, Prechecking_Id
+                FROM TEMP_CUSTOMER_DOCUMENT WITH(NOLOCK)
+                WHERE CustomerDocumentId = :id
+            """),
+            {"id": doc_id},
+        ).fetchone()
+
+        if not src or not src.AWSKey:
+            failed.append(target_type)
+            continue
+
+        if (src.Prechecking_Id or "") == prechecking_id:
+            continue
+
+        exists = db.session.execute(
+            text("""
+                SELECT COUNT(1) AS cnt
+                FROM TEMP_CUSTOMER_DOCUMENT WITH(NOLOCK)
+                WHERE Prechecking_Id = :pid AND DocumentType = :dtype
+            """),
+            {"pid": prechecking_id, "dtype": target_type},
+        ).fetchone()
+        if exists and exists.cnt > 0:
+            continue
+
+        name_prefix, doc_subfolder = _DOC_META.get(
+            target_type, (f"-{target_type.upper().replace('-', '_')}-", target_type)
+        )
+
+        org_type = src.OrganizationType or "PR"
+        doc_name = f"{prechecking_id}{name_prefix}{_carried_source_filename(src.DocumentName)}"
+        aws_prefix = "upload_doc/guarantor" if org_type in ("GUARNPR", "GUARNPT") else "upload_doc"
+        aws_key = f"{aws_prefix}/{apless}/{prechecking_id}/{doc_subfolder}/{doc_name}"
+
+        try:
+            copied = copy_object(src.AWSKey, aws_key)
+        except (BotoCoreError, ClientError):
+            current_app.logger.exception("carry_over_documents copy failed for %s", src.AWSKey)
+            copied = False
+
+        if not copied:
+            failed.append(target_type)
+            continue
+
+        db.session.execute(
+            text("""
+                INSERT INTO TEMP_CUSTOMER_DOCUMENT
+                    (Apless, DocumentName, OrganizationType, NumberOfDocuments,
+                     DocumentType, CreatedBy, CreatedDate, AWSKey, Prechecking_Id)
+                VALUES
+                    (:apless, :name, :org_type, :numb_doc,
+                     :dtype, :user, GETDATE(), :aws_key, :pid)
+            """),
+            {
+                "apless":   apless,
+                "name":     doc_name,
+                "org_type": org_type,
+                "numb_doc": "1",
+                "dtype":    target_type,
+                "user":     username,
+                "aws_key":  aws_key,
+                "pid":      prechecking_id,
+            },
+        )
+
+    return failed
+
+def _cleanup_ocr_for_nik(prechecking_id: str, nik: str) -> None:
+   
+    if not nik:
+        return
+
+    ocr_row = db.session.execute(
+        text("""
+            SELECT Id FROM TEMP_CAFLESS_OCR WITH(NOLOCK)
+            WHERE Prechecking_Id = :pid AND NIK = :nik
+        """),
+        {"pid": prechecking_id, "nik": nik},
+    ).fetchone()
+    if not ocr_row:
+        return
+
+    ocr_id = ocr_row.Id
+    db.session.execute(
+        text("DELETE FROM TEMP_CAFLESS_OCR_Rate WHERE Id = :id"),
+        {"id": ocr_id},
+    )
+    db.session.execute(
+        text("DELETE FROM TEMP_CAFLESS_OCR_Dukcapil WHERE Id = :id"),
+        {"id": ocr_id},
+    )
+    db.session.execute(
+        text("DELETE FROM TEMP_CAFLESS_OCR WHERE Id = :id"),
+        {"id": ocr_id},
+    )
 
 @prechecking_individu_bp.route("/generate-apless", methods=["POST"])
+@login_required
 def generate_temp_apless():
    
     data         = request.get_json(force=True) or {}
@@ -32,7 +188,7 @@ def generate_temp_apless():
                     NextRunningNumber
                 FROM TEMP_APLESS WITH(NOLOCK)
                 WHERE [Year] = YEAR(GETDATE())
-                  AND CustomerType = :ct
+                    AND CustomerType = :ct
             """),
             {"ct": customer_type},
         ).fetchone()
@@ -76,6 +232,7 @@ def generate_temp_apless():
         return jsonify({"error": "Failed to generate APLESS"}), 500
 
 @prechecking_individu_bp.route("/generate-prechecking-id", methods=["POST"])
+@login_required
 def generate_prechecking_id():
   
     username = _username()
@@ -91,8 +248,8 @@ def generate_prechecking_id():
                     NextRunningNumber
                 FROM TEMP_PRECHECKING_ID WITH(NOLOCK)
                 WHERE [Year]  = YEAR(GETDATE())
-                  AND [Month] = MONTH(GETDATE())
-                  AND [Date]  = DAY(GETDATE())
+                    AND [Month] = MONTH(GETDATE())
+                    AND [Date]  = DAY(GETDATE())
             """),
         ).fetchone()
 
@@ -142,6 +299,7 @@ def generate_prechecking_id():
         return jsonify({"error": "Failed to generate Prechecking ID"}), 500
 
 @prechecking_individu_bp.route("/check-customer-history", methods=["POST"])
+@login_required
 def check_customer_history():
    
     if request.method != "POST":
@@ -173,9 +331,9 @@ def _check_history(id_no: str, lessee_type: str, checking_for: str):
                     ISNULL(a.APLESS, b.APLESS)           AS temp_apless,
                     IIF(a.APLESS <> '', '1', '0')        AS Repeat_Order
                 FROM CAFLESS a
-                LEFT JOIN TEMP_CAFLESS b
-                    ON (a.Id_Card = b.idcardno OR a.NPWP = b.NPWP)
-                   AND a.Lessee_TP = b.CustomerType
+                    LEFT JOIN TEMP_CAFLESS b
+                        ON (a.Id_Card = b.idcardno OR a.NPWP = b.NPWP)
+                    AND a.Lessee_TP = b.CustomerType
                 WHERE (a.id_card = :id OR a.NPWP = :id)
                   AND a.Lessee_TP = :lt
             """),
@@ -190,8 +348,8 @@ def _check_history(id_no: str, lessee_type: str, checking_for: str):
                     Repeat_Order
                 FROM TEMP_CAFLESS
                 WHERE (IdCardNo = :id OR NPWP = :id)
-                  AND Check_For  = :cf
-                  AND CustomerType = :lt
+                    AND Check_For  = :cf
+                    AND CustomerType = :lt
                 ORDER BY Prechecking_Id DESC
             """),
             {"id": id_no, "cf": checking_for, "lt": lessee_type},
@@ -217,18 +375,18 @@ def _check_history(id_no: str, lessee_type: str, checking_for: str):
                 a.LastActionBy,
                 a.LastActionDate
             FROM documentApproval a WITH(NOLOCK)
-            INNER JOIN TEMP_CAFLESS b WITH(NOLOCK)
-                ON a.DocumentNumber = b.Prechecking_Id
-            LEFT JOIN documentApprovalHistory c WITH(NOLOCK)
-                ON a.Id = c.DocumentApprovalId
-               AND c.ApprovalActionCode = 'reject'
-               AND c.Id = (
-                    SELECT MAX(Id) FROM documentApprovalHistory WITH(NOLOCK)
-                    WHERE DocumentApprovalId = a.Id
-                )
+                INNER JOIN TEMP_CAFLESS b WITH(NOLOCK)
+                    ON a.DocumentNumber = b.Prechecking_Id
+                LEFT JOIN documentApprovalHistory c WITH(NOLOCK)
+                    ON a.Id = c.DocumentApprovalId
+                AND c.ApprovalActionCode = 'reject'
+                AND c.Id = (
+                        SELECT MAX(Id) FROM documentApprovalHistory WITH(NOLOCK)
+                        WHERE DocumentApprovalId = a.Id
+                    )
             WHERE (b.IdCardNo = :id OR b.NPWP = :id)
-              AND b.Check_For   = :cf
-              AND b.CustomerType = :lt
+                AND b.Check_For   = :cf
+                AND b.CustomerType = :lt
             ORDER BY LastActionDate DESC
         """),
         {"id": id_no, "cf": checking_for, "lt": lessee_type},
@@ -296,8 +454,9 @@ def _check_history(id_no: str, lessee_type: str, checking_for: str):
     return [message, apless, types, prechecking_id]
 
 @prechecking_individu_bp.route("/submit", methods=["POST"])
+@login_required
 def submit_prechecking():
-   
+
     username = _username()
     branch   = _branch()
     emp_id   = _emp_id()
@@ -307,19 +466,19 @@ def submit_prechecking():
     def g(key, default=""):
         return (body.get(key) or default).strip() if isinstance(body.get(key), str) else (body.get(key) or default)
 
-    prechecking_id = g("prechecking_id")
-    apless         = g("apless")
-    cust_type      = g("cust_type", "PR")
-    lessee_type    = g("lessee_type", "PR")
-    check_for      = g("check_for", "C")
-    cust_new_ro    = g("cust_new_ro", "New")
-    existing_apless= g("existing_apless")
-    nationality    = g("cust_nationality_type", "WNI")
-    marital        = g("marital_status")
-    wna_marital    = g("wna_marital_status")
-    is_carro       = int(g("is_carro_type", "1"))
-    note_pr        = g("note_prechecking_pr")
-    note_pt        = g("note_prechecking_pt")
+    prechecking_id  = g("prechecking_id")
+    apless          = g("apless")
+    cust_type       = g("cust_type", "PR")
+    lessee_type     = g("lessee_type", "PR")
+    check_for       = g("check_for", "C")
+    cust_new_ro     = 0 if g("cust_new_ro", "New") == "New" else 1
+    existing_apless = g("existing_apless")
+    nationality     = g("cust_nationality_type", "WNI")
+    marital         = g("marital_status")
+    wna_marital     = g("wna_marital_status")
+    is_carro        = int(g("is_carro_type", "1"))
+    note_pr         = g("note_prechecking_pr")
+    note_pt         = g("note_prechecking_pt")
 
     if not prechecking_id:
         return jsonify({"success": False, "message": "prechecking_id is required"}), 400
@@ -345,226 +504,964 @@ def submit_prechecking():
         for key, label in required_cust:
             if not g(key):
                 errors[f"{key}_error"] = f"{label} is required"
-
     if errors:
         return jsonify({"success": False, "errors": errors}), 422
 
     _marital_map = {
-        "BELUM KAWIN": "S",
-        "KAWIN": "M",
-        "KAWIN TERCATAT": "M",
-        "KAWIN BELUM TERCATAT": "O",
-        "PERJANJIAN PRANIKAH": "P",
-        "CERAI HIDUP": "D",
-        "CERAI MATI": "D",
+        "BELUM KAWIN": "S", "KAWIN": "M", "KAWIN TERCATAT": "M",
+        "KAWIN BELUM TERCATAT": "O", "PERJANJIAN PRANIKAH": "P",
+        "CERAI HIDUP": "D", "CERAI MATI": "D",
     }
-    def normalise_marital(val):
+    
+    def nm(val):
         return _marital_map.get((val or "").strip().upper(), val)
 
-    marital     = normalise_marital(marital)
-    wna_marital = normalise_marital(wna_marital)
+    marital     = nm(marital)
+    wna_marital = nm(wna_marital)
+
+    nik          = g("cust_id_card_no")
+    cust_name    = g("cust_name")
+    cust_dob     = g("cust_dob")
+    cust_citizen = g("cust_citizen", "WNI") if nationality == "WNI" else "WNA"
+
+    sp_nik       = g("cust_spouse_id_card_no")
+
+    wna_name     = g("wna_name")
+    wna_idcard   = g("wna_idcard_no")
+    wna_sp_name  = g("wna_spouse_name")
+    wna_sp_id    = g("wna_spouse_idcard_no")
+
+    wna_sp_nik   = g("cust_wna_spouse_id_card_no")
+
+    sp_nationality     = (g("cust_spouse_nationality_type") or g("cust_spouse_citizen") or "WNI").strip().upper()
+    wna_sp_nationality = (g("wna_spouse_nationality_type") or g("cust_wna_spouse_citizen") or "WNI").strip().upper()
+
+    sp_citizen     = "WNA" if sp_nationality == "WNA" else "WNI"
+    wna_sp_citizen = "WNA" if wna_sp_nationality == "WNA" else "WNI"
+
+    cust_id_type   = _norm_id_type(g("cust_id_type"), nationality)
+    sp_id_type     = _norm_id_type(g("cust_spouse_id_type"), sp_nationality)
+    wna_sp_id_type = _norm_id_type(g("cust_spouse_id_type"), wna_sp_nationality)
+
+    is_married     = marital in ("M", "O")
+    is_wna_married = wna_marital in ("M", "O")
 
     try:
-        exists = db.session.execute(
-            text("SELECT 1 FROM TEMP_CAFLESS WHERE Prechecking_Id = :pid"),
+        count_row = db.session.execute(
+            text("""
+                SELECT COUNT(1) AS cnt
+                FROM TEMP_CAFLESS WITH(NOLOCK)
+                WHERE Apless = :apless AND Prechecking_Id = :pid
+            """),
+            {"apless": apless, "pid": prechecking_id},
+        ).fetchone()
+        already_exists = (count_row.cnt > 0) if count_row else False
+
+        approval_form_row = db.session.execute(
+            text("SELECT Id FROM mstApprovalForm WHERE ApprovalFormKey = 'cam-request'"),
+        ).fetchone()
+        if not approval_form_row:
+            return jsonify({"success": False, "message": "Approval Form Master is not completed. Please contact your administrator."}), 500
+        approval_form_id = approval_form_row.Id
+
+        if not already_exists:
+
+            if nationality == "WNI":
+               
+                db.session.execute(text("""
+                    INSERT INTO TEMP_CAFLESS
+                        (Apless, CustomerType, LesseeType, LesseeName, IdCardNo, NPWP,
+                         MaritalStatus, CreatedBy, CreatedDate,
+                         Prechecking_Id, Check_For, Repeat_Order, Notes, Carro)
+                    VALUES
+                        (:apless, :cust_type, :lessee_type, :cust_name, :nik, '',
+                         :marital, :username, GETDATE(),
+                         :pid, :check_for, :new_ro, :note_pr, :is_carro)
+                """), {
+                    "apless": apless, "cust_type": cust_type, "lessee_type": lessee_type,
+                    "cust_name": cust_name, "nik": nik, "marital": marital,
+                    "username": username, "pid": prechecking_id, "check_for": check_for,
+                    "new_ro": cust_new_ro, "note_pr": note_pr, "is_carro": is_carro,
+                })
+
+               
+                db.session.execute(text("""
+                    INSERT INTO TEMP_CAFLESS_OCR
+                        (Prechecking_Id, OCR_For, Citizen, Id_Type, NIK, Nama, Tempat_Lahir,
+                         Tgl_Lahir, Jenis_Kelamin, Golongan_Darah, Alamat, RT, RW,
+                         Kelurahan, Kecamatan, Kota, Provinsi, Agama, Pekerjaan,
+                         Status_Perkawinan, Kewarnegaraan, Foto, Tanda_Tangan)
+                    VALUES
+                        (:pid, :check_for, :citizen, :id_type, :nik, :nama, :pob,
+                         :dob, :gender, :blood, :addr, :rt, :rw,
+                         :subdistrict, :district, :city, :province, :religion, :job,
+                         :marital, :citizen2, :photo, :sign)
+                """), {
+                    "pid": prechecking_id, "check_for": check_for,
+                    "citizen": cust_citizen, "id_type": cust_id_type, "nik": nik,
+                    "nama": cust_name, "pob": g("cust_pob"),
+                    "dob": _sql_date(g("cust_dob")),
+                    "gender": g("cust_gender"),
+                    "blood": g("cust_blood_type"), "addr": g("cust_address"),
+                    "rt": g("cust_rt"), "rw": g("cust_rw"),
+                    "subdistrict": g("cust_subdistrict"), "district": g("cust_district"),
+                    "city": g("cust_city"), "province": g("cust_province"),
+                    "religion": g("cust_religion"), "job": g("cust_job"),
+                    "marital": marital, "citizen2": cust_citizen,
+                    "photo": g("cust_photo_hidden"), "sign": g("cust_signature_hidden"),
+                })
+
+                cust_ocr_row = db.session.execute(
+                    text("SELECT Id FROM TEMP_CAFLESS_OCR WITH(NOLOCK) WHERE Prechecking_Id = :pid AND NIK = :nik"),
+                    {"pid": prechecking_id, "nik": nik},
+                ).fetchone()
+                cust_id = cust_ocr_row.Id if cust_ocr_row else 0
+
+                db.session.execute(text("""
+                    INSERT INTO TEMP_CAFLESS_OCR_Rate
+                        (Id, NIK, Nama, Tempat_Lahir, Tgl_Lahir, Jenis_Kelamin,
+                         Golongan_Darah, Alamat, RT, RW, Kelurahan, Kecamatan,
+                         Kota, Provinsi, Agama, Pekerjaan, Kewarnegaraan)
+                    VALUES
+                        (:id, :nik, :nama, :pob, :dob, :gender,
+                         :blood, :addr, :rt, :rw, :subdistrict, :district,
+                         :city, :province, :religion, :job, :citizen)
+                """), {
+                    "id": cust_id,
+                    "nik":        _strip_non_digit(g("val_cust_id_card_no")),
+                    "nama":       _strip_non_digit(g("val_cust_name")),
+                    "pob":        _strip_non_digit(g("val_cust_pob")),
+                    "dob":        _strip_non_digit(g("val_cust_dob")),
+                    "gender":     _strip_non_digit(g("val_cust_gender")),
+                    "blood":      _strip_non_digit(g("val_cust_blood_type")),
+                    "addr":       _strip_non_digit(g("val_cust_address")),
+                    "rt":         _strip_non_digit(g("val_cust_rt")),
+                    "rw":         _strip_non_digit(g("val_cust_rw")),
+                    "subdistrict":_strip_non_digit(g("val_cust_subdistrict")),
+                    "district":   _strip_non_digit(g("val_cust_district")),
+                    "city":       _strip_non_digit(g("val_cust_city")),
+                    "province":   _strip_non_digit(g("val_cust_province")),
+                    "religion":   _strip_non_digit(g("val_cust_religion")),
+                    "job":        _strip_non_digit(g("val_cust_job")),
+                    "citizen":    _strip_non_digit(g("val_cust_citizen")),
+                })
+
+                db.session.execute(text("""
+                    INSERT INTO TEMP_CAFLESS_OCR_Dukcapil
+                        (Id, NIK, Nama, Tempat_Lahir, Tgl_Lahir, Jenis_Kelamin,
+                         Alamat, RT, RW, Kelurahan, Kecamatan, Kota, Provinsi, Pekerjaan)
+                    VALUES
+                        (:id, :nik, :nama, :pob, :dob, :gender, :addr,
+                         :rt, :rw, :subdistrict, :district, :city, :province, :job)
+                """), {
+                    "id":         cust_id,
+                    "nik":        _to_bit(g("ver_cust_id_card_no")),
+                    "nama":       _to_bit(g("ver_cust_name")),
+                    "pob":        _to_bit(g("ver_cust_pob")),
+                    "dob":        _to_bit(g("ver_cust_dob")),
+                    "gender":     _to_bit(g("ver_cust_gender")),
+                    "addr":       _to_bit(g("ver_cust_address")),
+                    "rt":         _to_bit(g("ver_cust_rt")),
+                    "rw":         _to_bit(g("ver_cust_rw")),
+                    "subdistrict":_to_bit(g("ver_cust_subdistrict")),
+                    "district":   _to_bit(g("ver_cust_district")),
+                    "city":       _to_bit(g("ver_cust_city")),
+                    "province":   _to_bit(g("ver_cust_province")),
+                    "job":        _to_bit(g("ver_cust_job")),
+                })
+
+                if is_married:
+                    if sp_citizen == "WNI":
+                        sp_exists = db.session.execute(
+                            text("SELECT COUNT(1) AS cnt FROM TEMP_CAFLESS_OCR WHERE Prechecking_Id = :pid AND OCR_For = 'S'"),
+                            {"pid": prechecking_id},
+                        ).fetchone()
+
+                        if sp_exists and sp_exists.cnt > 0:
+                            db.session.execute(text("""
+                                UPDATE TEMP_CAFLESS_OCR SET
+                                    OCR_For='S', Citizen=:citizen, Id_Type=:id_type, NIK=:nik, Nama=:nama,
+                                    Tempat_Lahir=:pob, Tgl_Lahir=:dob, Jenis_Kelamin=:gender,
+                                    Golongan_Darah=:blood, Alamat=:addr, RT=:rt, RW=:rw,
+                                    Kelurahan=:subdistrict, Kecamatan=:district, Kota=:city,
+                                    Provinsi=:province, Agama=:religion, Pekerjaan=:job,
+                                    Status_Perkawinan=:marital, Kewarnegaraan=:citizen2,
+                                    Foto=:photo, Tanda_Tangan=:sign, UpdatedDate=GETDATE()
+                                WHERE Prechecking_Id=:pid AND OCR_For='S'
+                            """), {
+                                "pid": prechecking_id, "citizen": sp_citizen, "id_type": sp_id_type,
+                                "nik": sp_nik, "nama": g("cust_spouse_name"),
+                                "pob": g("cust_spouse_pob"),
+                                "dob": _sql_date(g("cust_spouse_dob")),
+                                "gender": g("cust_spouse_gender"), "blood": g("cust_spouse_blood_type"),
+                                "addr": g("cust_spouse_address"), "rt": g("cust_spouse_rt"),
+                                "rw": g("cust_spouse_rw"), "subdistrict": g("cust_spouse_subdistrict"),
+                                "district": g("cust_spouse_district"), "city": g("cust_spouse_city"),
+                                "province": g("cust_spouse_province"), "religion": g("cust_spouse_religion"),
+                                "job": g("cust_spouse_job"), "marital": marital,
+                                "citizen2": sp_citizen,
+                                "photo": g("cust_spouse_photo_hidden"), "sign": g("cust_spouse_signature_hidden"),
+                            })
+
+                            sp_ocr_row = db.session.execute(
+                                text("SELECT Id FROM TEMP_CAFLESS_OCR WITH(NOLOCK) WHERE Prechecking_Id=:pid AND OCR_For='S'"),
+                                {"pid": prechecking_id},
+                            ).fetchone()
+                            sp_id = sp_ocr_row.Id if sp_ocr_row else 0
+
+                            db.session.execute(text("""
+                                UPDATE TEMP_CAFLESS_OCR_Rate SET
+                                    NIK=:nik, Nama=:nama, Tempat_Lahir=:pob, Tgl_Lahir=:dob,
+                                    Jenis_Kelamin=:gender, Golongan_Darah=:blood, Alamat=:addr,
+                                    RT=:rt, RW=:rw, Kelurahan=:subdistrict, Kecamatan=:district,
+                                    Kota=:city, Provinsi=:province, Agama=:religion,
+                                    Pekerjaan=:job, Kewarnegaraan=:citizen
+                                WHERE Id=:id
+                            """), {
+                                "id": sp_id,
+                                "nik":        _strip_non_digit(g("val_cust_spouse_id_card_no")),
+                                "nama":       _strip_non_digit(g("val_cust_spouse_name")),
+                                "pob":        _strip_non_digit(g("val_cust_spouse_pob")),
+                                "dob":        _strip_non_digit(g("val_cust_spouse_dob")),
+                                "gender":     _strip_non_digit(g("val_cust_spouse_gender")),
+                                "blood":      _strip_non_digit(g("val_cust_spouse_blood_type")),
+                                "addr":       _strip_non_digit(g("val_cust_spouse_address")),
+                                "rt":         _strip_non_digit(g("val_cust_spouse_rt")),
+                                "rw":         _strip_non_digit(g("val_cust_spouse_rw")),
+                                "subdistrict":_strip_non_digit(g("val_cust_spouse_subdistrict")),
+                                "district":   _strip_non_digit(g("val_cust_spouse_district")),
+                                "city":       _strip_non_digit(g("val_cust_spouse_city")),
+                                "province":   _strip_non_digit(g("val_cust_spouse_province")),
+                                "religion":   _strip_non_digit(g("val_cust_spouse_religion")),
+                                "job":        _strip_non_digit(g("val_cust_spouse_job")),
+                                "citizen":    _strip_non_digit(g("val_cust_spouse_citizen")),
+                            })
+
+                            db.session.execute(text("""
+                                UPDATE TEMP_CAFLESS_OCR_Dukcapil SET
+                                    NIK=:nik, Nama=:nama,
+                                    Tempat_Lahir=:pob, Tgl_Lahir=:dob,
+                                    Jenis_Kelamin=:gender, Alamat=:addr,
+                                    RT=:rt, RW=:rw,
+                                    Kelurahan=:subdistrict, Kecamatan=:district,
+                                    Kota=:city, Provinsi=:province,
+                                    Pekerjaan=:job
+                                WHERE Id=:id
+                            """), {
+                                "id": sp_id,
+                                "nik": _to_bit(g("ver_cust_spouse_id_card_no")), "nama": _to_bit(g("ver_cust_spouse_name")),
+                                "pob": _to_bit(g("ver_cust_spouse_pob")), "dob": _to_bit(g("ver_cust_spouse_dob")),
+                                "gender": _to_bit(g("ver_cust_spouse_gender")), "addr": _to_bit(g("ver_cust_spouse_address")),
+                                "rt": _to_bit(g("ver_cust_spouse_rt")), "rw": _to_bit(g("ver_cust_spouse_rw")),
+                                "subdistrict": _to_bit(g("ver_cust_spouse_subdistrict")),
+                                "district": _to_bit(g("ver_cust_spouse_district")),
+                                "city": _to_bit(g("ver_cust_spouse_city")),
+                                "province": _to_bit(g("ver_cust_spouse_province")),
+                                "job": _to_bit(g("ver_cust_spouse_job")),
+                            })
+
+                        else:
+                            db.session.execute(text("""
+                                INSERT INTO TEMP_CAFLESS_OCR
+                                    (Prechecking_Id, OCR_For, Citizen, Id_Type, NIK, Nama, Tempat_Lahir,
+                                     Tgl_Lahir, Jenis_Kelamin, Golongan_Darah, Alamat, RT, RW,
+                                     Kelurahan, Kecamatan, Kota, Provinsi, Agama, Pekerjaan,
+                                     Status_Perkawinan, Kewarnegaraan, Foto, Tanda_Tangan)
+                                VALUES
+                                    (:pid,'S',:citizen,:id_type,:nik,:nama,:pob,
+                                     :dob,:gender,:blood,:addr,:rt,:rw,
+                                     :subdistrict,:district,:city,:province,:religion,:job,
+                                     :marital,:citizen2,:photo,:sign)
+                            """), {
+                                "pid": prechecking_id, "citizen": sp_citizen, "id_type": sp_id_type,
+                                "nik": sp_nik, "nama": g("cust_spouse_name"),
+                                "pob": g("cust_spouse_pob"),
+                                "dob": _sql_date(g("cust_spouse_dob")),
+                                "gender": g("cust_spouse_gender"), "blood": g("cust_spouse_blood_type"),
+                                "addr": g("cust_spouse_address"), "rt": g("cust_spouse_rt"),
+                                "rw": g("cust_spouse_rw"), "subdistrict": g("cust_spouse_subdistrict"),
+                                "district": g("cust_spouse_district"), "city": g("cust_spouse_city"),
+                                "province": g("cust_spouse_province"), "religion": g("cust_spouse_religion"),
+                                "job": g("cust_spouse_job"), "marital": marital,
+                                "citizen2": sp_citizen,
+                                "photo": g("cust_spouse_photo_hidden"), "sign": g("cust_spouse_signature_hidden"),
+                            })
+
+                            sp_ocr_row = db.session.execute(
+                                text("SELECT Id FROM TEMP_CAFLESS_OCR WITH(NOLOCK) WHERE Prechecking_Id=:pid AND OCR_For='S'"),
+                                {"pid": prechecking_id},
+                            ).fetchone()
+                            sp_id = sp_ocr_row.Id if sp_ocr_row else 0
+
+                            db.session.execute(text("""
+                                INSERT INTO TEMP_CAFLESS_OCR_Rate
+                                    (Id, NIK, Nama, Tempat_Lahir, Tgl_Lahir, Jenis_Kelamin,
+                                     Golongan_Darah, Alamat, RT, RW, Kelurahan, Kecamatan,
+                                     Kota, Provinsi, Agama, Pekerjaan, Kewarnegaraan)
+                                VALUES
+                                    (:id,:nik,:nama,:pob,:dob,:gender,
+                                     :blood,:addr,:rt,:rw,:subdistrict,:district,
+                                     :city,:province,:religion,:job,:citizen)
+                            """), {
+                                "id": sp_id,
+                                "nik":        _strip_non_digit(g("val_cust_spouse_id_card_no")),
+                                "nama":       _strip_non_digit(g("val_cust_spouse_name")),
+                                "pob":        _strip_non_digit(g("val_cust_spouse_pob")),
+                                "dob":        _strip_non_digit(g("val_cust_spouse_dob")),
+                                "gender":     _strip_non_digit(g("val_cust_spouse_gender")),
+                                "blood":      _strip_non_digit(g("val_cust_spouse_blood_type")),
+                                "addr":       _strip_non_digit(g("val_cust_spouse_address")),
+                                "rt":         _strip_non_digit(g("val_cust_spouse_rt")),
+                                "rw":         _strip_non_digit(g("val_cust_spouse_rw")),
+                                "subdistrict":_strip_non_digit(g("val_cust_spouse_subdistrict")),
+                                "district":   _strip_non_digit(g("val_cust_spouse_district")),
+                                "city":       _strip_non_digit(g("val_cust_spouse_city")),
+                                "province":   _strip_non_digit(g("val_cust_spouse_province")),
+                                "religion":   _strip_non_digit(g("val_cust_spouse_religion")),
+                                "job":        _strip_non_digit(g("val_cust_spouse_job")),
+                                "citizen":    _strip_non_digit(g("val_cust_spouse_citizen")),
+                            })
+
+                            db.session.execute(text("""
+                                INSERT INTO TEMP_CAFLESS_OCR_Dukcapil
+                                    (Id, NIK, Nama, Tempat_Lahir, Tgl_Lahir, Jenis_Kelamin,
+                                     Alamat, RT, RW, Kelurahan, Kecamatan, Kota, Provinsi, Pekerjaan)
+                                VALUES
+                                    (:id, :nik, :nama, :pob, :dob, :gender, :addr,
+                                     :rt, :rw, :subdistrict, :district, :city, :province, :job)
+                            """), {
+                                "id": sp_id,
+                                "nik": _to_bit(g("ver_cust_spouse_id_card_no")), "nama": _to_bit(g("ver_cust_spouse_name")),
+                                "pob": _to_bit(g("ver_cust_spouse_pob")), "dob": _to_bit(g("ver_cust_spouse_dob")),
+                                "gender": _to_bit(g("ver_cust_spouse_gender")), "addr": _to_bit(g("ver_cust_spouse_address")),
+                                "rt": _to_bit(g("ver_cust_spouse_rt")), "rw": _to_bit(g("ver_cust_spouse_rw")),
+                                "subdistrict": _to_bit(g("ver_cust_spouse_subdistrict")),
+                                "district": _to_bit(g("ver_cust_spouse_district")),
+                                "city": _to_bit(g("ver_cust_spouse_city")),
+                                "province": _to_bit(g("ver_cust_spouse_province")),
+                                "job": _to_bit(g("ver_cust_spouse_job")),
+                            })
+
+                    else:
+                        db.session.execute(text("""
+                            INSERT INTO TEMP_CAFLESS_OCR
+                                (Prechecking_Id, OCR_For, Citizen, Id_Type, NIK, Nama, Kewarnegaraan, UpdatedDate)
+                            VALUES (:pid,'S','WNA',:id_type,:nik,:nama,'WNA',GETDATE())
+                        """), {
+                            "pid": prechecking_id, "id_type": sp_id_type,
+                            "nik": wna_sp_id, "nama": wna_sp_name,
+                        })
+
+            else:
+                db.session.execute(text("""
+                    INSERT INTO TEMP_CAFLESS
+                        (Apless, CustomerType, LesseeType, LesseeName, IdCardNo, NPWP,
+                         MaritalStatus, CreatedBy, CreatedDate,
+                         Prechecking_Id, Check_For, Repeat_Order, Notes, Carro)
+                    VALUES
+                        (:apless,:cust_type,:lessee_type,:wna_name,:wna_idcard,'',
+                         :wna_marital,:username,GETDATE(),
+                         :pid,:check_for,:new_ro,:note_pr,:is_carro)
+                """), {
+                    "apless": apless, "cust_type": cust_type, "lessee_type": lessee_type,
+                    "wna_name": wna_name, "wna_idcard": wna_idcard,
+                    "wna_marital": wna_marital, "username": username,
+                    "pid": prechecking_id, "check_for": check_for,
+                    "new_ro": cust_new_ro, "note_pr": note_pr, "is_carro": is_carro,
+                })
+
+                db.session.execute(text("""
+                    INSERT INTO TEMP_CAFLESS_OCR
+                        (Prechecking_Id, OCR_For, Citizen, Id_Type, NIK, Nama,
+                         Status_Perkawinan, Kewarnegaraan)
+                    VALUES (:pid,:check_for,'WNA',:id_type,:nik,:nama,:wna_marital,'WNA')
+                """), {
+                    "pid": prechecking_id, "check_for": check_for, "id_type": cust_id_type,
+                    "nik": wna_idcard, "nama": wna_name, "wna_marital": wna_marital,
+                })
+
+                if is_wna_married:
+                    if wna_sp_citizen == "WNI":
+                        sp_exists = db.session.execute(
+                            text("SELECT COUNT(1) AS cnt FROM TEMP_CAFLESS_OCR WHERE Prechecking_Id=:pid AND OCR_For='S'"),
+                            {"pid": prechecking_id},
+                        ).fetchone()
+
+                        if sp_exists and sp_exists.cnt > 0:
+                            db.session.execute(text("""
+                                UPDATE TEMP_CAFLESS_OCR SET
+                                    OCR_For='S', Citizen=:citizen, Id_Type=:id_type, NIK=:nik, Nama=:nama,
+                                    Tempat_Lahir=:pob, Tgl_Lahir=:dob, Jenis_Kelamin=:gender,
+                                    Golongan_Darah=:blood, Alamat=:addr, RT=:rt, RW=:rw,
+                                    Kelurahan=:subdistrict, Kecamatan=:district, Kota=:city,
+                                    Provinsi=:province, Agama=:religion, Pekerjaan=:job,
+                                    Status_Perkawinan=:marital, Kewarnegaraan=:citizen2,
+                                    Foto=:photo, Tanda_Tangan=:sign, UpdatedDate=GETDATE()
+                                WHERE Prechecking_Id=:pid AND OCR_For='S'
+                            """), {
+                                "pid": prechecking_id, "citizen": wna_sp_citizen, "id_type": wna_sp_id_type,
+                                "nik": wna_sp_nik, "nama": g("cust_wna_spouse_name"),
+                                "pob": g("cust_wna_spouse_pob"),
+                                "dob": _sql_date(g("cust_wna_spouse_dob")),
+                                "gender": g("cust_wna_spouse_gender"), "blood": g("cust_wna_spouse_blood_type"),
+                                "addr": g("cust_wna_spouse_address"), "rt": g("cust_wna_spouse_rt"),
+                                "rw": g("cust_wna_spouse_rw"), "subdistrict": g("cust_wna_spouse_subdistrict"),
+                                "district": g("cust_wna_spouse_district"), "city": g("cust_wna_spouse_city"),
+                                "province": g("cust_wna_spouse_province"), "religion": g("cust_wna_spouse_religion"),
+                                "job": g("cust_wna_spouse_job"), "marital": wna_marital,
+                                "citizen2": wna_sp_citizen,
+                                "photo": g("cust_wna_spouse_photo_hidden"), "sign": g("cust_wna_spouse_signature_hidden"),
+                            })
+
+                            wna_sp_ocr = db.session.execute(
+                                text("SELECT Id FROM TEMP_CAFLESS_OCR WITH(NOLOCK) WHERE Prechecking_Id=:pid AND OCR_For='S'"),
+                                {"pid": prechecking_id},
+                            ).fetchone()
+                            wna_sp_ocr_id = wna_sp_ocr.Id if wna_sp_ocr else 0
+
+                            db.session.execute(text("""
+                                UPDATE TEMP_CAFLESS_OCR_Rate SET
+                                    NIK=:nik, Nama=:nama, Tempat_Lahir=:pob, Tgl_Lahir=:dob,
+                                    Jenis_Kelamin=:gender, Golongan_Darah=:blood, Alamat=:addr,
+                                    RT=:rt, RW=:rw, Kelurahan=:subdistrict, Kecamatan=:district,
+                                    Kota=:city, Provinsi=:province, Agama=:religion,
+                                    Pekerjaan=:job, Kewarnegaraan=:citizen
+                                WHERE Id=:id
+                            """), {
+                                "id": wna_sp_ocr_id,
+                                "nik":        _strip_non_digit(g("val_cust_wna_spouse_id_card_no")),
+                                "nama":       _strip_non_digit(g("val_cust_wna_spouse_name")),
+                                "pob":        _strip_non_digit(g("val_cust_wna_spouse_pob")),
+                                "dob":        _strip_non_digit(g("val_cust_wna_spouse_dob")),
+                                "gender":     _strip_non_digit(g("val_cust_wna_spouse_gender")),
+                                "blood":      _strip_non_digit(g("val_cust_wna_spouse_blood_type")),
+                                "addr":       _strip_non_digit(g("val_cust_wna_spouse_address")),
+                                "rt":         _strip_non_digit(g("val_cust_wna_spouse_rt")),
+                                "rw":         _strip_non_digit(g("val_cust_wna_spouse_rw")),
+                                "subdistrict":_strip_non_digit(g("val_cust_wna_spouse_subdistrict")),
+                                "district":   _strip_non_digit(g("val_cust_wna_spouse_district")),
+                                "city":       _strip_non_digit(g("val_cust_wna_spouse_city")),
+                                "province":   _strip_non_digit(g("val_cust_wna_spouse_province")),
+                                "religion":   _strip_non_digit(g("val_cust_wna_spouse_religion")),
+                                "job":        _strip_non_digit(g("val_cust_wna_spouse_job")),
+                                "citizen":    _strip_non_digit(g("val_cust_wna_spouse_citizen")),
+                            })
+
+                            db.session.execute(text("""
+                                UPDATE TEMP_CAFLESS_OCR_Dukcapil SET
+                                    NIK=:nik, Nama=:nama,
+                                    Tempat_Lahir=:pob, Tgl_Lahir=:dob,
+                                    Jenis_Kelamin=:gender, Alamat=:addr,
+                                    RT=:rt, RW=:rw,
+                                    Kelurahan=:subdistrict, Kecamatan=:district,
+                                    Kota=:city, Provinsi=:province,
+                                    Pekerjaan=:job
+                                WHERE Id=:id
+                            """), {
+                                "id": wna_sp_ocr_id,
+                                "nik": _to_bit(g("ver_cust_wna_spouse_id_card_no")), "nama": _to_bit(g("ver_cust_wna_spouse_name")),
+                                "pob": _to_bit(g("ver_cust_wna_spouse_pob")), "dob": _to_bit(g("ver_cust_wna_spouse_dob")),
+                                "gender": _to_bit(g("ver_cust_wna_spouse_gender")), "addr": _to_bit(g("ver_cust_wna_spouse_address")),
+                                "rt": _to_bit(g("ver_cust_wna_spouse_rt")), "rw": _to_bit(g("ver_cust_wna_spouse_rw")),
+                                "subdistrict": _to_bit(g("ver_cust_wna_spouse_subdistrict")),
+                                "district": _to_bit(g("ver_cust_wna_spouse_district")),
+                                "city": _to_bit(g("ver_cust_wna_spouse_city")),
+                                "province": _to_bit(g("ver_cust_wna_spouse_province")),
+                                "job": _to_bit(g("ver_cust_wna_spouse_job")),
+                            })
+
+                        else:
+                            db.session.execute(text("""
+                                INSERT INTO TEMP_CAFLESS_OCR
+                                    (Prechecking_Id, OCR_For, Citizen, Id_Type, NIK, Nama, Tempat_Lahir,
+                                     Tgl_Lahir, Jenis_Kelamin, Golongan_Darah, Alamat, RT, RW,
+                                     Kelurahan, Kecamatan, Kota, Provinsi, Agama, Pekerjaan,
+                                     Status_Perkawinan, Kewarnegaraan, Foto, Tanda_Tangan)
+                                VALUES
+                                    (:pid,'S',:citizen,:id_type,:nik,:nama,:pob,
+                                     :dob,:gender,:blood,:addr,:rt,:rw,
+                                     :subdistrict,:district,:city,:province,:religion,:job,
+                                     :marital,:citizen2,:photo,:sign)
+                            """), {
+                                "pid": prechecking_id, "citizen": wna_sp_citizen, "id_type": wna_sp_id_type,
+                                "nik": wna_sp_nik, "nama": g("cust_wna_spouse_name"),
+                                "pob": g("cust_wna_spouse_pob"),
+                                "dob": _sql_date(g("cust_wna_spouse_dob")),
+                                "gender": g("cust_wna_spouse_gender"), "blood": g("cust_wna_spouse_blood_type"),
+                                "addr": g("cust_wna_spouse_address"), "rt": g("cust_wna_spouse_rt"),
+                                "rw": g("cust_wna_spouse_rw"), "subdistrict": g("cust_wna_spouse_subdistrict"),
+                                "district": g("cust_wna_spouse_district"), "city": g("cust_wna_spouse_city"),
+                                "province": g("cust_wna_spouse_province"), "religion": g("cust_wna_spouse_religion"),
+                                "job": g("cust_wna_spouse_job"), "marital": wna_marital,
+                                "citizen2": wna_sp_citizen,
+                                "photo": g("cust_wna_spouse_photo_hidden"), "sign": g("cust_wna_spouse_signature_hidden"),
+                            })
+
+                            wna_sp_ocr = db.session.execute(
+                                text("SELECT Id FROM TEMP_CAFLESS_OCR WITH(NOLOCK) WHERE Prechecking_Id=:pid AND NIK=:nik"),
+                                {"pid": prechecking_id, "nik": wna_sp_nik},
+                            ).fetchone()
+                            wna_sp_ocr_id = wna_sp_ocr.Id if wna_sp_ocr else 0
+
+                            db.session.execute(text("""
+                                INSERT INTO TEMP_CAFLESS_OCR_Rate
+                                    (Id, NIK, Nama, Tempat_Lahir, Tgl_Lahir, Jenis_Kelamin,
+                                     Golongan_Darah, Alamat, RT, RW, Kelurahan, Kecamatan,
+                                     Kota, Provinsi, Agama, Pekerjaan, Kewarnegaraan)
+                                VALUES
+                                    (:id,:nik,:nama,:pob,:dob,:gender,
+                                     :blood,:addr,:rt,:rw,:subdistrict,:district,
+                                     :city,:province,:religion,:job,:citizen)
+                            """), {
+                                "id": wna_sp_ocr_id,
+                                "nik":        _strip_non_digit(g("val_cust_wna_spouse_id_card_no")),
+                                "nama":       _strip_non_digit(g("val_cust_wna_spouse_name")),
+                                "pob":        _strip_non_digit(g("val_cust_wna_spouse_pob")),
+                                "dob":        _strip_non_digit(g("val_cust_wna_spouse_dob")),
+                                "gender":     _strip_non_digit(g("val_cust_wna_spouse_gender")),
+                                "blood":      _strip_non_digit(g("val_cust_wna_spouse_blood_type")),
+                                "addr":       _strip_non_digit(g("val_cust_wna_spouse_address")),
+                                "rt":         _strip_non_digit(g("val_cust_wna_spouse_rt")),
+                                "rw":         _strip_non_digit(g("val_cust_wna_spouse_rw")),
+                                "subdistrict":_strip_non_digit(g("val_cust_wna_spouse_subdistrict")),
+                                "district":   _strip_non_digit(g("val_cust_wna_spouse_district")),
+                                "city":       _strip_non_digit(g("val_cust_wna_spouse_city")),
+                                "province":   _strip_non_digit(g("val_cust_wna_spouse_province")),
+                                "religion":   _strip_non_digit(g("val_cust_wna_spouse_religion")),
+                                "job":        _strip_non_digit(g("val_cust_wna_spouse_job")),
+                                "citizen":    _strip_non_digit(g("val_cust_wna_spouse_citizen")),
+                            })
+
+                            db.session.execute(text("""
+                                INSERT INTO TEMP_CAFLESS_OCR_Dukcapil
+                                    (Id, NIK, Nama, Tempat_Lahir, Tgl_Lahir, Jenis_Kelamin,
+                                     Alamat, RT, RW, Kelurahan, Kecamatan, Kota, Provinsi, Pekerjaan)
+                                VALUES
+                                    (:id, :nik, :nama, :pob, :dob, :gender, :addr,
+                                     :rt, :rw, :subdistrict, :district, :city, :province, :job)
+                            """), {
+                                "id": wna_sp_ocr_id,
+                                "nik": _to_bit(g("ver_cust_wna_spouse_id_card_no")), "nama": _to_bit(g("ver_cust_wna_spouse_name")),
+                                "pob": _to_bit(g("ver_cust_wna_spouse_pob")), "dob": _to_bit(g("ver_cust_wna_spouse_dob")),
+                                "gender": _to_bit(g("ver_cust_wna_spouse_gender")), "addr": _to_bit(g("ver_cust_wna_spouse_address")),
+                                "rt": _to_bit(g("ver_cust_wna_spouse_rt")), "rw": _to_bit(g("ver_cust_wna_spouse_rw")),
+                                "subdistrict": _to_bit(g("ver_cust_wna_spouse_subdistrict")),
+                                "district": _to_bit(g("ver_cust_wna_spouse_district")),
+                                "city": _to_bit(g("ver_cust_wna_spouse_city")),
+                                "province": _to_bit(g("ver_cust_wna_spouse_province")),
+                                "job": _to_bit(g("ver_cust_wna_spouse_job")),
+                            })
+
+                    else:
+                        db.session.execute(text("""
+                            INSERT INTO TEMP_CAFLESS_OCR
+                                (Prechecking_Id, OCR_For, Citizen, Id_Type, NIK, Nama, Kewarnegaraan)
+                            VALUES (:pid,'S','WNA',:id_type,:nik,:nama,'WNA')
+                        """), {
+                            "pid": prechecking_id, "id_type": wna_sp_id_type,
+                            "nik": wna_sp_id, "nama": wna_sp_name,
+                        })
+
+        else:
+
+            if nationality == "WNI":
+                db.session.execute(text("""
+                    UPDATE TEMP_CAFLESS SET
+                        Apless=:apless, CustomerType=:cust_type, LesseeType=:lessee_type,
+                        LesseeName=:cust_name, NPWP='', MaritalStatus=:marital,
+                        CreatedBy=:username, CreatedDate=GETDATE(),
+                        Check_For=:check_for, Repeat_Order=:new_ro,
+                        Notes=:note_pr, Carro=:is_carro
+                    WHERE IdCardNo=:nik AND Prechecking_Id=:pid
+                """), {
+                    "apless": apless, "cust_type": cust_type, "lessee_type": lessee_type,
+                    "cust_name": cust_name, "marital": marital, "username": username,
+                    "check_for": check_for, "new_ro": cust_new_ro, "note_pr": note_pr,
+                    "is_carro": is_carro, "nik": nik, "pid": prechecking_id,
+                })
+
+                db.session.execute(text("""
+                    UPDATE TEMP_CAFLESS_OCR SET
+                        OCR_For=:check_for, Citizen=:citizen, Id_Type=:id_type, Nama=:nama,
+                        Tempat_Lahir=:pob, Tgl_Lahir=:dob, Jenis_Kelamin=:gender,
+                        Golongan_Darah=:blood, Alamat=:addr, RT=:rt, RW=:rw,
+                        Kelurahan=:subdistrict, Kecamatan=:district, Kota=:city,
+                        Provinsi=:province, Agama=:religion, Pekerjaan=:job,
+                        Status_Perkawinan=:marital, Kewarnegaraan=:citizen2,
+                        Foto=:photo, Tanda_Tangan=:sign, UpdatedDate=GETDATE()
+                    WHERE Prechecking_Id=:pid AND NIK=:nik
+                """), {
+                    "pid": prechecking_id, "check_for": check_for,
+                    "citizen": cust_citizen, "id_type": cust_id_type, "nik": nik,
+                    "nama": cust_name, "pob": g("cust_pob"), "dob": _sql_date(g("cust_dob")),
+                    "gender": g("cust_gender"), "blood": g("cust_blood_type"),
+                    "addr": g("cust_address"), "rt": g("cust_rt"), "rw": g("cust_rw"),
+                    "subdistrict": g("cust_subdistrict"), "district": g("cust_district"),
+                    "city": g("cust_city"), "province": g("cust_province"),
+                    "religion": g("cust_religion"), "job": g("cust_job"),
+                    "marital": marital, "citizen2": cust_citizen,
+                    "photo": g("cust_photo_hidden"), "sign": g("cust_signature_hidden"),
+                })
+
+                cust_ocr_row = db.session.execute(
+                    text("SELECT Id FROM TEMP_CAFLESS_OCR WITH(NOLOCK) WHERE Prechecking_Id=:pid AND NIK=:nik"),
+                    {"pid": prechecking_id, "nik": nik},
+                ).fetchone()
+                cust_id = cust_ocr_row.Id if cust_ocr_row else 0
+
+                db.session.execute(text("""
+                    UPDATE TEMP_CAFLESS_OCR_Rate SET
+                        NIK=:nik, Nama=:nama, Tempat_Lahir=:pob, Tgl_Lahir=:dob,
+                        Jenis_Kelamin=:gender, Golongan_Darah=:blood, Alamat=:addr,
+                        RT=:rt, RW=:rw, Kelurahan=:subdistrict, Kecamatan=:district,
+                        Kota=:city, Provinsi=:province, Agama=:religion,
+                        Pekerjaan=:job, Kewarnegaraan=:citizen
+                    WHERE Id=:id
+                """), {
+                    "id": cust_id,
+                    "nik":        _strip_non_digit(g("val_cust_id_card_no")),
+                    "nama":       _strip_non_digit(g("val_cust_name")),
+                    "pob":        _strip_non_digit(g("val_cust_pob")),
+                    "dob":        _strip_non_digit(g("val_cust_dob")),
+                    "gender":     _strip_non_digit(g("val_cust_gender")),
+                    "blood":      _strip_non_digit(g("val_cust_blood_type")),
+                    "addr":       _strip_non_digit(g("val_cust_address")),
+                    "rt":         _strip_non_digit(g("val_cust_rt")),
+                    "rw":         _strip_non_digit(g("val_cust_rw")),
+                    "subdistrict":_strip_non_digit(g("val_cust_subdistrict")),
+                    "district":   _strip_non_digit(g("val_cust_district")),
+                    "city":       _strip_non_digit(g("val_cust_city")),
+                    "province":   _strip_non_digit(g("val_cust_province")),
+                    "religion":   _strip_non_digit(g("val_cust_religion")),
+                    "job":        _strip_non_digit(g("val_cust_job")),
+                    "citizen":    _strip_non_digit(g("val_cust_citizen")),
+                })
+
+                db.session.execute(text("""
+                    UPDATE TEMP_CAFLESS_OCR_Dukcapil SET
+                        NIK=:nik, Nama=:nama,
+                        Tempat_Lahir=:pob, Tgl_Lahir=:dob,
+                        Jenis_Kelamin=:gender, Alamat=:addr,
+                        RT=:rt, RW=:rw,
+                        Kelurahan=:subdistrict, Kecamatan=:district,
+                        Kota=:city, Provinsi=:province,
+                        Pekerjaan=:job
+                    WHERE Id=:id
+                """), {
+                    "id": cust_id,
+                    "nik": _to_bit(g("ver_cust_id_card_no")), "nama": _to_bit(g("ver_cust_name")),
+                    "pob": _to_bit(g("ver_cust_pob")), "dob": _to_bit(g("ver_cust_dob")),
+                    "gender": _to_bit(g("ver_cust_gender")), "addr": _to_bit(g("ver_cust_address")),
+                    "rt": _to_bit(g("ver_cust_rt")), "rw": _to_bit(g("ver_cust_rw")),
+                    "subdistrict": _to_bit(g("ver_cust_subdistrict")), "district": _to_bit(g("ver_cust_district")),
+                    "city": _to_bit(g("ver_cust_city")), "province": _to_bit(g("ver_cust_province")),
+                    "job": _to_bit(g("ver_cust_job")),
+                })
+
+                if is_married:
+                    if sp_citizen == "WNI":
+                        db.session.execute(text("""
+                            UPDATE TEMP_CAFLESS_OCR SET
+                                OCR_For='S', Citizen=:citizen, Id_Type=:id_type, Nama=:nama,
+                                Tempat_Lahir=:pob, Tgl_Lahir=:dob, Jenis_Kelamin=:gender,
+                                Golongan_Darah=:blood, Alamat=:addr, RT=:rt, RW=:rw,
+                                Kelurahan=:subdistrict, Kecamatan=:district, Kota=:city,
+                                Provinsi=:province, Agama=:religion, Pekerjaan=:job,
+                                Status_Perkawinan=:marital, Kewarnegaraan=:citizen2,
+                                Foto=:photo, Tanda_Tangan=:sign, UpdatedDate=GETDATE()
+                            WHERE Prechecking_Id=:pid AND NIK=:nik
+                        """), {
+                            "pid": prechecking_id, "citizen": sp_citizen, "id_type": sp_id_type, "nik": sp_nik,
+                            "nama": g("cust_spouse_name"), "pob": g("cust_spouse_pob"),
+                            "dob": _sql_date(g("cust_spouse_dob")),
+                            "gender": g("cust_spouse_gender"),
+                            "blood": g("cust_spouse_blood_type"), "addr": g("cust_spouse_address"),
+                            "rt": g("cust_spouse_rt"), "rw": g("cust_spouse_rw"),
+                            "subdistrict": g("cust_spouse_subdistrict"), "district": g("cust_spouse_district"),
+                            "city": g("cust_spouse_city"), "province": g("cust_spouse_province"),
+                            "religion": g("cust_spouse_religion"), "job": g("cust_spouse_job"),
+                            "marital": marital, "citizen2": sp_citizen,
+                            "photo": g("cust_spouse_photo_hidden"), "sign": g("cust_spouse_signature_hidden"),
+                        })
+
+                        sp_ocr_row = db.session.execute(
+                            text("SELECT Id FROM TEMP_CAFLESS_OCR WITH(NOLOCK) WHERE Prechecking_Id=:pid AND NIK=:nik"),
+                            {"pid": prechecking_id, "nik": sp_nik},
+                        ).fetchone()
+                        sp_id = sp_ocr_row.Id if sp_ocr_row else 0
+
+                        db.session.execute(text("""
+                            UPDATE TEMP_CAFLESS_OCR_Rate SET
+                                NIK=:nik, Nama=:nama, Tempat_Lahir=:pob, Tgl_Lahir=:dob,
+                                Jenis_Kelamin=:gender, Golongan_Darah=:blood, Alamat=:addr,
+                                RT=:rt, RW=:rw, Kelurahan=:subdistrict, Kecamatan=:district,
+                                Kota=:city, Provinsi=:province, Agama=:religion,
+                                Pekerjaan=:job, Kewarnegaraan=:citizen
+                            WHERE Id=:id
+                        """), {
+                            "id": sp_id,
+                            "nik":        _strip_non_digit(g("val_cust_spouse_id_card_no")),
+                            "nama":       _strip_non_digit(g("val_cust_spouse_name")),
+                            "pob":        _strip_non_digit(g("val_cust_spouse_pob")),
+                            "dob":        _strip_non_digit(g("val_cust_spouse_dob")),
+                            "gender":     _strip_non_digit(g("val_cust_spouse_gender")),
+                            "blood":      _strip_non_digit(g("val_cust_spouse_blood_type")),
+                            "addr":       _strip_non_digit(g("val_cust_spouse_address")),
+                            "rt":         _strip_non_digit(g("val_cust_spouse_rt")),
+                            "rw":         _strip_non_digit(g("val_cust_spouse_rw")),
+                            "subdistrict":_strip_non_digit(g("val_cust_spouse_subdistrict")),
+                            "district":   _strip_non_digit(g("val_cust_spouse_district")),
+                            "city":       _strip_non_digit(g("val_cust_spouse_city")),
+                            "province":   _strip_non_digit(g("val_cust_spouse_province")),
+                            "religion":   _strip_non_digit(g("val_cust_spouse_religion")),
+                            "job":        _strip_non_digit(g("val_cust_spouse_job")),
+                            "citizen":    _strip_non_digit(g("val_cust_spouse_citizen")),
+                        })
+
+                        db.session.execute(text("""
+                            UPDATE TEMP_CAFLESS_OCR_Dukcapil SET
+                                NIK=:nik, Nama=:nama,
+                                Tempat_Lahir=:pob, Tgl_Lahir=:dob,
+                                Jenis_Kelamin=:gender, Alamat=:addr,
+                                RT=:rt, RW=:rw,
+                                Kelurahan=:subdistrict, Kecamatan=:district,
+                                Kota=:city, Provinsi=:province,
+                                Pekerjaan=:job
+                            WHERE Id=:id
+                        """), {
+                            "id": sp_id,
+                            "nik": _to_bit(g("ver_cust_spouse_id_card_no")), "nama": _to_bit(g("ver_cust_spouse_name")),
+                            "pob": _to_bit(g("ver_cust_spouse_pob")), "dob": _to_bit(g("ver_cust_spouse_dob")),
+                            "gender": _to_bit(g("ver_cust_spouse_gender")), "addr": _to_bit(g("ver_cust_spouse_address")),
+                            "rt": _to_bit(g("ver_cust_spouse_rt")), "rw": _to_bit(g("ver_cust_spouse_rw")),
+                            "subdistrict": _to_bit(g("ver_cust_spouse_subdistrict")),
+                            "district": _to_bit(g("ver_cust_spouse_district")),
+                            "city": _to_bit(g("ver_cust_spouse_city")),
+                            "province": _to_bit(g("ver_cust_spouse_province")),
+                            "job": _to_bit(g("ver_cust_spouse_job")),
+                        })
+
+                    else:
+                        db.session.execute(text("""
+                            INSERT INTO TEMP_CAFLESS_OCR
+                                (Prechecking_Id, OCR_For, Citizen, Id_Type, NIK, Nama, Kewarnegaraan, UpdatedDate)
+                            VALUES (:pid,'S','WNA',:id_type,:nik,:nama,'WNA',GETDATE())
+                        """), {
+                            "pid": prechecking_id, "id_type": sp_id_type,
+                            "nik": wna_sp_id, "nama": wna_sp_name,
+                        })
+
+                else:
+                    db.session.execute(text("""
+                        DELETE TEMP_CAFLESS_OCR_Dukcapil
+                        WHERE Id = (SELECT Id FROM TEMP_CAFLESS_OCR WHERE Prechecking_Id=:pid AND OCR_For='S')
+                    """), {"pid": prechecking_id})
+                    db.session.execute(text("""
+                        DELETE TEMP_CAFLESS_OCR_Rate
+                        WHERE Id = (SELECT Id FROM TEMP_CAFLESS_OCR WHERE Prechecking_Id=:pid AND OCR_For='S')
+                    """), {"pid": prechecking_id})
+                    db.session.execute(text("""
+                        DELETE TEMP_CAFLESS_OCR WHERE Prechecking_Id=:pid AND OCR_For='S'
+                    """), {"pid": prechecking_id})
+
+            else:
+                db.session.execute(text("""
+                    UPDATE TEMP_CAFLESS SET
+                        CustomerType=:cust_type, LesseeType=:lessee_type,
+                        LesseeName=:wna_name, IdCardNo=:wna_idcard,
+                        MaritalStatus=:wna_marital, CreatedBy=:username,
+                        CreatedDate=GETDATE(), Check_For=:check_for,
+                        Repeat_Order=:new_ro, Notes=:note_pr, Carro=:is_carro
+                    WHERE Apless=:apless AND Prechecking_Id=:pid
+                """), {
+                    "cust_type": cust_type, "lessee_type": lessee_type,
+                    "wna_name": wna_name, "wna_idcard": wna_idcard,
+                    "wna_marital": wna_marital, "username": username,
+                    "check_for": check_for, "new_ro": cust_new_ro,
+                    "note_pr": note_pr, "is_carro": is_carro,
+                    "apless": apless, "pid": prechecking_id,
+                })
+
+                db.session.execute(text("""
+                    UPDATE TEMP_CAFLESS_OCR SET
+                        Citizen='WNA', Id_Type=:id_type, NIK=:nik, Nama=:nama,
+                        Status_Perkawinan=:wna_marital, Kewarnegaraan='WNA', UpdatedDate=GETDATE()
+                    WHERE Prechecking_Id=:pid AND OCR_For=:check_for
+                """), {
+                    "check_for": check_for, "id_type": cust_id_type,
+                    "nik": wna_idcard, "nama": wna_name,
+                    "wna_marital": wna_marital, "pid": prechecking_id,
+                })
+
+                if is_wna_married:
+                    if wna_sp_citizen == "WNI":
+                        db.session.execute(text("""
+                            UPDATE TEMP_CAFLESS_OCR SET
+                                OCR_For='S', Citizen=:citizen, Id_Type=:id_type, Nama=:nama,
+                                Tempat_Lahir=:pob, Tgl_Lahir=:dob, Jenis_Kelamin=:gender,
+                                Golongan_Darah=:blood, Alamat=:addr, RT=:rt, RW=:rw,
+                                Kelurahan=:subdistrict, Kecamatan=:district, Kota=:city,
+                                Provinsi=:province, Agama=:religion, Pekerjaan=:job,
+                                Status_Perkawinan=:marital, Kewarnegaraan=:citizen2,
+                                Foto=:photo, Tanda_Tangan=:sign, UpdatedDate=GETDATE()
+                            WHERE Prechecking_Id=:pid AND NIK=:nik
+                        """), {
+                            "pid": prechecking_id, "citizen": wna_sp_citizen, "id_type": wna_sp_id_type,
+                            "nik": wna_sp_nik,
+                            "nama": g("cust_wna_spouse_name"), "pob": g("cust_wna_spouse_pob"),
+                            "dob": _sql_date(g("cust_wna_spouse_dob")),
+                            "gender": g("cust_wna_spouse_gender"),
+                            "blood": g("cust_wna_spouse_blood_type"), "addr": g("cust_wna_spouse_address"),
+                            "rt": g("cust_wna_spouse_rt"), "rw": g("cust_wna_spouse_rw"),
+                            "subdistrict": g("cust_wna_spouse_subdistrict"),
+                            "district": g("cust_wna_spouse_district"), "city": g("cust_wna_spouse_city"),
+                            "province": g("cust_wna_spouse_province"), "religion": g("cust_wna_spouse_religion"),
+                            "job": g("cust_wna_spouse_job"), "marital": wna_marital,
+                            "citizen2": wna_sp_citizen,
+                            "photo": g("cust_wna_spouse_photo_hidden"), "sign": g("cust_wna_spouse_signature_hidden"),
+                        })
+
+                        wna_sp_ocr = db.session.execute(
+                            text("SELECT Id FROM TEMP_CAFLESS_OCR WITH(NOLOCK) WHERE Prechecking_Id=:pid AND NIK=:nik"),
+                            {"pid": prechecking_id, "nik": wna_sp_nik},
+                        ).fetchone()
+                        wna_sp_ocr_id = wna_sp_ocr.Id if wna_sp_ocr else 0
+
+                        db.session.execute(text("""
+                            UPDATE TEMP_CAFLESS_OCR_Rate SET
+                                NIK=:nik, Nama=:nama, Tempat_Lahir=:pob, Tgl_Lahir=:dob,
+                                Jenis_Kelamin=:gender, Golongan_Darah=:blood, Alamat=:addr,
+                                RT=:rt, RW=:rw, Kelurahan=:subdistrict, Kecamatan=:district,
+                                Kota=:city, Provinsi=:province, Agama=:religion,
+                                Pekerjaan=:job, Kewarnegaraan=:citizen
+                            WHERE Id=:id
+                        """), {
+                            "id": wna_sp_ocr_id,
+                            "nik":        _strip_non_digit(g("val_cust_wna_spouse_id_card_no")),
+                            "nama":       _strip_non_digit(g("val_cust_wna_spouse_name")),
+                            "pob":        _strip_non_digit(g("val_cust_wna_spouse_pob")),
+                            "dob":        _strip_non_digit(g("val_cust_wna_spouse_dob")),
+                            "gender":     _strip_non_digit(g("val_cust_wna_spouse_gender")),
+                            "blood":      _strip_non_digit(g("val_cust_wna_spouse_blood_type")),
+                            "addr":       _strip_non_digit(g("val_cust_wna_spouse_address")),
+                            "rt":         _strip_non_digit(g("val_cust_wna_spouse_rt")),
+                            "rw":         _strip_non_digit(g("val_cust_wna_spouse_rw")),
+                            "subdistrict":_strip_non_digit(g("val_cust_wna_spouse_subdistrict")),
+                            "district":   _strip_non_digit(g("val_cust_wna_spouse_district")),
+                            "city":       _strip_non_digit(g("val_cust_wna_spouse_city")),
+                            "province":   _strip_non_digit(g("val_cust_wna_spouse_province")),
+                            "religion":   _strip_non_digit(g("val_cust_wna_spouse_religion")),
+                            "job":        _strip_non_digit(g("val_cust_wna_spouse_job")),
+                            "citizen":    _strip_non_digit(g("val_cust_wna_spouse_citizen")),
+                        })
+
+                        db.session.execute(text("""
+                            UPDATE TEMP_CAFLESS_OCR_Dukcapil SET
+                                NIK=:nik, Nama=:nama,
+                                Tempat_Lahir=:pob, Tgl_Lahir=:dob,
+                                Jenis_Kelamin=:gender, Alamat=:addr,
+                                RT=:rt, RW=:rw,
+                                Kelurahan=:subdistrict, Kecamatan=:district,
+                                Kota=:city, Provinsi=:province,
+                                Pekerjaan=:job
+                            WHERE Id=:id
+                        """), {
+                            "id": wna_sp_ocr_id,
+                            "nik": _to_bit(g("ver_cust_wna_spouse_id_card_no")), "nama": _to_bit(g("ver_cust_wna_spouse_name")),
+                            "pob": _to_bit(g("ver_cust_wna_spouse_pob")), "dob": _to_bit(g("ver_cust_wna_spouse_dob")),
+                            "gender": _to_bit(g("ver_cust_wna_spouse_gender")), "addr": _to_bit(g("ver_cust_wna_spouse_address")),
+                            "rt": _to_bit(g("ver_cust_wna_spouse_rt")), "rw": _to_bit(g("ver_cust_wna_spouse_rw")),
+                            "subdistrict": _to_bit(g("ver_cust_wna_spouse_subdistrict")),
+                            "district": _to_bit(g("ver_cust_wna_spouse_district")),
+                            "city": _to_bit(g("ver_cust_wna_spouse_city")),
+                            "province": _to_bit(g("ver_cust_wna_spouse_province")),
+                            "job": _to_bit(g("ver_cust_wna_spouse_job")),
+                        })
+
+                    else:
+                        db.session.execute(text("""
+                            INSERT INTO TEMP_CAFLESS_OCR
+                                (Prechecking_Id, OCR_For, Citizen, Id_Type, NIK, Nama, Kewarnegaraan)
+                            VALUES (:pid,'S','WNA',:id_type,:nik,:nama,'WNA')
+                        """), {
+                            "pid": prechecking_id, "id_type": wna_sp_id_type,
+                            "nik": wna_sp_id, "nama": wna_sp_name,
+                        })
+
+        db.session.execute(text("""
+            INSERT INTO DocumentApproval
+                (ApprovalFormId, DocumentNumber, Title, Progress,
+                 LastApprovalActionCode, LastActionBy, LastActionDate,
+                 CurrentApprover, DocumentStatusCode, CreatedBy, CreatedDate)
+            VALUES
+                (:form_id, :pid, :title, 50,
+                 'draft', :username, GETDATE(),
+                 :approver, 'draft', :username, GETDATE())
+        """), {
+            "form_id":  approval_form_id,
+            "pid":      prechecking_id,
+            "title":    f"CAM Request - {prechecking_id}",
+            "username": username,
+            "approver": f"({username})",
+        })
+
+        doc_appr_row = db.session.execute(
+            text("SELECT Id FROM DocumentApproval WITH(NOLOCK) WHERE DocumentNumber=:pid"),
             {"pid": prechecking_id},
         ).fetchone()
+        doc_appr_id = doc_appr_row.Id if doc_appr_row else 0
 
-        params = {
-            "pid":           prechecking_id,
-            "apless":        apless,
-            "branch":        branch,
-            "lessee_type":   lessee_type,
-            "cust_type":     cust_type,
-            "check_for":     check_for,
-            "nationality":   nationality,
-            "marital":       marital,
-            "wna_marital":   wna_marital,
-            "new_ro":        0 if cust_new_ro == "New" else 1,
-            "existing":      existing_apless,
-            "is_carro":      is_carro,
-            "note_pr":       note_pr,
-            "note_pt":       note_pt,
-            "username":      username,
-            "emp_id":        emp_id,
-            # Customer WNI
-            "nik":           g("cust_id_card_no"),
-            "nama":          g("cust_name"),
-            "pob":           g("cust_pob"),
-            "dob":           g("cust_dob"),
-            "gender":        g("cust_gender"),
-            "blood":         g("cust_blood_type"),
-            "addr":          g("cust_address"),
-            "rt":            g("cust_rt"),
-            "rw":            g("cust_rw"),
-            "subdistrict":   g("cust_subdistrict"),
-            "district":      g("cust_district"),
-            "city":          g("cust_city"),
-            "province":      g("cust_province"),
-            "religion":      g("cust_religion"),
-            "job":           g("cust_job"),
-            "citizen":       g("cust_citizen"),
-            "photo":         g("cust_photo_hidden"),
-            "sign":          g("cust_signature_hidden"),
-            # OCR confidence (val_*)
-            "val_nik":       _strip_non_digit(g("val_cust_id_card_no")),
-            "val_nama":      _strip_non_digit(g("val_cust_name")),
-            "val_pob":       _strip_non_digit(g("val_cust_pob")),
-            "val_dob":       _strip_non_digit(g("val_cust_dob")),
-            "val_gender":    _strip_non_digit(g("val_cust_gender")),
-            "val_blood":     _strip_non_digit(g("val_cust_blood_type")),
-            "val_addr":      _strip_non_digit(g("val_cust_address")),
-            "val_rt":        _strip_non_digit(g("val_cust_rt")),
-            "val_rw":        _strip_non_digit(g("val_cust_rw")),
-            "val_subdistrict": _strip_non_digit(g("val_cust_subdistrict")),
-            "val_district":  _strip_non_digit(g("val_cust_district")),
-            "val_city":      _strip_non_digit(g("val_cust_city")),
-            "val_province":  _strip_non_digit(g("val_cust_province")),
-            "val_religion":  _strip_non_digit(g("val_cust_religion")),
-            "val_job":       _strip_non_digit(g("val_cust_job")),
-            "val_citizen":   _strip_non_digit(g("val_cust_citizen")),
-            # Verification (ver_*)
-            "ver_nik":       g("ver_cust_id_card_no"),
-            "ver_nama":      g("ver_cust_name"),
-            "ver_pob":       g("ver_cust_pob"),
-            "ver_dob":       g("ver_cust_dob"),
-            "ver_gender":    g("ver_cust_gender"),
-            "ver_addr":      g("ver_cust_address"),
-            "ver_rt":        g("ver_cust_rt"),
-            "ver_subdistrict": g("ver_cust_subdistrict"),
-            "ver_district":  g("ver_cust_district"),
-            "ver_city":      g("ver_cust_city"),
-            "ver_province":  g("ver_cust_province"),
-            "ver_job":       g("ver_cust_job"),
-            # Spouse
-            "sp_nik":        g("cust_spouse_id_card_no"),
-            "sp_nama":       g("cust_spouse_name"),
-            "sp_pob":        g("cust_spouse_pob"),
-            "sp_dob":        g("cust_spouse_dob"),
-            "sp_gender":     g("cust_spouse_gender"),
-            "sp_blood":      g("cust_spouse_blood_type"),
-            "sp_addr":       g("cust_spouse_address"),
-            "sp_rt":         g("cust_spouse_rt"),
-            "sp_rw":         g("cust_spouse_rw"),
-            "sp_subdistrict":g("cust_spouse_subdistrict"),
-            "sp_district":   g("cust_spouse_district"),
-            "sp_city":       g("cust_spouse_city"),
-            "sp_province":   g("cust_spouse_province"),
-            "sp_religion":   g("cust_spouse_religion"),
-            "sp_job":        g("cust_spouse_job"),
-            "sp_citizen":    g("cust_spouse_citizen"),
-            "sp_photo":      g("cust_spouse_photo_hidden"),
-            "sp_sign":       g("cust_spouse_signature_hidden"),
-            # WNA
-            "wna_name":      g("wna_name"),
-            "wna_idcard":    g("wna_idcard_no"),
-            "wna_sp_name":   g("wna_spouse_name"),
-            "wna_sp_idcard": g("wna_spouse_idcard_no"),
-        }
+        db.session.execute(text("""
+            INSERT INTO DocumentApprovalHistory
+                (DocumentApprovalId, ApprovalActionCode, Remarks, CreatedBy, CreatedDate)
+            VALUES
+                (:appr_id, 'draft', :remarks, :username, GETDATE())
+        """), {
+            "appr_id":  doc_appr_id,
+            "remarks":  f"CMO {username} submitted Prechecking Request No. {prechecking_id}",
+            "username": username,
+        })
 
-        if exists:
-            db.session.execute(
+        db.session.execute(
+            text("""
+                UPDATE TEMP_CUSTOMER_DOCUMENT SET Apless = :apless
+                WHERE Prechecking_Id = :pid AND ISNULL(LTRIM(RTRIM(Apless)), '') = ''
+            """),
+            {"apless": apless, "pid": prechecking_id},
+        )
+
+        carried_failed = _carry_over_documents(
+            prechecking_id, apless, username, body.get("carried_documents")
+        )
+
+        required_doc_types = []
+        if nationality == "WNI":
+            required_doc_types.append("cust-ktp")
+            if is_married and sp_citizen == "WNI":
+                required_doc_types.append("cust-spouse-ktp")
+        elif is_wna_married and wna_sp_citizen == "WNI":
+            required_doc_types.append("cust-wna-spouse-ktp")
+
+        documents_missing = []
+        for dtype in required_doc_types:
+            found = db.session.execute(
                 text("""
-                    UPDATE TEMP_CAFLESS SET
-                        Apless=:apless, BranchCd=:branch, Lessee_TP=:lessee_type,
-                        CustomerType=:cust_type, Check_For=:check_for,
-                        NationalityType=:nationality, MaritalStatus=:marital,
-                        WnaMaritalStatus=:wna_marital, NewRO=:new_ro,
-                        ExistingApless=:existing, IsCarroType=:is_carro,
-                        NotePrecheckingPR=:note_pr, NotePrecheckingPT=:note_pt,
-                        IdCardNo=:nik, LesseeName=:nama, PlaceOfBirth=:pob,
-                        DateOfBirth=:dob, Gender=:gender, BloodType=:blood,
-                        Address=:addr, RT=:rt, RW=:rw,
-                        Subdistrict=:subdistrict, District=:district,
-                        City=:city, Province=:province,
-                        Religion=:religion, Job=:job, Citizen=:citizen,
-                        Photo=:photo, Signature=:sign,
-                        ValIdCardNo=:val_nik, ValName=:val_nama,
-                        ValPOB=:val_pob, ValDOB=:val_dob,
-                        ValGender=:val_gender, ValBloodType=:val_blood,
-                        ValAddress=:val_addr, ValRT=:val_rt, ValRW=:val_rw,
-                        ValSubdistrict=:val_subdistrict, ValDistrict=:val_district,
-                        ValCity=:val_city, ValProvince=:val_province,
-                        ValReligion=:val_religion, ValJob=:val_job,
-                        ValCitizen=:val_citizen,
-                        VerIdCardNo=:ver_nik, VerName=:ver_nama,
-                        VerPOB=:ver_pob, VerDOB=:ver_dob,
-                        VerGender=:ver_gender, VerAddress=:ver_addr,
-                        VerRT=:ver_rt, VerSubdistrict=:ver_subdistrict,
-                        VerDistrict=:ver_district, VerCity=:ver_city,
-                        VerProvince=:ver_province, VerJob=:ver_job,
-                        SpouseIdCardNo=:sp_nik, SpouseName=:sp_nama,
-                        SpousePOB=:sp_pob, SpouseDOB=:sp_dob,
-                        SpouseGender=:sp_gender, SpouseBloodType=:sp_blood,
-                        SpouseAddress=:sp_addr, SpouseRT=:sp_rt, SpouseRW=:sp_rw,
-                        SpouseSubdistrict=:sp_subdistrict, SpouseDistrict=:sp_district,
-                        SpouseCity=:sp_city, SpouseProvince=:sp_province,
-                        SpouseReligion=:sp_religion, SpouseJob=:sp_job,
-                        SpouseCitizen=:sp_citizen, SpousePhoto=:sp_photo,
-                        SpouseSignature=:sp_sign,
-                        WnaName=:wna_name, WnaIdCardNo=:wna_idcard,
-                        WnaSpouseName=:wna_sp_name, WnaSpouseIdCardNo=:wna_sp_idcard,
-                        UpdatedBy=:username, UpdatedDate=GETDATE()
-                    WHERE Prechecking_Id=:pid
+                    SELECT COUNT(1) AS cnt FROM TEMP_CUSTOMER_DOCUMENT WITH(NOLOCK)
+                    WHERE Prechecking_Id = :pid AND DocumentType = :dtype
                 """),
-                params,
-            )
-        else:
-            db.session.execute(
-                text("""
-                    INSERT INTO TEMP_CAFLESS (
-                        Prechecking_Id, Apless, BranchCd, Lessee_TP,
-                        CustomerType, Check_For, NationalityType,
-                        MaritalStatus, WnaMaritalStatus, NewRO, ExistingApless,
-                        IsCarroType, NotePrecheckingPR, NotePrecheckingPT,
-                        IdCardNo, LesseeName, PlaceOfBirth, DateOfBirth,
-                        Gender, BloodType, Address, RT, RW,
-                        Subdistrict, District, City, Province,
-                        Religion, Job, Citizen, Photo, Signature,
-                        ValIdCardNo, ValName, ValPOB, ValDOB,
-                        ValGender, ValBloodType, ValAddress, ValRT, ValRW,
-                        ValSubdistrict, ValDistrict, ValCity, ValProvince,
-                        ValReligion, ValJob, ValCitizen,
-                        VerIdCardNo, VerName, VerPOB, VerDOB,
-                        VerGender, VerAddress, VerRT, VerSubdistrict,
-                        VerDistrict, VerCity, VerProvince, VerJob,
-                        SpouseIdCardNo, SpouseName, SpousePOB, SpouseDOB,
-                        SpouseGender, SpouseBloodType, SpouseAddress,
-                        SpouseRT, SpouseRW, SpouseSubdistrict, SpouseDistrict,
-                        SpouseCity, SpouseProvince, SpouseReligion, SpouseJob,
-                        SpouseCitizen, SpousePhoto, SpouseSignature,
-                        WnaName, WnaIdCardNo, WnaSpouseName, WnaSpouseIdCardNo,
-                        EmpId, CreatedBy, CreatedDate
-                    ) VALUES (
-                        :pid, :apless, :branch, :lessee_type,
-                        :cust_type, :check_for, :nationality,
-                        :marital, :wna_marital, :new_ro, :existing,
-                        :is_carro, :note_pr, :note_pt,
-                        :nik, :nama, :pob, :dob,
-                        :gender, :blood, :addr, :rt, :rw,
-                        :subdistrict, :district, :city, :province,
-                        :religion, :job, :citizen, :photo, :sign,
-                        :val_nik, :val_nama, :val_pob, :val_dob,
-                        :val_gender, :val_blood, :val_addr, :val_rt, :val_rw,
-                        :val_subdistrict, :val_district, :val_city, :val_province,
-                        :val_religion, :val_job, :val_citizen,
-                        :ver_nik, :ver_nama, :ver_pob, :ver_dob,
-                        :ver_gender, :ver_addr, :ver_rt, :ver_subdistrict,
-                        :ver_district, :ver_city, :ver_province, :ver_job,
-                        :sp_nik, :sp_nama, :sp_pob, :sp_dob,
-                        :sp_gender, :sp_blood, :sp_addr,
-                        :sp_rt, :sp_rw, :sp_subdistrict, :sp_district,
-                        :sp_city, :sp_province, :sp_religion, :sp_job,
-                        :sp_citizen, :sp_photo, :sp_sign,
-                        :wna_name, :wna_idcard, :wna_sp_name, :wna_sp_idcard,
-                        :emp_id, :username, GETDATE()
-                    )
-                """),
-                params,
-            )
+                {"pid": prechecking_id, "dtype": dtype},
+            ).fetchone()
+            if not found or found.cnt == 0:
+                documents_missing.append(dtype)
 
         db.session.commit()
-        return jsonify({"success": True, "prechecking_id": prechecking_id, "apless": apless})
+        return jsonify({
+            "success": True,
+            "prechecking_id": prechecking_id,
+            "apless": apless,
+            "documents_failed": carried_failed,
+            "documents_missing": documents_missing,
+        })
 
     except Exception:
         db.session.rollback()
@@ -572,6 +1469,7 @@ def submit_prechecking():
         return jsonify({"success": False, "message": "Database error"}), 500
 
 @prechecking_individu_bp.route("/cancel", methods=["POST"])
+@login_required
 def cancel_prechecking():
    
     body           = request.get_json(force=True) or {}
@@ -609,6 +1507,7 @@ def cancel_prechecking():
         return jsonify({"success": False, "message": "Database error"}), 500
 
 @prechecking_individu_bp.route("/marital-statuses", methods=["GET"])
+@login_required
 def get_marital_statuses():
     try:
         rows = db.session.execute(
@@ -625,82 +1524,181 @@ def get_marital_statuses():
             {"value": "D", "label": "Cerai"},
         ])
 
+_DOC_META: dict[str, tuple[str, str]] = {
+    "cust-ktp":                        ("-CUST_KTP-",                       "DATA_DIRI/KTP"),
+    "cust-spouse-ktp":                 ("-CUST_SPOUSE_KTP-",                "DATA_DIRI/KTP"),
+    "cust-kk":                         ("-CUST_KK-",                        "DATA_DIRI/KK"),
+    "cust-npwp":                       ("-CUST_NPWP-",                      "DATA_DIRI/NPWP"),
+    "cust-marriage-or-death-statement":("-CUST-MARRIAGE_OR_DEATH_STATEMENT-","DATA_DIRI/AKTA_CERAI_MATI"),
+    "cust-kitas":                      ("-CUST_KITAS-",                     "DATA_DIRI/KITAS"),
+    "cust-kitap":                      ("-CUST_KITAP-",                     "DATA_DIRI/KITAP"),
+    "cust-spouse-kitas":               ("-CUST_SPOUSE_KITAS-",              "DATA_DIRI/KITAS_PASANGAN"),
+    "cust-spouse-kitap":               ("-CUST_SPOUSE_KITAP-",              "DATA_DIRI/KITAP_PASANGAN"),
+    "cust-wna-spouse-ktp":             ("-CUST_WNA_SPOUSE_KTP-",            "DATA_DIRI/KTP_PASANGAN"),
+}
+
+_DOC_TYPE_SIBLINGS: dict[str, tuple[str, ...]] = {
+    "cust-kitas":        ("cust-kitas", "cust-kitap"),
+    "cust-kitap":        ("cust-kitas", "cust-kitap"),
+    "cust-spouse-kitas": ("cust-spouse-kitas", "cust-spouse-kitap"),
+    "cust-spouse-kitap": ("cust-spouse-kitas", "cust-spouse-kitap"),
+}
+
 @prechecking_individu_bp.route("/upload-document", methods=["POST"])
+@login_required
 def upload_document():
-   
-    username       = _username()
-    apless         = request.form.get("apless", "")
-    prechecking_id = request.form.get("prechecking_id", "")
-    document_type  = request.form.get("document_type", "")
-    cust_type      = request.form.get("cust_type", "PR")
+    
+    username          = _username()
+    apless            = request.form.get("apless", "")
+    prechecking_id    = request.form.get("prechecking_id", "")
+    document_type     = request.form.get("document_type", "")
+    cust_type         = request.form.get("cust_type", "PR")
     organization_type = request.form.get("organization_type", "PR")
 
     if "file" not in request.files:
         return jsonify({"success": False, "message": "No file provided"}), 400
 
-    f        = request.files["file"]
-    original = f.filename or "upload"
-    ext      = os.path.splitext(original)[1].lower()
+    if not prechecking_id:
+        return jsonify({"success": False, "message": "prechecking_id is required"}), 400
 
+    if not apless:
+        apless = _apless_for_prechecking(prechecking_id)
+
+    if not apless:
+        return jsonify({
+            "success": False,
+            "message": "Temp. Customer No. (apless) is required before uploading a document.",
+        }), 400
+
+    f          = request.files["file"]
+    original   = f.filename or "upload"
     file_bytes = f.read()
-    b64_data   = base64.b64encode(file_bytes).decode()
-    doc_name   = f"{prechecking_id}-{document_type}-{uuid.uuid4().hex[:8]}{ext}"
+
+    err = _validate_file(file_bytes, original)
+    if err:
+        return jsonify({"success": False, "message": err}), 400
+
+    name_prefix, doc_subfolder = _DOC_META.get(
+        document_type, (f"-{document_type.upper().replace('-', '_')}-", document_type)
+    )
+
+    doc_name  = f"{prechecking_id}{name_prefix}{original}"
+
+    is_guarantor = organization_type in ("GUARNPR", "GUARNPT")
+    aws_prefix   = "upload_doc/guarantor" if is_guarantor else "upload_doc"
+    aws_key      = f"{aws_prefix}/{apless}/{prechecking_id}/{doc_subfolder}/{doc_name}"
+
+    content_type = mimetypes.guess_type(original)[0] or "application/octet-stream"
+
+    replaced_types = _DOC_TYPE_SIBLINGS.get(document_type, (document_type,))
 
     try:
+        placeholders = ", ".join(f":dtype_{i}" for i in range(len(replaced_types)))
+        params = {"pid": prechecking_id}
+        params.update({f"dtype_{i}": t for i, t in enumerate(replaced_types)})
+
+        existing_rows = db.session.execute(
+            text(f"""
+                SELECT CustomerDocumentId, AWSKey, DocumentName
+                FROM TEMP_CUSTOMER_DOCUMENT WITH(NOLOCK)
+                WHERE Prechecking_Id = :pid
+                    AND DocumentType IN ({placeholders})
+                    AND Apless IS NOT NULL
+            """),
+            params,
+        ).fetchall()
+
+        for existing in existing_rows:
+            if existing.AWSKey:
+                _aws_delete(existing.AWSKey)
+
+            db.session.execute(
+                text("""
+                    DELETE FROM TEMP_CUSTOMER_DOCUMENT
+                    WHERE CustomerDocumentId = :doc_id
+                """),
+                {"doc_id": existing.CustomerDocumentId},
+            )
+
+        _aws_upload(file_bytes, aws_key, content_type)
+
         db.session.execute(
             text("""
-                INSERT INTO TEMP_CUSTOMER_DOCUMENT (Apless, DocumentName, OrganizationType, NumberOfDocuments, DocumentType, CreatedBy, CreatedDate, AWSKey, Prechecking_Id)
-                VALUES (:apless, :name, :org_type, :numb_doc, :dtype, :user, GETDATE(), :aws_key, :pid)
-                """),
+                INSERT INTO TEMP_CUSTOMER_DOCUMENT
+                    (Apless, DocumentName, OrganizationType, NumberOfDocuments,
+                     DocumentType, CreatedBy, CreatedDate, AWSKey, Prechecking_Id)
+                VALUES
+                    (:apless, :name, :org_type, :numb_doc,
+                     :dtype, :user, GETDATE(), :aws_key, :pid)
+            """),
             {
-                "apless": apless,
-                "name":   doc_name,
-                "org_type": organization_type,
-                "numb_doc": "1",
-                "dtype":   document_type,
-                "aws_key": f"{prechecking_id}/{document_type}/{doc_name}",
-                "user":    username,
-                "pid":     prechecking_id,
+                "apless":    apless,
+                "name":      doc_name,
+                "org_type":  organization_type,
+                "numb_doc":  "1",
+                "dtype":     document_type,
+                "user":      username,
+                "aws_key":   aws_key,
+                "pid":       prechecking_id,
             },
         )
         db.session.commit()
+
+        b64_data = base64.b64encode(file_bytes).decode()
+        orig_ext = os.path.splitext(original)[1].lower()
         return jsonify({
-            "success": True,
+            "success":       True,
             "document_name": doc_name,
             "document_type": document_type,
-            "b64": b64_data if ext in (".png", ".jpg", ".jpeg") else None,
+            "aws_key":       aws_key,
+            "b64": b64_data if orig_ext in (".png", ".jpg", ".jpeg") else None,
         })
+
+    except (BotoCoreError, ClientError) as exc:
+        db.session.rollback()
+        current_app.logger.exception("upload_document S3 error")
+        return jsonify({"success": False, "message": f"S3 upload failed: {exc}"}), 500
     except Exception:
         db.session.rollback()
         current_app.logger.exception("upload_document error")
         return jsonify({"success": False, "message": "Database error"}), 500
 
-
 @prechecking_individu_bp.route("/documents", methods=["GET"])
+@login_required
 def get_documents():
-   
-    apless         = request.args.get("apless", "")
-    prechecking_id = request.args.get("prechecking_id", "")
+
+    apless                  = request.args.get("apless", "")
+    prechecking_id          = request.args.get("prechecking_id", "")
+    previous_prechecking_id = request.args.get("previous_prechecking_id", "")
+
+    prechecking_ids = [pid for pid in {prechecking_id, previous_prechecking_id} if pid]
+
+    if not prechecking_ids:
+        return jsonify([])
 
     try:
+        placeholders = ", ".join(f":pid_{i}" for i in range(len(prechecking_ids)))
+        params = {"apless": apless}
+        params.update({f"pid_{i}": pid for i, pid in enumerate(prechecking_ids)})
+
         rows = db.session.execute(
-            text("""
+            text(f"""
                 SELECT CustomerDocumentId, DocumentName, DocumentType, AWSKey
                 FROM TEMP_CUSTOMER_DOCUMENT WITH(NOLOCK)
-                WHERE Apless = :apless
-                  AND Prechecking_Id = :pid
-                  AND Apless IS NOT NULL
+                WHERE Prechecking_Id IN ({placeholders})
+                    AND (:apless = '' OR ISNULL(Apless, '') IN (:apless, ''))
                 ORDER BY DocumentType, CreatedDate
             """),
-            {"apless": apless, "pid": prechecking_id},
+            params,
         ).fetchall()
 
         docs = [
             {
-                "id":   r.CustomerDocumentId,
-                "name": r.DocumentName,
-                "type": r.DocumentType,
-                "key":  r.AWSKey,
+                "id":       r.CustomerDocumentId,
+                "name":     r.DocumentName,
+                "type":     r.DocumentType,
+                "key":      r.AWSKey,
+                "view_url": _aws_presign(r.AWSKey, r.DocumentName) if r.AWSKey else None,
             }
             for r in rows
         ]
@@ -709,29 +1707,68 @@ def get_documents():
         current_app.logger.exception("get_documents error")
         return jsonify([])
 
+@prechecking_individu_bp.route("/view-document", methods=["GET"])
+@login_required
+def view_document():
+   
+    doc_id = request.args.get("customer_document_id")
+    if not doc_id:
+        return jsonify({"success": False, "message": "document id required"}), 400
+
+    try:
+        row = db.session.execute(
+            text("""
+                SELECT AWSKey, DocumentName
+                FROM TEMP_CUSTOMER_DOCUMENT
+                WHERE CustomerDocumentId = :id
+            """),
+            {"id": doc_id},
+        ).fetchone()
+
+        if not row or not row.AWSKey:
+            return jsonify({"success": False, "message": "Document not found"}), 404
+
+        url = _aws_presign(row.AWSKey, row.DocumentName)
+        return jsonify({"success": True, "view_url": url})
+    except Exception:
+        current_app.logger.exception("view_document error")
+        return jsonify({"success": False, "message": "Could not generate view link"}), 500
 
 @prechecking_individu_bp.route("/delete-document", methods=["POST"])
+@login_required
 def delete_document():
-   
-    body     = request.get_json(force=True) or {}
-    doc_id   = body.get("customer_document_id")
-    pid      = body.get("prechecking_id", "")
+  
+    body   = request.get_json(force=True) or {}
+    doc_id = body.get("customer_document_id")
+    pid    = (body.get("prechecking_id") or "").strip()
+    nik    = (body.get("nik") or "").strip()
 
     if not doc_id:
         return jsonify({"success": False, "message": "document id required"}), 400
 
     try:
+        row = db.session.execute(
+            text("""
+                SELECT AWSKey, DocumentType FROM TEMP_CUSTOMER_DOCUMENT
+                WHERE CustomerDocumentId = :id
+            """),
+            {"id": doc_id},
+        ).fetchone()
+
+        if row and row.AWSKey:
+            _aws_delete(row.AWSKey)
+
         db.session.execute(
             text("DELETE FROM TEMP_CUSTOMER_DOCUMENT WHERE CustomerDocumentId = :id"),
             {"id": doc_id},
         )
+
+        if row and pid and nik and _is_ocr_doc_type(row.DocumentType):
+            _cleanup_ocr_for_nik(pid, nik)
+
         db.session.commit()
         return jsonify({"success": True})
     except Exception:
         db.session.rollback()
         current_app.logger.exception("delete_document error")
         return jsonify({"success": False, "message": "Database error"}), 500
-
-def _strip_non_digit(value: str) -> str:
-    import re
-    return re.sub(r"\D", "", value or "")

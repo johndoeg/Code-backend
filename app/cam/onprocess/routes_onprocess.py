@@ -5,7 +5,7 @@ from datetime import datetime
 
 cam_onhand_bp = Blueprint('camonhand', __name__, url_prefix='/CAM')
 
-@cam_onhand_bp.route('/api/onprocess/on-hand', methods=['GET'])
+@cam_onhand_bp.route('/onprocess/on-hand', methods=['GET'])
 def get_cam_on_hand():
     try:
         page = max(1, request.args.get('page', 1, type=int))

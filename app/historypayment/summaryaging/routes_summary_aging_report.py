@@ -1,5 +1,6 @@
 from flask import Blueprint, jsonify, request, current_app, session, make_response
 from app import db
+from app.auth.decorators import login_required
 from sqlalchemy import text
 import io
 
@@ -38,7 +39,8 @@ def _exec_sp(sp_name: str, params: list) -> list[dict]:
     finally:
         cursor.close()
 
-@summary_aging_bp.route('/api/combo')
+@summary_aging_bp.route('/combo')
+@login_required
 def get_combo():
    
     try:
@@ -53,8 +55,8 @@ def get_combo():
         current_app.logger.exception("Combo load error")
         return jsonify({'error': str(e)}), 500
 
-
-@summary_aging_bp.route('/api/excel')
+@summary_aging_bp.route('/excel')
+@login_required
 def export_excel():
    
     asof   = request.args.get('asof',   '').strip()
@@ -70,13 +72,11 @@ def export_excel():
 
     try:
         if by == '0':
-            # Branch
             rows = _exec_sp('USP_SUMMARY_AGING', [asof, cek_jf])
             xlsx = build_excel_branch(rows, asof, company)
             fname = 'SummaryAging.xlsx'
 
         elif by == '1':
-            # CMO — SP called twice: main data + outstanding section
             rows     = _exec_sp('USP_SUMMARY_AGING_BYCMO', [asof, cek_jf])
             rows_out = _exec_sp('USP_SUMMARY_AGING_BYCMO', [asof, cek_jf])
             xlsx = build_excel_by_person(rows, rows_out, asof, company,
@@ -84,7 +84,6 @@ def export_excel():
             fname = 'SummaryAgingByCMO.xlsx'
 
         elif by == '2':
-            # CMH — SP called twice
             rows     = _exec_sp('USP_SUMMARY_AGING_BYCMH', [asof, cek_jf])
             rows_out = _exec_sp('USP_SUMMARY_AGING_BYCMH', [asof, cek_jf])
             xlsx = build_excel_by_person(rows, rows_out, asof, company,
@@ -92,7 +91,6 @@ def export_excel():
             fname = 'SummaryAgingByCMH.xlsx'
 
         elif by == '3':
-            # Dealer — 3 separate sub-queries to the same SP
             rows_ta  = _exec_sp('USP_SUMMARY_AGING_OTHER', [asof, 'DEALER_TOT_ACC'])
             rows_od  = _exec_sp('USP_SUMMARY_AGING_OTHER', [asof, 'DEALER_TOT_OD'])
             rows_od90= _exec_sp('USP_SUMMARY_AGING_OTHER', [asof, 'DEALER_TOT_OD90'])
@@ -100,7 +98,6 @@ def export_excel():
             fname = 'SummaryAgingByDealer.xlsx'
 
         else:
-            # Other (Karoseri / Tenor / LTV)
             rows_k = _exec_sp('USP_SUMMARY_AGING_OTHER', [asof, 'KAROSERI'])
             rows_t = _exec_sp('USP_SUMMARY_AGING_OTHER', [asof, 'TENOR'])
             rows_l = _exec_sp('USP_SUMMARY_AGING_OTHER', [asof, 'LTV'])
@@ -117,7 +114,8 @@ def export_excel():
         current_app.logger.exception("Summary Aging Excel export error")
         return jsonify({'error': str(e)}), 500
 
-@summary_aging_bp.route('/api/pdf')
+@summary_aging_bp.route('/pdf')
+@login_required
 def export_pdf():
    
     asof   = request.args.get('asof',   '').strip()
@@ -152,7 +150,6 @@ def _fmt_num(v) -> str:
         return f'{int(n):,}'
     except (TypeError, ValueError):
         return str(v or '')
-
 
 def _build_pdf(rows: list[dict], asof: str) -> bytes:
   
@@ -191,7 +188,7 @@ def _build_pdf(rows: list[dict], asof: str) -> bytes:
             ('VALIGN',     (0, 0), (-1, -1),              'MIDDLE'),
             ('ROWBACKGROUNDS', (0, header_rows), (-1, -1),
              [WHITE, colors.HexColor('#f9f9f9')]),
-            ('FONTNAME',   (0, -1), (-1, -1), 'Helvetica-Bold'),  # total row bold
+            ('FONTNAME',   (0, -1), (-1, -1), 'Helvetica-Bold'),
         ]
         return TableStyle(base)
 
@@ -349,4 +346,5 @@ def _build_pdf(rows: list[dict], asof: str) -> bytes:
 
     doc.build(story)
     buf.seek(0)
+    
     return buf.read()

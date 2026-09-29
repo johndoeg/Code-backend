@@ -1,10 +1,12 @@
 from flask import Blueprint, jsonify, request, current_app
 from app import db
+from app.auth.decorators import login_required
 from sqlalchemy import text
 
 delima_bp = Blueprint('delima', __name__, url_prefix='/Delima')
 
-@delima_bp.route('/api/invoice')
+@delima_bp.route('/invoice')
+@login_required
 def get_delima_invoice_summary():
     page = request.args.get('page', 1, type=int)
     limit = request.args.get('limit', 25, type=int)
@@ -39,7 +41,8 @@ def get_delima_invoice_summary():
         current_app.logger.exception("Delima invoice summary error")
         return jsonify({"data": [], "total": 0})
 
-@delima_bp.route('/api/invoice/detail')
+@delima_bp.route('/invoice/detail')
+@login_required
 def get_delima_invoice_detail():
     invoice_no = request.args.get('id')
     if not invoice_no:

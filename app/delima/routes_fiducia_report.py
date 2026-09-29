@@ -1,6 +1,8 @@
 from flask import Blueprint, jsonify, request, current_app, session, make_response
 from app import db
+from app.auth.decorators import login_required
 from sqlalchemy import text
+
 import base64
 import zipfile
 import io
@@ -103,9 +105,11 @@ def _build_print_pdf(cert_type: str, asof: str, rows: list[dict]) -> bytes:
     story.append(tbl)
     doc.build(story)
     buffer.seek(0)
+    
     return buffer.read()
 
-@fiducia_bp.route('/api/fiducia-data', methods=['POST'])
+@fiducia_bp.route('/fiducia-data', methods=['POST'])
+@login_required
 def get_fiducia_data():
    
     body        = request.get_json(silent=True) or {}
@@ -151,8 +155,8 @@ def get_fiducia_data():
         current_app.logger.exception("Fiducia data fetch error")
         return jsonify({'data': [], 'error': str(e)}), 500
 
-
-@fiducia_bp.route('/api/fiducia-file')
+@fiducia_bp.route('/fiducia-file')
+@login_required
 def get_fiducia_file():
    
     lease_no_raw = request.args.get('lease_no',   '').strip()
@@ -176,7 +180,6 @@ def get_fiducia_file():
 
     try:
         def _fetch_pdf(ln: str) -> bytes | None:
-            """Fetch a single base64-encoded PDF from the DB and decode it."""
             result = db.session.execute(
                 text(f"SELECT {file_col} FROM {table} WHERE AgreementNo = :ln"),
                 {'ln': ln},
@@ -213,8 +216,8 @@ def get_fiducia_file():
         current_app.logger.exception("Fiducia file fetch error")
         return jsonify({'error': str(e)}), 500
 
-
-@fiducia_bp.route('/api/fiducia-print')
+@fiducia_bp.route('/fiducia-print')
+@login_required
 def fiducia_print():
    
     cert_type = request.args.get('cert_type', '').strip()
