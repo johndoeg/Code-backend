@@ -143,6 +143,8 @@ BLUEPRINT_REGISTRY: List[BlueprintEntry] = [
 
     # ── History Payment
     BlueprintEntry("app.historypayment.routes_history_payment",                              			"history_payment_bp",					 "/HistoryPayment"),
+    BlueprintEntry("app.historypayment.routes_amortization_report",                              		"amortization_report_bp",				 "/AmortizationReport"),
+    BlueprintEntry("app.historypayment.routes_detail_aging_report",                              		"detail_aging_report_bp",				 "/DetailAgingReport"),
     BlueprintEntry("app.historypayment.summaryaging.routes_summary_aging_report",            			"summary_aging_bp",						 "/SummaryAging"),
 
     # ── E-Pay / Virtual Account

@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 from config import is_dev_login_bypass_enabled
 from app.auth.active_sessions import set_active_session, clear_active_session
 
-import random
+import secrets
 import requests
 import threading
 import uuid
@@ -150,7 +150,7 @@ def login():
             _insert_audit_log(db_username, "Login failed - no Telegram chat ID on file")
             return jsonify({"message": "No Telegram account linked to this user. Please contact helpdesk."}), 403
 
-        pin = str(random.randint(0, 10 ** PIN_LENGTH - 1)).zfill(PIN_LENGTH)
+        pin = str(secrets.randbelow(10 ** PIN_LENGTH)).zfill(PIN_LENGTH)
         now = datetime.now()
         id_no = str(db_username)
 
