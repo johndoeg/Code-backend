@@ -1,6 +1,6 @@
 from flask import Blueprint, request, jsonify, current_app
 from sqlalchemy import text
-import base64, os, mimetypes
+import base64, os, mimetypes, re
 from datetime import datetime
 
 from botocore.exceptions import BotoCoreError, ClientError
@@ -8,7 +8,7 @@ from botocore.exceptions import BotoCoreError, ClientError
 from app import db
 from app.auth.decorators import login_required
 from app.utils.helpers.aws_helpers import (
-    _aws_upload, _aws_delete, _aws_presign, _validate_file,
+    _aws_upload, _aws_delete, _aws_presign, _validate_file, copy_object
 )
 
 from app.utils.helpers.base_format import (
@@ -36,6 +36,234 @@ def _norm_id_type(value, nationality: str) -> str:
 
 def _is_ocr_doc_type(document_type: str) -> bool:
     return (document_type or "") in _OCR_DOC_TYPES
+
+def _sql_date(value: str):
+    v = (value or "").strip()
+    if not v:
+        return None
+    for fmt in ("%d-%m-%Y", "%Y-%m-%d", "%d/%m/%Y"):
+        try:
+            return datetime.strptime(v, fmt).strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+    return None
+
+def _apless_for_prechecking(prechecking_id: str) -> str:
+    if not prechecking_id:
+        return ""
+    row = db.session.execute(
+        text("""
+            SELECT TOP 1 Apless FROM TEMP_CAFLESS WITH(NOLOCK)
+            WHERE Prechecking_Id = :pid AND ISNULL(Apless, '') <> ''
+            ORDER BY CreatedDate DESC
+        """),
+        {"pid": prechecking_id},
+    ).fetchone()
+    return (row.Apless or "") if row else ""
+
+_GUARANTOR_ORG_TYPE = "GUARNPR"
+_GUARANTOR_AWS_PREFIX = "upload_doc/guarantor"
+
+def _carried_source_filename(source_name: str) -> str:
+    stripped = re.sub(r"^[^-]*-[A-Z0-9_]+-", "", source_name or "", count=1)
+    return stripped or (source_name or "document")
+
+def _auto_carry_missing_document(prechecking_id: str, apless: str, username: str,
+                                 dtype: str, guarantor_nik: str = "", debug: list = None) -> bool:
+    def _dbg(msg):
+        current_app.logger.info("auto_carry[%s]: %s", dtype, msg)
+        if debug is not None:
+            debug.append(f"{dtype}: {msg}")
+
+    if not prechecking_id or not dtype:
+        _dbg("skipped: missing prechecking_id/dtype")
+        return False
+
+    _dbg(f"start pid={prechecking_id} apless={apless!r} nik={guarantor_nik!r}")
+    src = None
+    src_from = None
+
+    if guarantor_nik:
+        src = db.session.execute(
+            text("""
+                SELECT TOP 1 d.DocumentName, d.AWSKey, d.OrganizationType
+                FROM TEMP_CUSTOMER_DOCUMENT d WITH(NOLOCK)
+                JOIN TEMP_CAFLESS t WITH(NOLOCK)
+                    ON t.Prechecking_Id = d.Prechecking_Id
+                WHERE t.IdCardNo = :nik
+                    AND d.DocumentType = :dtype
+                    AND d.Prechecking_Id <> :pid
+                    AND d.AWSKey IS NOT NULL
+                ORDER BY d.CreatedDate DESC
+            """),
+            {"nik": guarantor_nik, "dtype": dtype, "pid": prechecking_id},
+        ).fetchone()
+        if src and src.AWSKey:
+            src_from = "NIK/TEMP_CAFLESS"
+        _dbg(f"source1 (NIK) -> {'HIT ' + src.AWSKey if (src and src.AWSKey) else 'miss'}")
+
+    if (not src or not src.AWSKey) and apless:
+        src = db.session.execute(
+            text("""
+                SELECT TOP 1 DocumentName, AWSKey, OrganizationType
+                FROM TEMP_CUSTOMER_DOCUMENT WITH(NOLOCK)
+                WHERE ISNULL(Apless, '') = :apless
+                    AND DocumentType = :dtype
+                    AND Prechecking_Id <> :pid
+                    AND AWSKey IS NOT NULL
+                ORDER BY CreatedDate DESC
+            """),
+            {"apless": apless, "dtype": dtype, "pid": prechecking_id},
+        ).fetchone()
+        if src and src.AWSKey:
+            src_from = "TEMP/apless"
+        _dbg(f"source2 (apless TEMP) -> {'HIT ' + src.AWSKey if (src and src.AWSKey) else 'miss'}")
+
+    if (not src or not src.AWSKey) and apless:
+        src = db.session.execute(
+            text("""
+                SELECT TOP 1 file_document AS DocumentName, AWSKey,
+                       organization_type AS OrganizationType
+                FROM CUSTOMER_DOCUMENT WITH(NOLOCK)
+                WHERE APLESS = :apless
+                    AND DocumentType = :dtype
+                    AND AWSKey IS NOT NULL
+                ORDER BY Upload_Dt DESC
+            """),
+            {"apless": apless, "dtype": dtype},
+        ).fetchone()
+        if src and src.AWSKey:
+            src_from = "CUSTOMER_DOCUMENT/apless"
+        _dbg(f"source3 (final apless) -> {'HIT ' + src.AWSKey if (src and src.AWSKey) else 'miss'}")
+
+    if not src or not src.AWSKey:
+        _dbg("NO SOURCE FOUND anywhere -> missing")
+        return False
+
+    name_prefix, doc_subfolder = _GUARANTOR_DOC_META.get(
+        dtype, (f"-{dtype.upper().replace('-', '_')}-", dtype)
+    )
+    doc_name = f"{prechecking_id}{name_prefix}{_carried_source_filename(src.DocumentName)}"
+    aws_key = f"{_GUARANTOR_AWS_PREFIX}/{apless}/{prechecking_id}/{doc_subfolder}/{doc_name}"
+
+    _dbg(f"source={src_from} copy {src.AWSKey} -> {aws_key}")
+    try:
+        copied = copy_object(src.AWSKey, aws_key)
+    except (BotoCoreError, ClientError) as exc:
+        current_app.logger.exception("auto_carry copy failed for %s", src.AWSKey)
+        _dbg(f"copy_object RAISED: {exc}")
+        return False
+
+    if not copied:
+        _dbg(f"copy_object returned falsy ({copied!r}) -> treated as failure")
+        return False
+
+    _dbg("copy OK, inserting TEMP row")
+    db.session.execute(
+        text("""
+            INSERT INTO TEMP_CUSTOMER_DOCUMENT
+                (Apless, DocumentName, OrganizationType, NumberOfDocuments,
+                 DocumentType, CreatedBy, CreatedDate, AWSKey, Prechecking_Id)
+            VALUES
+                (:apless, :name, :org_type, :numb_doc,
+                 :dtype, :user, GETDATE(), :aws_key, :pid)
+        """),
+        {
+            "apless":   apless,
+            "name":     doc_name,
+            "org_type": _GUARANTOR_ORG_TYPE,
+            "numb_doc": "1",
+            "dtype":    dtype,
+            "user":     username,
+            "aws_key":  aws_key,
+            "pid":      prechecking_id,
+        },
+    )
+    _dbg("DONE -> carried")
+    return True
+
+def _carry_over_documents(prechecking_id: str, apless: str, username: str, items) -> list:
+    failed = []
+
+    if not isinstance(items, list) or not prechecking_id:
+        return failed
+
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+
+        doc_id = item.get("customer_document_id")
+        target_type = (item.get("document_type") or "").strip()
+        if not doc_id or not target_type:
+            continue
+
+        src = db.session.execute(
+            text("""
+                SELECT CustomerDocumentId, DocumentName, DocumentType, AWSKey,
+                       OrganizationType, Prechecking_Id
+                FROM TEMP_CUSTOMER_DOCUMENT WITH(NOLOCK)
+                WHERE CustomerDocumentId = :id
+            """),
+            {"id": doc_id},
+        ).fetchone()
+
+        if not src or not src.AWSKey:
+            failed.append(target_type)
+            continue
+
+        if (src.Prechecking_Id or "") == prechecking_id:
+            continue
+
+        exists = db.session.execute(
+            text("""
+                SELECT COUNT(1) AS cnt
+                FROM TEMP_CUSTOMER_DOCUMENT WITH(NOLOCK)
+                WHERE Prechecking_Id = :pid AND DocumentType = :dtype
+            """),
+            {"pid": prechecking_id, "dtype": target_type},
+        ).fetchone()
+        if exists and exists.cnt > 0:
+            continue
+
+        name_prefix, doc_subfolder = _GUARANTOR_DOC_META.get(
+            target_type, (f"-{target_type.upper().replace('-', '_')}-", target_type)
+        )
+
+        doc_name = f"{prechecking_id}{name_prefix}{_carried_source_filename(src.DocumentName)}"
+        aws_key = f"{_GUARANTOR_AWS_PREFIX}/{apless}/{prechecking_id}/{doc_subfolder}/{doc_name}"
+
+        try:
+            copied = copy_object(src.AWSKey, aws_key)
+        except (BotoCoreError, ClientError):
+            current_app.logger.exception("carry_over_documents copy failed for %s", src.AWSKey)
+            copied = False
+
+        if not copied:
+            failed.append(target_type)
+            continue
+
+        db.session.execute(
+            text("""
+                INSERT INTO TEMP_CUSTOMER_DOCUMENT
+                    (Apless, DocumentName, OrganizationType, NumberOfDocuments,
+                     DocumentType, CreatedBy, CreatedDate, AWSKey, Prechecking_Id)
+                VALUES
+                    (:apless, :name, :org_type, :numb_doc,
+                     :dtype, :user, GETDATE(), :aws_key, :pid)
+            """),
+            {
+                "apless":   apless,
+                "name":     doc_name,
+                "org_type": _GUARANTOR_ORG_TYPE,
+                "numb_doc": "1",
+                "dtype":    target_type,
+                "user":     username,
+                "aws_key":  aws_key,
+                "pid":      prechecking_id,
+            },
+        )
+
+    return failed
 
 def _cleanup_ocr_for_nik(prechecking_id: str, nik: str) -> None:
     if not nik:
@@ -133,10 +361,9 @@ def submit_prechecking_guarantor():
     nik          = g("guarantor_id_card_no")
     guarantor_name = g("guarantor_name")
     guarantor_dob  = g("guarantor_dob")
-    guarantor_citizen = g("guarantor_citizen", "WNI")
+    guarantor_citizen = g("guarantor_citizen", "WNI") if nationality == "WNI" else "WNA"
 
     sp_nik       = g("guarantor_spouse_id_card_no")
-    sp_citizen   = g("guarantor_spouse_citizen", "WNI")
 
     wna_name     = g("guarantor_wna_name")
     wna_idcard   = g("guarantor_wna_idcard_no")
@@ -144,10 +371,16 @@ def submit_prechecking_guarantor():
     wna_sp_id    = g("guarantor_spouse_wna_id_card_no")
 
     wna_sp_nik     = g("guarantor_wna_spouse_id_card_no")
-    wna_sp_citizen = g("guarantor_wna_spouse_citizen", "WNI")
 
-    guarantor_id_type  = _norm_id_type(g("guarantor_id_type"), nationality)
-    wna_spouse_id_type = _norm_id_type(g("guarantor_spouse_id_type"), "WNA")
+    sp_nationality     = (g("guarantor_spouse_nationality_type") or g("guarantor_spouse_citizen") or "WNI").strip().upper()
+    wna_sp_nationality = (g("wna_spouse_nationality_type") or g("guarantor_wna_spouse_citizen") or "WNI").strip().upper()
+
+    sp_citizen     = "WNA" if sp_nationality == "WNA" else "WNI"
+    wna_sp_citizen = "WNA" if wna_sp_nationality == "WNA" else "WNI"
+
+    guarantor_id_type = _norm_id_type(g("guarantor_id_type"), nationality)
+    sp_id_type        = _norm_id_type(g("guarantor_spouse_id_type"), sp_nationality)
+    wna_sp_id_type    = _norm_id_type(g("guarantor_spouse_id_type"), wna_sp_nationality)
 
     is_married     = marital in ("M", "O")
     is_wna_married = wna_marital in ("M", "O")
@@ -197,15 +430,15 @@ def submit_prechecking_guarantor():
                          Kelurahan, Kecamatan, Kota, Provinsi, Agama, Pekerjaan,
                          Status_Perkawinan, Kewarnegaraan, Foto, Tanda_Tangan)
                     VALUES
-                        (:pid, :check_for, :citizen, 'KTP', :nik, :nama, :pob,
+                        (:pid, :check_for, :citizen, :id_type, :nik, :nama, :pob,
                          :dob, :gender, :blood, :addr, :rt, :rw,
                          :subdistrict, :district, :city, :province, :religion, :job,
                          :marital, :citizen2, :photo, :sign)
                 """), {
                     "pid": prechecking_id, "check_for": check_for,
-                    "citizen": guarantor_citizen, "nik": nik,
+                    "citizen": guarantor_citizen, "id_type": guarantor_id_type, "nik": nik,
                     "nama": guarantor_name, "pob": g("guarantor_pob"),
-                    "dob": datetime.strptime(g("guarantor_dob"), "%d-%m-%Y").strftime("%Y-%m-%d"),
+                    "dob": _sql_date(g("guarantor_dob")),
                     "gender": g("guarantor_gender"),
                     "blood": g("guarantor_blood_type"), "addr": g("guarantor_address"),
                     "rt": g("guarantor_rt"), "rw": g("guarantor_rw"),
@@ -285,7 +518,7 @@ def submit_prechecking_guarantor():
                         if sp_exists and sp_exists.cnt > 0:
                             db.session.execute(text("""
                                 UPDATE TEMP_CAFLESS_OCR SET
-                                    OCR_For='S', Citizen=:citizen, Id_Type='KTP', NIK=:nik, Nama=:nama,
+                                    OCR_For='S', Citizen=:citizen, Id_Type=:id_type, NIK=:nik, Nama=:nama,
                                     Tempat_Lahir=:pob, Tgl_Lahir=:dob, Jenis_Kelamin=:gender,
                                     Golongan_Darah=:blood, Alamat=:addr, RT=:rt, RW=:rw,
                                     Kelurahan=:subdistrict, Kecamatan=:district, Kota=:city,
@@ -294,10 +527,10 @@ def submit_prechecking_guarantor():
                                     Foto=:photo, Tanda_Tangan=:sign, UpdatedDate=GETDATE()
                                 WHERE Prechecking_Id=:pid AND OCR_For='S'
                             """), {
-                                "pid": prechecking_id, "citizen": sp_citizen,
+                                "pid": prechecking_id, "citizen": sp_citizen, "id_type": sp_id_type,
                                 "nik": sp_nik, "nama": g("guarantor_spouse_name"),
                                 "pob": g("guarantor_spouse_pob"),
-                                "dob": datetime.strptime(g("guarantor_spouse_dob"), "%d-%m-%Y").strftime("%Y-%m-%d"),
+                                "dob": _sql_date(g("guarantor_spouse_dob")),
                                 "gender": g("guarantor_spouse_gender"), "blood": g("guarantor_spouse_blood_type"),
                                 "addr": g("guarantor_spouse_address"), "rt": g("guarantor_spouse_rt"),
                                 "rw": g("guarantor_spouse_rw"), "subdistrict": g("guarantor_spouse_subdistrict"),
@@ -373,15 +606,15 @@ def submit_prechecking_guarantor():
                                      Kelurahan, Kecamatan, Kota, Provinsi, Agama, Pekerjaan,
                                      Status_Perkawinan, Kewarnegaraan, Foto, Tanda_Tangan)
                                 VALUES
-                                    (:pid,'S',:citizen,'KTP',:nik,:nama,:pob,
+                                    (:pid,'S',:citizen,:id_type,:nik,:nama,:pob,
                                      :dob,:gender,:blood,:addr,:rt,:rw,
                                      :subdistrict,:district,:city,:province,:religion,:job,
                                      :marital,:citizen2,:photo,:sign)
                             """), {
-                                "pid": prechecking_id, "citizen": sp_citizen,
+                                "pid": prechecking_id, "citizen": sp_citizen, "id_type": sp_id_type,
                                 "nik": sp_nik, "nama": g("guarantor_spouse_name"),
                                 "pob": g("guarantor_spouse_pob"),
-                                "dob": datetime.strptime(g("guarantor_spouse_dob"), "%d-%m-%Y").strftime("%Y-%m-%d"),
+                                "dob": _sql_date(g("guarantor_spouse_dob")),
                                 "gender": g("guarantor_spouse_gender"), "blood": g("guarantor_spouse_blood_type"),
                                 "addr": g("guarantor_spouse_address"), "rt": g("guarantor_spouse_rt"),
                                 "rw": g("guarantor_spouse_rw"), "subdistrict": g("guarantor_spouse_subdistrict"),
@@ -453,7 +686,7 @@ def submit_prechecking_guarantor():
                                 (Prechecking_Id, OCR_For, Citizen, Kewarnegaraan, Id_Type, NIK, Nama, UpdatedDate)
                             VALUES (:pid,'S','WNA','WNA',:id_type,:nik,:nama,GETDATE())
                         """), {"pid": prechecking_id, "nik": wna_sp_id, "nama": wna_sp_name,
-                               "id_type": wna_spouse_id_type})
+                               "id_type": sp_id_type})
 
             else:
                 db.session.execute(text("""
@@ -494,7 +727,7 @@ def submit_prechecking_guarantor():
                         if sp_exists and sp_exists.cnt > 0:
                             db.session.execute(text("""
                                 UPDATE TEMP_CAFLESS_OCR SET
-                                    OCR_For='S', Citizen=:citizen, Id_Type='KTP', NIK=:nik, Nama=:nama,
+                                    OCR_For='S', Citizen=:citizen, Id_Type=:id_type, NIK=:nik, Nama=:nama,
                                     Tempat_Lahir=:pob, Tgl_Lahir=:dob, Jenis_Kelamin=:gender,
                                     Golongan_Darah=:blood, Alamat=:addr, RT=:rt, RW=:rw,
                                     Kelurahan=:subdistrict, Kecamatan=:district, Kota=:city,
@@ -503,9 +736,9 @@ def submit_prechecking_guarantor():
                                     Foto=:photo, Tanda_Tangan=:sign, UpdatedDate=GETDATE()
                                 WHERE Prechecking_Id=:pid AND OCR_For='S'
                             """), {
-                                "pid": prechecking_id, "citizen": wna_sp_citizen,
+                                "pid": prechecking_id, "citizen": wna_sp_citizen, "id_type": wna_sp_id_type,
                                 "nik": wna_sp_nik, "nama": g("guarantor_wna_spouse_name"),
-                                "pob": g("guarantor_wna_spouse_pob"), "dob": g("guarantor_wna_spouse_dob"),
+                                "pob": g("guarantor_wna_spouse_pob"), "dob": _sql_date(g("guarantor_wna_spouse_dob")),
                                 "gender": g("guarantor_wna_spouse_gender"), "blood": g("guarantor_wna_spouse_blood_type"),
                                 "addr": g("guarantor_wna_spouse_address"), "rt": g("guarantor_wna_spouse_rt"),
                                 "rw": g("guarantor_wna_spouse_rw"), "subdistrict": g("guarantor_wna_spouse_subdistrict"),
@@ -581,15 +814,15 @@ def submit_prechecking_guarantor():
                                      Kelurahan, Kecamatan, Kota, Provinsi, Agama, Pekerjaan,
                                      Status_Perkawinan, Kewarnegaraan, Foto, Tanda_Tangan)
                                 VALUES
-                                    (:pid,'S',:citizen,'KTP',:nik,:nama,:pob,
+                                    (:pid,'S',:citizen,:id_type,:nik,:nama,:pob,
                                      :dob,:gender,:blood,:addr,:rt,:rw,
                                      :subdistrict,:district,:city,:province,:religion,:job,
                                      :marital,:citizen2,:photo,:sign)
                             """), {
-                                "pid": prechecking_id, "citizen": wna_sp_citizen,
+                                "pid": prechecking_id, "citizen": wna_sp_citizen, "id_type": wna_sp_id_type,
                                 "nik": wna_sp_nik, "nama": g("guarantor_wna_spouse_name"),
                                 "pob": g("guarantor_wna_spouse_pob"),
-                                "dob": datetime.strptime(g("guarantor_wna_spouse_dob"), "%d-%m-%Y").strftime("%Y-%m-%d"),
+                                "dob": _sql_date(g("guarantor_wna_spouse_dob")),
                                 "gender": g("guarantor_wna_spouse_gender"), "blood": g("guarantor_wna_spouse_blood_type"),
                                 "addr": g("guarantor_wna_spouse_address"), "rt": g("guarantor_wna_spouse_rt"),
                                 "rw": g("guarantor_wna_spouse_rw"), "subdistrict": g("guarantor_wna_spouse_subdistrict"),
@@ -661,7 +894,7 @@ def submit_prechecking_guarantor():
                                 (Prechecking_Id, OCR_For, Citizen, Id_Type, NIK, Nama, Kewarnegaraan)
                             VALUES (:pid,'S','WNA',:id_type,:nik,:nama,'WNA')
                         """), {"pid": prechecking_id, "nik": wna_sp_id, "nama": wna_sp_name,
-                               "id_type": wna_spouse_id_type})
+                               "id_type": wna_sp_id_type})
 
         else:
             if nationality == "WNI":
@@ -682,7 +915,7 @@ def submit_prechecking_guarantor():
 
                 db.session.execute(text("""
                     UPDATE TEMP_CAFLESS_OCR SET
-                        OCR_For=:check_for, Citizen=:citizen, Id_Type='KTP', Nama=:nama, Tempat_Lahir=:pob,
+                        OCR_For=:check_for, Citizen=:citizen, Id_Type=:id_type, Nama=:nama, Tempat_Lahir=:pob,
                         Tgl_Lahir=:dob, Jenis_Kelamin=:gender, Golongan_Darah=:blood,
                         Alamat=:addr, RT=:rt, RW=:rw, Kelurahan=:subdistrict,
                         Kecamatan=:district, Kota=:city, Provinsi=:province,
@@ -692,8 +925,8 @@ def submit_prechecking_guarantor():
                     WHERE Prechecking_Id=:pid AND NIK=:nik
                 """), {
                     "pid": prechecking_id, "check_for": check_for,
-                    "citizen": guarantor_citizen, "nik": nik,
-                    "nama": guarantor_name, "pob": g("guarantor_pob"), "dob": g("guarantor_dob"),
+                    "citizen": guarantor_citizen, "id_type": guarantor_id_type, "nik": nik,
+                    "nama": guarantor_name, "pob": g("guarantor_pob"), "dob": _sql_date(g("guarantor_dob")),
                     "gender": g("guarantor_gender"), "blood": g("guarantor_blood_type"),
                     "addr": g("guarantor_address"), "rt": g("guarantor_rt"), "rw": g("guarantor_rw"),
                     "subdistrict": g("guarantor_subdistrict"), "district": g("guarantor_district"),
@@ -762,7 +995,7 @@ def submit_prechecking_guarantor():
                     if sp_citizen == "WNI":
                         db.session.execute(text("""
                             UPDATE TEMP_CAFLESS_OCR SET
-                                OCR_For='S', Citizen=:citizen, Id_Type='KTP', Nama=:nama, Tempat_Lahir=:pob,
+                                OCR_For='S', Citizen=:citizen, Id_Type=:id_type, Nama=:nama, Tempat_Lahir=:pob,
                                 Tgl_Lahir=:dob, Jenis_Kelamin=:gender, Golongan_Darah=:blood,
                                 Alamat=:addr, RT=:rt, RW=:rw, Kelurahan=:subdistrict,
                                 Kecamatan=:district, Kota=:city, Provinsi=:province,
@@ -771,9 +1004,9 @@ def submit_prechecking_guarantor():
                                 UpdatedDate=GETDATE()
                             WHERE Prechecking_Id=:pid AND NIK=:nik
                         """), {
-                            "pid": prechecking_id, "citizen": sp_citizen, "nik": sp_nik,
+                            "pid": prechecking_id, "citizen": sp_citizen, "id_type": sp_id_type, "nik": sp_nik,
                             "nama": g("guarantor_spouse_name"), "pob": g("guarantor_spouse_pob"),
-                            "dob": datetime.strptime(g("guarantor_spouse_dob"), "%d-%m-%Y").strftime("%Y-%m-%d"),
+                            "dob": _sql_date(g("guarantor_spouse_dob")),
                             "gender": g("guarantor_spouse_gender"),
                             "blood": g("guarantor_spouse_blood_type"), "addr": g("guarantor_spouse_address"),
                             "rt": g("guarantor_spouse_rt"), "rw": g("guarantor_spouse_rw"),
@@ -847,7 +1080,7 @@ def submit_prechecking_guarantor():
                                 (Prechecking_Id, OCR_For, Citizen, Id_Type, NIK, Nama, Kewarnegaraan, UpdatedDate)
                             VALUES (:pid,'S','WNA',:id_type,:nik,:nama,'WNA',GETDATE())
                         """), {"pid": prechecking_id, "nik": wna_sp_id, "nama": wna_sp_name,
-                               "id_type": wna_spouse_id_type})
+                               "id_type": sp_id_type})
 
                 else:
                     db.session.execute(text("""
@@ -882,9 +1115,9 @@ def submit_prechecking_guarantor():
 
                 db.session.execute(text("""
                     UPDATE TEMP_CAFLESS_OCR SET
-                        OCR_For=:check_for, Citizen='WNA', Id_Type=:id_type, NIK=:nik, Nama=:nama,
+                        Citizen='WNA', Id_Type=:id_type, NIK=:nik, Nama=:nama,
                         Status_Perkawinan=:wna_marital, Kewarnegaraan='WNA', UpdatedDate=GETDATE()
-                    WHERE Prechecking_Id=:pid
+                    WHERE Prechecking_Id=:pid AND OCR_For=:check_for
                 """), {
                     "check_for": check_for, "nik": wna_idcard, "nama": wna_name,
                     "wna_marital": wna_marital, "pid": prechecking_id,
@@ -895,7 +1128,7 @@ def submit_prechecking_guarantor():
                     if wna_sp_citizen == "WNI":
                         db.session.execute(text("""
                             UPDATE TEMP_CAFLESS_OCR SET
-                                OCR_For='S', Citizen=:citizen, Id_Type='KTP', Nama=:nama, Tempat_Lahir=:pob,
+                                OCR_For='S', Citizen=:citizen, Id_Type=:id_type, Nama=:nama, Tempat_Lahir=:pob,
                                 Tgl_Lahir=:dob, Jenis_Kelamin=:gender, Golongan_Darah=:blood,
                                 Alamat=:addr, RT=:rt, RW=:rw, Kelurahan=:subdistrict,
                                 Kecamatan=:district, Kota=:city, Provinsi=:province,
@@ -904,9 +1137,9 @@ def submit_prechecking_guarantor():
                                 UpdatedDate=GETDATE()
                             WHERE Prechecking_Id=:pid AND NIK=:nik
                         """), {
-                            "pid": prechecking_id, "citizen": wna_sp_citizen, "nik": wna_sp_nik,
+                            "pid": prechecking_id, "citizen": wna_sp_citizen, "id_type": wna_sp_id_type, "nik": wna_sp_nik,
                             "nama": g("guarantor_wna_spouse_name"), "pob": g("guarantor_wna_spouse_pob"),
-                            "dob": datetime.strptime(g("guarantor_wna_spouse_dob"), "%d-%m-%Y").strftime("%Y-%m-%d"),
+                            "dob": _sql_date(g("guarantor_wna_spouse_dob")),
                             "gender": g("guarantor_wna_spouse_gender"),
                             "blood": g("guarantor_wna_spouse_blood_type"), "addr": g("guarantor_wna_spouse_address"),
                             "rt": g("guarantor_wna_spouse_rt"), "rw": g("guarantor_wna_spouse_rw"),
@@ -981,7 +1214,7 @@ def submit_prechecking_guarantor():
                                 (Prechecking_Id, OCR_For, Citizen, Id_Type, NIK, Nama, Kewarnegaraan)
                             VALUES (:pid,'S','WNA',:id_type,:nik,:nama,'WNA')
                         """), {"pid": prechecking_id, "nik": wna_sp_id, "nama": wna_sp_name,
-                               "id_type": wna_spouse_id_type})
+                               "id_type": wna_sp_id_type})
 
         db.session.execute(text("""
             INSERT INTO DocumentApproval
@@ -1017,8 +1250,54 @@ def submit_prechecking_guarantor():
             "username": username,
         })
 
+        db.session.execute(
+            text("""
+                UPDATE TEMP_CUSTOMER_DOCUMENT SET Apless = :apless
+                WHERE Prechecking_Id = :pid AND ISNULL(LTRIM(RTRIM(Apless)), '') = ''
+            """),
+            {"apless": apless, "pid": prechecking_id},
+        )
+
+        carried_failed = _carry_over_documents(
+            prechecking_id, apless, username, body.get("carried_documents")
+        )
+
+        required_doc_types = []
+        if nationality == "WNI":
+            required_doc_types.append("guarantor-ktp")
+            if is_married and sp_citizen == "WNI":
+                required_doc_types.append("guarantor-spouse-ktp")
+        elif is_wna_married and wna_sp_citizen == "WNI":
+            required_doc_types.append("guarantor-wna-spouse-ktp")
+
+        documents_missing = []
+        carry_debug = []
+        for dtype in required_doc_types:
+            found = db.session.execute(
+                text("""
+                    SELECT COUNT(1) AS cnt FROM TEMP_CUSTOMER_DOCUMENT WITH(NOLOCK)
+                    WHERE Prechecking_Id = :pid AND DocumentType = :dtype
+                """),
+                {"pid": prechecking_id, "dtype": dtype},
+            ).fetchone()
+            if not found or found.cnt == 0:
+                if not _auto_carry_missing_document(
+                    prechecking_id, apless, username, dtype,
+                    g("guarantor_id_card_no"), carry_debug,
+                ):
+                    documents_missing.append(dtype)
+            else:
+                carry_debug.append(f"{dtype}: already present under new pid")
+
         db.session.commit()
-        return jsonify({"success": True, "prechecking_id": prechecking_id, "apless": apless})
+        return jsonify({
+            "success": True,
+            "prechecking_id": prechecking_id,
+            "apless": apless,
+            "documents_failed": carried_failed,
+            "documents_missing": documents_missing,
+            "carry_debug": carry_debug,
+        })
 
     except Exception:
         db.session.rollback()
@@ -1051,6 +1330,18 @@ def upload_document_guarantor():
 
     if "file" not in request.files:
         return jsonify({"success": False, "message": "No file provided"}), 400
+
+    if not prechecking_id:
+        return jsonify({"success": False, "message": "prechecking_id is required"}), 400
+
+    if not apless:
+        apless = _apless_for_prechecking(prechecking_id)
+
+    if not apless:
+        return jsonify({
+            "success": False,
+            "message": "Temp. Customer No. (apless) is required before uploading a document.",
+        }), 400
 
     f          = request.files["file"]
     original   = f.filename or "upload"
@@ -1147,29 +1438,39 @@ def upload_document_guarantor():
 @login_required
 def get_documents_guarantor():
 
-    apless         = request.args.get("apless", "")
-    prechecking_id = request.args.get("prechecking_id", "")
+    apless                  = request.args.get("apless", "")
+    prechecking_id          = request.args.get("prechecking_id", "")
+    previous_prechecking_id = request.args.get("previous_prechecking_id", "")
+
+    prechecking_ids = [pid for pid in {prechecking_id, previous_prechecking_id} if pid]
+
+    if not prechecking_ids:
+        return jsonify([])
 
     try:
+        placeholders = ", ".join(f":pid_{i}" for i in range(len(prechecking_ids)))
+        params = {"apless": apless}
+        params.update({f"pid_{i}": pid for i, pid in enumerate(prechecking_ids)})
+
         rows = db.session.execute(
-            text("""
-                SELECT CustomerDocumentId, DocumentName, DocumentType, AWSKey
+            text(f"""
+                SELECT CustomerDocumentId, DocumentName, DocumentType, AWSKey, Prechecking_Id
                 FROM TEMP_CUSTOMER_DOCUMENT WITH(NOLOCK)
-                WHERE Apless = :apless
-                  AND Prechecking_Id = :pid
-                  AND Apless IS NOT NULL
+                WHERE Prechecking_Id IN ({placeholders})
+                    AND (:apless = '' OR ISNULL(Apless, '') IN (:apless, ''))
                 ORDER BY DocumentType, CreatedDate
             """),
-            {"apless": apless, "pid": prechecking_id},
+            params,
         ).fetchall()
 
         docs = [
             {
-                "id":       r.CustomerDocumentId,
-                "name":     r.DocumentName,
-                "type":     r.DocumentType,
-                "key":      r.AWSKey,
-                "view_url": _aws_presign(r.AWSKey, r.DocumentName) if r.AWSKey else None,
+                "id":             r.CustomerDocumentId,
+                "name":           r.DocumentName,
+                "type":           r.DocumentType,
+                "key":            r.AWSKey,
+                "prechecking_id": r.Prechecking_Id,
+                "view_url":       _aws_presign(r.AWSKey, r.DocumentName) if r.AWSKey else None,
             }
             for r in rows
         ]

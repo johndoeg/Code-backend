@@ -54,6 +54,122 @@ def _apless_for_prechecking(prechecking_id: str) -> str:
     ).fetchone()
     return (row.Apless or "") if row else ""
 
+def _auto_carry_missing_document(prechecking_id: str, apless: str, username: str,
+                                 dtype: str, cust_nik: str = "", debug: list = None) -> bool:
+    def _dbg(msg):
+        current_app.logger.info("auto_carry[%s]: %s", dtype, msg)
+        if debug is not None:
+            debug.append(f"{dtype}: {msg}")
+
+    if not prechecking_id or not dtype:
+        _dbg("skipped: missing prechecking_id/dtype")
+        return False
+
+    _dbg(f"start pid={prechecking_id} apless={apless!r} nik={cust_nik!r}")
+    src = None
+    src_from = None
+
+    if cust_nik:
+        src = db.session.execute(
+            text("""
+                SELECT TOP 1 d.DocumentName, d.AWSKey, d.OrganizationType
+                FROM TEMP_CUSTOMER_DOCUMENT d WITH(NOLOCK)
+                JOIN TEMP_CAFLESS t WITH(NOLOCK)
+                    ON t.Prechecking_Id = d.Prechecking_Id
+                WHERE t.IdCardNo = :nik
+                    AND d.DocumentType = :dtype
+                    AND d.Prechecking_Id <> :pid
+                    AND d.AWSKey IS NOT NULL
+                ORDER BY d.CreatedDate DESC
+            """),
+            {"nik": cust_nik, "dtype": dtype, "pid": prechecking_id},
+        ).fetchone()
+        if src and src.AWSKey:
+            src_from = "NIK/TEMP_CAFLESS"
+        _dbg(f"source1 (NIK) -> {'HIT ' + src.AWSKey if (src and src.AWSKey) else 'miss'}")
+
+    if (not src or not src.AWSKey) and apless:
+        src = db.session.execute(
+            text("""
+                SELECT TOP 1 DocumentName, AWSKey, OrganizationType
+                FROM TEMP_CUSTOMER_DOCUMENT WITH(NOLOCK)
+                WHERE ISNULL(Apless, '') = :apless
+                    AND DocumentType = :dtype
+                    AND Prechecking_Id <> :pid
+                    AND AWSKey IS NOT NULL
+                ORDER BY CreatedDate DESC
+            """),
+            {"apless": apless, "dtype": dtype, "pid": prechecking_id},
+        ).fetchone()
+        if src and src.AWSKey:
+            src_from = "TEMP/apless"
+        _dbg(f"source2 (apless TEMP) -> {'HIT ' + src.AWSKey if (src and src.AWSKey) else 'miss'}")
+
+    if (not src or not src.AWSKey) and apless:
+        src = db.session.execute(
+            text("""
+                SELECT TOP 1 file_document AS DocumentName, AWSKey,
+                       organization_type AS OrganizationType
+                FROM CUSTOMER_DOCUMENT WITH(NOLOCK)
+                WHERE APLESS = :apless
+                    AND DocumentType = :dtype
+                    AND AWSKey IS NOT NULL
+                ORDER BY Upload_Dt DESC
+            """),
+            {"apless": apless, "dtype": dtype},
+        ).fetchone()
+        if src and src.AWSKey:
+            src_from = "CUSTOMER_DOCUMENT/apless"
+        _dbg(f"source3 (final apless) -> {'HIT ' + src.AWSKey if (src and src.AWSKey) else 'miss'}")
+
+    if not src or not src.AWSKey:
+        _dbg("NO SOURCE FOUND anywhere -> missing")
+        return False
+
+    name_prefix, doc_subfolder = _DOC_META.get(
+        dtype, (f"-{dtype.upper().replace('-', '_')}-", dtype)
+    )
+    org_type = src.OrganizationType or "PR"
+    doc_name = f"{prechecking_id}{name_prefix}{_carried_source_filename(src.DocumentName)}"
+    aws_prefix = "upload_doc/guarantor" if org_type in ("GUARNPR", "GUARNPT") else "upload_doc"
+    aws_key = f"{aws_prefix}/{apless}/{prechecking_id}/{doc_subfolder}/{doc_name}"
+
+    _dbg(f"source={src_from} copy {src.AWSKey} -> {aws_key}")
+    try:
+        copied = copy_object(src.AWSKey, aws_key)
+    except (BotoCoreError, ClientError) as exc:
+        current_app.logger.exception("auto_carry copy failed for %s", src.AWSKey)
+        _dbg(f"copy_object RAISED: {exc}")
+        return False
+
+    if not copied:
+        _dbg(f"copy_object returned falsy ({copied!r}) -> treated as failure")
+        return False
+
+    _dbg("copy OK, inserting TEMP row")
+    db.session.execute(
+        text("""
+            INSERT INTO TEMP_CUSTOMER_DOCUMENT
+                (Apless, DocumentName, OrganizationType, NumberOfDocuments,
+                 DocumentType, CreatedBy, CreatedDate, AWSKey, Prechecking_Id)
+            VALUES
+                (:apless, :name, :org_type, :numb_doc,
+                 :dtype, :user, GETDATE(), :aws_key, :pid)
+        """),
+        {
+            "apless":   apless,
+            "name":     doc_name,
+            "org_type": org_type,
+            "numb_doc": "1",
+            "dtype":    dtype,
+            "user":     username,
+            "aws_key":  aws_key,
+            "pid":      prechecking_id,
+        },
+    )
+    _dbg("DONE -> carried")
+    return True
+
 def _carried_source_filename(source_name: str) -> str:
     stripped = re.sub(r"^[^-]*-[A-Z0-9_]+-", "", source_name or "", count=1)
     return stripped or (source_name or "document")
@@ -1443,6 +1559,7 @@ def submit_prechecking():
             required_doc_types.append("cust-wna-spouse-ktp")
 
         documents_missing = []
+        carry_debug = []
         for dtype in required_doc_types:
             found = db.session.execute(
                 text("""
@@ -1452,7 +1569,13 @@ def submit_prechecking():
                 {"pid": prechecking_id, "dtype": dtype},
             ).fetchone()
             if not found or found.cnt == 0:
-                documents_missing.append(dtype)
+                if not _auto_carry_missing_document(
+                    prechecking_id, apless, username, dtype,
+                    g("cust_id_card_no"), carry_debug,
+                ):
+                    documents_missing.append(dtype)
+            else:
+                carry_debug.append(f"{dtype}: already present under new pid")
 
         db.session.commit()
         return jsonify({
@@ -1461,6 +1584,7 @@ def submit_prechecking():
             "apless": apless,
             "documents_failed": carried_failed,
             "documents_missing": documents_missing,
+            "carry_debug": carry_debug,
         })
 
     except Exception:
@@ -1683,7 +1807,7 @@ def get_documents():
 
         rows = db.session.execute(
             text(f"""
-                SELECT CustomerDocumentId, DocumentName, DocumentType, AWSKey
+                SELECT CustomerDocumentId, DocumentName, DocumentType, AWSKey, Prechecking_Id
                 FROM TEMP_CUSTOMER_DOCUMENT WITH(NOLOCK)
                 WHERE Prechecking_Id IN ({placeholders})
                     AND (:apless = '' OR ISNULL(Apless, '') IN (:apless, ''))
@@ -1694,11 +1818,12 @@ def get_documents():
 
         docs = [
             {
-                "id":       r.CustomerDocumentId,
-                "name":     r.DocumentName,
-                "type":     r.DocumentType,
-                "key":      r.AWSKey,
-                "view_url": _aws_presign(r.AWSKey, r.DocumentName) if r.AWSKey else None,
+                "id":             r.CustomerDocumentId,
+                "name":           r.DocumentName,
+                "type":           r.DocumentType,
+                "key":            r.AWSKey,
+                "prechecking_id": r.Prechecking_Id,
+                "view_url":       _aws_presign(r.AWSKey, r.DocumentName) if r.AWSKey else None,
             }
             for r in rows
         ]

@@ -287,6 +287,22 @@ def get_view():
                 })
             return board
 
+        def load_shareholders():
+            raw_rows = db.session.execute(text("""
+                SELECT NIK, Nama, Id_Type FROM TEMP_CAFLESS_OCR WITH(NOLOCK)
+                WHERE Prechecking_Id=:pid AND OCR_For='H'
+                ORDER BY Id
+            """), {"pid": prechecking_id}).fetchall()
+            out = []
+            for raw_r in raw_rows:
+                r = _clean_row(raw_r._mapping)
+                out.append({
+                    "name": r.get("Nama") or "",
+                    "npwpNo": r.get("NIK") or "",
+                    "idType": r.get("Id_Type") or "NPWP",
+                })
+            return out
+
         customer_ocr = None
         spouse_ocr   = None
         wna_name     = ""
@@ -294,6 +310,7 @@ def get_view():
         wna_id_type  = ""
         corporate_officers = []
         wna_board = []
+        shareholders = []
         corp_name = ""
         corp_npwp = ""
         corp_address = ""
@@ -320,6 +337,7 @@ def get_view():
                 pengurus_ocr_for = "P" if is_corporate else "G"
                 corporate_officers = load_ocr_list(pengurus_ocr_for)
                 wna_board = load_wna_board(pengurus_ocr_for)
+                shareholders = load_shareholders()
 
         marital_code  = row.get("MaritalStatus") or ""
         marital_label = marital_code
@@ -411,6 +429,7 @@ def get_view():
             "corp_type_label":   corp_type_label,
             "corporate":         corporate_officers,
             "wna_board":         wna_board,
+            "shareholders":      shareholders,
             "sik":               sik,
             "documents":         documents,
         })

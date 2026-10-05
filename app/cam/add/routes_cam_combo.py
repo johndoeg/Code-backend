@@ -1,4 +1,3 @@
-
 from app import db
 from flask import Blueprint, request, jsonify
 from sqlalchemy import text
@@ -72,6 +71,7 @@ def business_type_detail():
 def industry_codes():
     level = request.args.get("level", "1")
     parent = request.args.get("parent", "")
+    header = request.args.get("header", "")
 
     if level == "1":
         rows = db.session.execute(text("""
@@ -80,10 +80,16 @@ def industry_codes():
         """)).fetchall()
         return jsonify([{"value": r.Header, "label": r.Descrip} for r in rows])
 
-    rows = db.session.execute(text("""
-        SELECT MLCI_Code, Descrip, Header FROM MstIndustry_lbpp WITH(NOLOCK)
-        WHERE Parent = :parent ORDER BY MLCI_Code
-    """), {"parent": parent}).fetchall()
+    if header:
+        rows = db.session.execute(text("""
+            SELECT MLCI_Code, Descrip, Header FROM MstIndustry_lbpp WITH(NOLOCK)
+            WHERE Parent = :parent AND Header = :header ORDER BY MLCI_Code
+        """), {"parent": parent, "header": header}).fetchall()
+    else:
+        rows = db.session.execute(text("""
+            SELECT MLCI_Code, Descrip, Header FROM MstIndustry_lbpp WITH(NOLOCK)
+            WHERE Parent = :parent ORDER BY MLCI_Code
+        """), {"parent": parent}).fetchall()
     return jsonify([
         {"value": f"{r.MLCI_Code}|{r.Header}", "label": f"{r.MLCI_Code}-{r.Descrip}"} for r in rows
     ])

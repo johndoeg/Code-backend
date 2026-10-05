@@ -17,10 +17,10 @@ from app.utils.helpers.base_format import (
 
 prechecking_guarantor_corporate_bp = Blueprint("prechecking_guarantor_corporate", __name__, url_prefix="/CAM/Prechecking")
 
-_OCR_DOC_TYPES = {"guarantor-ktp", "guarantor-spouse-ktp", "guarantor-wna-spouse-ktp"}
+_OCR_DOC_TYPE_RE = re.compile(r"^(corp-guarantor-ocr-ktp|wna-corp-guarantor-board)_[A-Za-z0-9]+$")
 
 def _is_ocr_doc_type(document_type: str) -> bool:
-    return (document_type or "") in _OCR_DOC_TYPES
+    return bool(_OCR_DOC_TYPE_RE.match(document_type or ""))
 
 def _cleanup_ocr_for_nik(prechecking_id: str, nik: str) -> None:
     if not nik:
@@ -29,7 +29,7 @@ def _cleanup_ocr_for_nik(prechecking_id: str, nik: str) -> None:
     ocr_row = db.session.execute(
         text("""
             SELECT Id FROM TEMP_CAFLESS_OCR WITH(NOLOCK)
-            WHERE Prechecking_Id = :pid AND NIK = :nik
+            WHERE Prechecking_Id = :pid AND NIK = :nik AND ISNULL(OCR_For, '') <> 'H'
         """),
         {"pid": prechecking_id, "nik": nik},
     ).fetchone()
@@ -59,6 +59,28 @@ _GUARANTOR_MARITAL_MAP = {
 def _normalize_marital_guarantor(val):
     return _GUARANTOR_MARITAL_MAP.get((val or "").strip().upper(), val)
 
+_SH_OCR_FOR = "H"
+_SH_ID_TYPE = "NPWP"
+_SH_PREFIX = "shareholder-npwp_"
+_SH_NAME_MAX = 100
+_SH_NPWP_MAX = 16
+
+def _save_shareholders(prechecking_id: str, shareholders) -> None:
+    db.session.execute(text("""
+        DELETE FROM TEMP_CAFLESS_OCR
+        WHERE Prechecking_Id = :pid AND OCR_For = :ocr_for
+    """), {"pid": prechecking_id, "ocr_for": _SH_OCR_FOR})
+
+    for s in (shareholders or []):
+        db.session.execute(text("""
+            INSERT INTO TEMP_CAFLESS_OCR
+                (Prechecking_Id, OCR_For, Citizen, Id_Type, NIK, Nama)
+            VALUES (:pid, :ocr_for, '', :id_type, :npwp, :nama)
+        """), {
+            "pid": prechecking_id, "ocr_for": _SH_OCR_FOR, "id_type": _SH_ID_TYPE,
+            "npwp": s["npwp_no"], "nama": s["name"],
+        })
+
 _GUARANTOR_ORG_TYPE_MAP = {
     "CO": "KOPERASI",
     "CV": "CV",
@@ -69,7 +91,7 @@ _GUARANTOR_ORG_TYPE_MAP = {
 def _guarantor_org_type_for(lessee_type: str) -> str:
     return _GUARANTOR_ORG_TYPE_MAP.get((lessee_type or "").upper(), "PT")
 
-def _finalize_create_documents(prechecking_id, apless, username, directors, wna_board, carried) -> list:
+def _finalize_create_documents(prechecking_id, apless, username, directors, wna_board, carried, shareholders=None) -> list:
     carried = [c for c in (carried or []) if isinstance(c, dict) and c.get("customer_document_id")]
     keys: list = []
     for d in directors:
@@ -86,7 +108,15 @@ def _finalize_create_documents(prechecking_id, apless, username, directors, wna_
             continue
         keys += _finalize_member_docs(prechecking_id, apless, _WNA_PREFIX, idno,
                                       _token(w.get("doc_token")), [], None, username)
-    member_prefixes = (_DIR_PREFIX, _WNA_PREFIX)
+    for s in (shareholders or []):
+        npwp = _token(s.get("npwp_no"))
+        if not npwp:
+            continue
+        target = f"{_SH_PREFIX}{npwp}"
+        ids = [c["customer_document_id"] for c in carried if c.get("document_type") == target]
+        keys += _finalize_member_docs(prechecking_id, apless, _SH_PREFIX, npwp,
+                                      _token(s.get("doc_token")), [], ids, username)
+    member_prefixes = (_DIR_PREFIX, _WNA_PREFIX, _SH_PREFIX)
     for c in carried:
         dtype = _s(c.get("document_type"))
         if not dtype or dtype.startswith(member_prefixes) or _docs_of_types(prechecking_id, [dtype]):
@@ -116,6 +146,11 @@ def _corp_guarantor_doc_meta(document_type: str):
     if m:
         token = m.group(1)
         return (f"-WNA_CORP_GUARANTOR-{token}", "DATA_GUARANTOR/KTP_PENGURUS")
+
+    m = re.match(r"^shareholder-npwp_([A-Za-z0-9]+)$", document_type)
+    if m:
+        token = m.group(1)
+        return (f"-GUARANTOR_SHAREHOLDER_NPWP-{token}-", "DATA_GUARANTOR/SHAREHOLDER_NPWP")
 
     return (f"-{document_type.upper().replace('-', '_')}-", document_type)
 
@@ -149,6 +184,7 @@ def submit_prechecking_guarantor_corporate():
 
     directors = body.get("directors") or []
     wna_board = body.get("wna_board") or []
+    shareholders_raw = body.get("shareholders") or []
 
     if not prechecking_id:
         return jsonify({"success": False, "message": "prechecking_id is required"}), 400
@@ -184,6 +220,29 @@ def submit_prechecking_guarantor_corporate():
         for key, label in required_director:
             if not (d.get(key) or "").strip() if isinstance(d.get(key), str) else not d.get(key):
                 errors[f"corp_guarantor_board_{key}_error_{i}"] = f"{label} is required"
+
+    shareholders = []
+    seen_npwp: dict = {}
+    for i, sh in enumerate(shareholders_raw):
+        if not isinstance(sh, dict):
+            continue
+        sh_name = str(sh.get("name") or "").strip()
+        sh_npwp = str(sh.get("npwp_no") or "").strip()
+        if not sh_name and not sh_npwp:
+            continue
+        if not sh_name:
+            errors[f"shareholder_{i}_name"] = f"Name is required (Shareholder #{i + 1})"
+        elif len(sh_name) > _SH_NAME_MAX:
+            errors[f"shareholder_{i}_name"] = f"Name must be at most {_SH_NAME_MAX} characters (Shareholder #{i + 1})"
+        if not sh_npwp:
+            errors[f"shareholder_{i}_npwp_no"] = f"NPWP No is required (Shareholder #{i + 1})"
+        elif not sh_npwp.isdigit() or len(sh_npwp) > _SH_NPWP_MAX:
+            errors[f"shareholder_{i}_npwp_no"] = f"NPWP No must be numbers only, max {_SH_NPWP_MAX} digits (Shareholder #{i + 1})"
+        elif sh_npwp in seen_npwp:
+            errors[f"shareholder_{i}_npwp_no"] = f"NPWP No is already used by Shareholder #{seen_npwp[sh_npwp]} (Shareholder #{i + 1})"
+        else:
+            seen_npwp[sh_npwp] = i + 1
+        shareholders.append({"name": sh_name, "npwp_no": sh_npwp, "doc_token": sh.get("doc_token")})
 
     if errors:
         return jsonify({"success": False, "errors": errors}), 422
@@ -276,7 +335,7 @@ def submit_prechecking_guarantor_corporate():
                     continue
 
                 ocr_row = db.session.execute(
-                    text("SELECT Id FROM TEMP_CAFLESS_OCR WITH(NOLOCK) WHERE Prechecking_Id=:pid AND NIK=:nik"),
+                    text("SELECT Id FROM TEMP_CAFLESS_OCR WITH(NOLOCK) WHERE Prechecking_Id=:pid AND NIK=:nik AND ISNULL(OCR_For, '') <> 'H'"),
                     {"pid": prechecking_id, "nik": nik},
                 ).fetchone()
                 director_id = ocr_row.Id if ocr_row else 0
@@ -388,7 +447,7 @@ def submit_prechecking_guarantor_corporate():
                         Provinsi=:province, Agama=:religion, Pekerjaan=:job,
                         Status_Perkawinan=:marital, Kewarnegaraan=:citizen2,
                         Foto=:photo, Tanda_Tangan=:sign, UpdatedDate=GETDATE()
-                    WHERE Prechecking_Id=:pid AND NIK=:nik
+                    WHERE Prechecking_Id=:pid AND NIK=:nik AND ISNULL(OCR_For, '') <> 'H'
                 """), {
                     "ocr_for": ocr_for,
                     "citizen": d.get("citizen") or "WNI",
@@ -420,7 +479,7 @@ def submit_prechecking_guarantor_corporate():
                 if not nik:
                     continue
                 ocr_row = db.session.execute(
-                    text("SELECT Id FROM TEMP_CAFLESS_OCR WITH(NOLOCK) WHERE Prechecking_Id=:pid AND NIK=:nik"),
+                    text("SELECT Id FROM TEMP_CAFLESS_OCR WITH(NOLOCK) WHERE Prechecking_Id=:pid AND NIK=:nik AND ISNULL(OCR_For, '') <> 'H'"),
                     {"pid": prechecking_id, "nik": nik},
                 ).fetchone()
                 director_ids[nik] = ocr_row.Id if ocr_row else 0
@@ -493,7 +552,7 @@ def submit_prechecking_guarantor_corporate():
                 exists_row = db.session.execute(
                     text("""
                         SELECT COUNT(1) AS cnt FROM TEMP_CAFLESS_OCR
-                        WHERE Prechecking_Id=:pid AND NIK=:nik
+                        WHERE Prechecking_Id=:pid AND NIK=:nik AND ISNULL(OCR_For, '') <> 'H'
                     """),
                     {"pid": prechecking_id, "nik": nik},
                 ).fetchone()
@@ -510,7 +569,7 @@ def submit_prechecking_guarantor_corporate():
                         UPDATE TEMP_CAFLESS_OCR SET
                             OCR_For=:ocr_for, Citizen='WNA', Kewarnegaraan='WNA', Id_Type=:id_type,
                             Nama=:nama, UpdatedDate=GETDATE()
-                        WHERE Prechecking_Id=:pid AND NIK=:nik
+                        WHERE Prechecking_Id=:pid AND NIK=:nik AND ISNULL(OCR_For, '') <> 'H'
                     """), {"ocr_for": ocr_for, "nama": nama, "pid": prechecking_id, "nik": nik,
                           "id_type": _norm_wna_id_type(w.get("id_type"))})
 
@@ -520,32 +579,50 @@ def submit_prechecking_guarantor_corporate():
                 WHERE Prechecking_Id = :pid
             """), {"pid": prechecking_id})
 
+        _save_shareholders(prechecking_id, shareholders)
+
         s3_to_delete = _finalize_create_documents(
             prechecking_id, apless, username, directors, wna_board, body.get("carried_documents"),
+            shareholders,
         )
 
-        db.session.execute(text("""
-            INSERT INTO DocumentApproval
-                (ApprovalFormId, DocumentNumber, Title, Progress,
-                 LastApprovalActionCode, LastActionBy, LastActionDate,
-                 CurrentApprover, DocumentStatusCode, CreatedBy, CreatedDate)
-            VALUES
-                (:form_id, :pid, :title, 50,
-                 'draft', :username, GETDATE(),
-                 :approver, 'draft', :username, GETDATE())
-        """), {
-            "form_id":  approval_form_id,
-            "pid":      prechecking_id,
-            "title":    f"CAM Request - {prechecking_id}",
-            "username": username,
-            "approver": f"({username})",
-        })
-
-        doc_appr_row = db.session.execute(
-            text("SELECT Id FROM DocumentApproval WITH(NOLOCK) WHERE DocumentNumber=:pid"),
+        existing_approval = db.session.execute(
+            text("SELECT Id FROM DocumentApproval WITH(NOLOCK) WHERE DocumentNumber = :pid"),
             {"pid": prechecking_id},
         ).fetchone()
-        doc_appr_id = doc_appr_row.Id if doc_appr_row else 0
+
+        if not existing_approval:
+            db.session.execute(text("""
+                INSERT INTO DocumentApproval
+                    (ApprovalFormId, DocumentNumber, Title, Progress,
+                     LastApprovalActionCode, LastActionBy, LastActionDate,
+                     CurrentApprover, DocumentStatusCode, CreatedBy, CreatedDate)
+                VALUES
+                    (:form_id, :pid, :title, 50,
+                     'draft', :username, GETDATE(),
+                     :approver, 'draft', :username, GETDATE())
+            """), {
+                "form_id":  approval_form_id,
+                "pid":      prechecking_id,
+                "title":    f"CAM Request - {prechecking_id}",
+                "username": username,
+                "approver": f"({username})",
+            })
+            doc_appr_row = db.session.execute(
+                text("SELECT Id FROM DocumentApproval WITH(NOLOCK) WHERE DocumentNumber=:pid"),
+                {"pid": prechecking_id},
+            ).fetchone()
+            doc_appr_id = doc_appr_row.Id if doc_appr_row else 0
+        else:
+            doc_appr_id = existing_approval.Id
+            db.session.execute(text("""
+                UPDATE DocumentApproval SET
+                    LastApprovalActionCode = 'draft',
+                    LastActionBy = :username,
+                    LastActionDate = GETDATE(),
+                    DocumentStatusCode = 'draft'
+                WHERE Id = :id
+            """), {"username": username, "id": doc_appr_id})
 
         db.session.execute(text("""
             INSERT INTO DocumentApprovalHistory
@@ -672,20 +749,30 @@ def upload_document_guarantor_corporate():
 @login_required
 def get_documents_guarantor_corporate():
 
-    apless         = request.args.get("apless", "")
-    prechecking_id = request.args.get("prechecking_id", "")
+    apless                  = request.args.get("apless", "")
+    prechecking_id          = request.args.get("prechecking_id", "")
+    previous_prechecking_id = request.args.get("previous_prechecking_id", "")
+
+    prechecking_ids = [pid for pid in {prechecking_id, previous_prechecking_id} if pid]
+
+    if not apless or not prechecking_ids:
+        return jsonify([])
 
     try:
+        placeholders = ", ".join(f":pid_{i}" for i in range(len(prechecking_ids)))
+        params = {"apless": apless}
+        params.update({f"pid_{i}": pid for i, pid in enumerate(prechecking_ids)})
+
         rows = db.session.execute(
-            text("""
+            text(f"""
                 SELECT CustomerDocumentId, DocumentName, DocumentType, AWSKey
                 FROM TEMP_CUSTOMER_DOCUMENT WITH(NOLOCK)
                 WHERE Apless = :apless
-                  AND Prechecking_Id = :pid
-                  AND Apless IS NOT NULL
+                    AND Prechecking_Id IN ({placeholders})
+                    AND Apless IS NOT NULL
                 ORDER BY DocumentType, CreatedDate
             """),
-            {"apless": apless, "pid": prechecking_id},
+            params,
         ).fetchall()
 
         docs = [
@@ -1266,7 +1353,7 @@ def _copy_doc_into(prechecking_id: str, apless: str, target_type: str, doc_id, u
         current_app.logger.exception("corporate carry-over copy failed for %s", src.AWSKey)
         copied = False
     if not copied:
-        raise CorpCarryError("Failed to copy the pengurus KTP file. Please upload it manually.")
+        raise CorpCarryError("Failed to copy a carried document. Please upload it manually.")
     db.session.execute(text("""
         INSERT INTO TEMP_CUSTOMER_DOCUMENT
             (Apless, DocumentName, OrganizationType, NumberOfDocuments,

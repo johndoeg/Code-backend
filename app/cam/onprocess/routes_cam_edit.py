@@ -5,6 +5,7 @@ import uuid
 import boto3
 import mimetypes
 import re
+import time
 
 import mimetypes
 import os
@@ -11764,3 +11765,779 @@ def get_guarantor_exposure():
 		"leasingExposure": fl_out,
 		"leasingUnits": fl_unit,
 	})
+
+GUARANTOR_LOOKBACK_DAYS = 60
+GUARANTOR_ACTIVE_DAYS = 30
+
+def _json_safe(value):
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, (bytes, bytearray)):
+        return None
+    if hasattr(value, "quantize"):
+        return float(value)
+    return value
+
+_GUARANTOR_CANDIDATE_SELECT = """
+    SELECT
+        mg.GRNID, mg.GRNNAME, mg.GRNTP,
+        tcl.FINAL_APLESS, tcl.Prechecking_Id,
+        CASE WHEN tcl.CustomerType = 'PR' THEN ISNULL(tcl.IdCardNo, '') ELSE ISNULL(tcl.NPWP, '') END AS ID_CARD,
+        CASE WHEN DATEDIFF(d, da.LastActionDate, GETDATE()) <= :active_days THEN 'active' ELSE 'inactive' END AS status,
+        da.CreatedBy, da.LastActionDate
+    FROM Mst_Guarantor mg WITH (NOLOCK)
+        INNER JOIN TEMP_CAFLESS tcl WITH (NOLOCK) ON mg.Prechecking_Id = tcl.Prechecking_Id
+        INNER JOIN DocumentApproval da WITH (NOLOCK) ON da.DocumentNumber = mg.Prechecking_Id
+    WHERE da.LastActionDate >= DATEADD(day, -:lookback, CAST(GETDATE() AS date))
+      AND da.LastActionDate < DATEADD(day, 1, CAST(GETDATE() AS date))
+"""
+
+def _guarantor_candidate_row(r) -> dict:
+    return {
+        "grnId": r["GRNID"],
+        "name": r["GRNNAME"] or "",
+        "type": r["GRNTP"] or "",
+        "idCard": r["ID_CARD"] or "",
+        "status": r["status"],
+        "cmo": r["CreatedBy"] or "",
+        "lastActionDate": _json_safe(r["LastActionDate"]),
+        "finalApless": r["FINAL_APLESS"] or "",
+        "precheckingId": r["Prechecking_Id"],
+    }
+
+@cam_edit_bp.route("/guarantor/candidates", methods=["GET"])
+@login_required
+def get_guarantor_candidates():
+    search_by = request.args.get("search_by", "")
+    search_val = (request.args.get("search_val", "") or "").strip()
+
+    sql = _GUARANTOR_CANDIDATE_SELECT
+    params = {"active_days": GUARANTOR_ACTIVE_DAYS, "lookback": GUARANTOR_LOOKBACK_DAYS}
+    if search_val and search_by == "1":
+        sql += " AND mg.GRNID = :val"
+        params["val"] = search_val
+    elif search_val and search_by == "2":
+        sql += " AND mg.GRNNAME LIKE :val"
+        params["val"] = f"%{search_val}%"
+    sql += " ORDER BY da.LastActionDate DESC, mg.GRNID DESC"
+
+    rows = db.session.execute(text(sql), params).mappings().all()
+    return jsonify({"guarantors": [_guarantor_candidate_row(r) for r in rows]})
+
+_SQL_IDENT_RE = re.compile(r"^[A-Za-z0-9_]+$")
+
+def _table_columns(table: str) -> dict:
+    rows = db.session.execute(text("""
+        SELECT c.COLUMN_NAME AS name,
+               COLUMNPROPERTY(OBJECT_ID(:tbl), c.COLUMN_NAME, 'IsIdentity') AS is_identity,
+               COLUMNPROPERTY(OBJECT_ID(:tbl), c.COLUMN_NAME, 'IsComputed') AS is_computed,
+               c.DATA_TYPE AS data_type,
+               c.IS_NULLABLE AS is_nullable,
+               c.COLUMN_DEFAULT AS col_default
+        FROM INFORMATION_SCHEMA.COLUMNS c
+        WHERE c.TABLE_NAME = :tbl
+    """), {"tbl": table}).mappings().all()
+    return {r["name"].upper(): r for r in rows}
+
+def _copy_guarantor_documents(prechecking_id: str, applno: str, final_apless: str) -> list:
+    warnings = []
+    try:
+        db.session.execute(text("EXEC USP_Copy_Document :pid, :applno"), {"pid": prechecking_id, "applno": applno})
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        current_app.logger.exception("USP_Copy_Document failed (pid=%s applno=%s)", prechecking_id, applno)
+        warnings.append("Document records could not be copied (USP_Copy_Document failed).")
+        return warnings
+
+    try:
+        docs = db.session.execute(text("""
+            SELECT DISTINCT cd.Apless, cd.Prechecking_Id, cd.DocumentName, cd.AWSKey
+            FROM TEMP_CUSTOMER_DOCUMENT cd WITH (NOLOCK)
+            INNER JOIN TEMP_CAFLESS cl WITH (NOLOCK) ON cl.Apless = cd.Apless AND cd.Prechecking_Id = cl.Prechecking_Id
+            WHERE cd.Prechecking_Id = :pid
+        """), {"pid": prechecking_id}).mappings().all()
+    except Exception:
+        current_app.logger.exception("Reading TEMP_CUSTOMER_DOCUMENT failed (pid=%s)", prechecking_id)
+        return ["Prechecking documents could not be read."]
+
+    failed = 0
+    for d in docs:
+        old_key = d["AWSKey"]
+        if not old_key:
+            continue
+        try:
+            new_name = (d["DocumentName"] or "").replace(d["Prechecking_Id"], applno).replace(d["Apless"], final_apless)
+            m = re.search(r"DATA_GUARANTOR/([^/]+)/", old_key)
+            folder = m.group(1) if m else ""
+            new_key = f"upload_doc/{final_apless}/{applno}/DATA_GUARANTOR/{folder}/{new_name}"
+            _s3_client().copy_object(
+                Bucket=_s3_bucket(), Key=new_key, CopySource={"Bucket": _s3_bucket(), "Key": old_key},
+            )
+        except Exception:
+            failed += 1
+            current_app.logger.exception("Copy of guarantor document failed: %s", old_key)
+    if failed:
+        warnings.append(f"{failed} document file(s) could not be copied.")
+    return warnings
+
+@cam_edit_bp.route("/guarantor/select", methods=["POST"])
+@login_required
+def select_guarantor():
+    body = request.get_json(silent=True) or {}
+    applno = (body.get("applno") or "").strip()
+    prechecking_id = (body.get("prechecking_id") or "").strip()
+    if not applno or not prechecking_id:
+        return jsonify({"success": False, "message": "applno and prechecking_id are required"}), 400
+
+    try:
+        cam = db.session.execute(
+            text("SELECT APLESS FROM CAFCONT WITH (NOLOCK) WHERE APPL_NO = :applno"),
+            {"applno": applno},
+        ).mappings().first()
+        if not cam:
+            return jsonify({"success": False, "message": "CAM not found"}), 404
+
+        blocked, message = _check_cam_editable(applno)
+        if blocked:
+            return jsonify({"success": False, "message": message}), 403
+
+        row = db.session.execute(
+            text(_GUARANTOR_CANDIDATE_SELECT + " AND mg.Prechecking_Id = :pid"),
+            {"active_days": GUARANTOR_ACTIVE_DAYS, "lookback": GUARANTOR_LOOKBACK_DAYS, "pid": prechecking_id},
+        ).mappings().first()
+        if not row:
+            return jsonify({"success": False, "message": "Guarantor not found in the last 1000 days"}), 404
+        if row["status"] != "active":
+            return jsonify({"success": False, "message": "Guarantor prechecking is inactive. Use Repeat Order."}), 400
+
+        dup = db.session.execute(text("""
+            SELECT TOP 1 1 AS x FROM CAFGUARN WITH (NOLOCK)
+            WHERE APPL_NO = :applno AND GRNNAME = :name AND GRNTP = :tp
+        """), {"applno": applno, "name": row["GRNNAME"], "tp": row["GRNTP"]}).first()
+        if dup:
+            return jsonify({"success": False, "message": "This guarantor is already added to this CAM"}), 409
+
+        target = _table_columns("CAFGUARN")
+        source = _table_columns("Mst_Guarantor")
+        if "APPL_NO" not in target:
+            return jsonify({"success": False, "message": "CAFGUARN has no APPL_NO column"}), 500
+        cols = [
+            t["name"] for key, t in target.items()
+            if key in source and key != "APPL_NO"
+            and not t["is_identity"] and not t["is_computed"] and t["data_type"] != "timestamp"
+            and _SQL_IDENT_RE.match(t["name"])
+        ]
+        missing_required = [
+            t["name"] for key, t in target.items()
+            if key not in source and key not in ("APPL_NO", "APLESS")
+            and t.get("is_nullable") == "NO" and t.get("col_default") is None
+            and not t["is_identity"] and not t["is_computed"] and t["data_type"] != "timestamp"
+        ]
+        if missing_required:
+            return jsonify({"success": False,
+                            "message": "CAFGUARN requires columns not present in Mst_Guarantor: " + ", ".join(missing_required)}), 500
+        if not cols:
+            return jsonify({"success": False, "message": "No matching columns between Mst_Guarantor and CAFGUARN"}), 500
+
+        col_sql = ", ".join(f"[{c}]" for c in cols)
+        ins_cols, sel_cols = "APPL_NO", ":applno"
+        params = {"applno": applno, "pid": prechecking_id}
+        if "APLESS" in target:
+            ins_cols += ", APLESS"; sel_cols += ", :apless"
+            params["apless"] = cam["APLESS"]
+            cols = [c for c in cols if c.upper() != "APLESS"]
+            col_sql = ", ".join(f"[{c}]" for c in cols)
+        db.session.execute(text(f"""
+            INSERT INTO CAFGUARN ({ins_cols}, {col_sql})
+            SELECT {sel_cols}, {col_sql} FROM Mst_Guarantor WHERE Prechecking_Id = :pid
+        """), params)
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        current_app.logger.exception("select_guarantor failed")
+        detail = str(getattr(e, "orig", None) or e)[:500]
+        return jsonify({"success": False, "message": "Failed to add the guarantor to this CAM",
+                        "detail": detail}), 500
+
+    warnings = _copy_guarantor_documents(prechecking_id, applno, cam["APLESS"] or "")
+    return jsonify({"success": True, "applno": applno, "apless": cam["APLESS"] or "",
+                    "candidate": _guarantor_candidate_row(row), "warnings": warnings})
+    
+def _g_phone_display(phone) -> str:
+    if not phone:
+        return ""
+    p = re.sub(r"[^0-9xX]", "", str(phone))
+    m = re.match(r"^([0-9]+)([xX]*)$", p)
+    number, mask = (m.group(1), m.group(2)) if m else ("", "")
+    if number.startswith("62"):
+        number = number[2:]
+    if number.startswith("0"):
+        number = number[1:]
+    return number + mask
+
+def _g_phone_db(phone):
+    if not phone:
+        return None
+    p = re.sub(r"[^0-9xX]", "", str(phone))
+    if not p:
+        return None
+    if p.startswith("62"):
+        return p
+    if p.startswith("0"):
+        p = p[1:]
+    return "62" + p
+
+def _g_iso(value) -> str:
+    if value is None or value == "":
+        return ""
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    return str(value)[:10]
+
+def _g_parse_date(value):
+    value = (value or "").strip()
+    if not value:
+        return None
+    for fmt in ("%Y-%m-%d", "%d-%m-%Y"):
+        try:
+            return datetime.strptime(value, fmt).date()
+        except ValueError:
+            continue
+    raise ValueError(f"Invalid date: {value}")
+
+def _g_clean(value, limit=None) -> str:
+    s = (value if value is not None else "")
+    s = str(s).strip()
+    return s[:limit] if limit else s
+
+def _g_own(applno: str, grn_id: str):
+    return db.session.execute(text("""
+        SELECT GRNID, GRNTP, GRNCITIZEN, APLESS FROM CAFGUARN WITH (NOLOCK)
+        WHERE APPL_NO = :applno AND GRNID = :grn_id
+    """), {"applno": applno, "grn_id": grn_id}).mappings().first()
+
+_GUARANTOR_INFO_SELECT = """
+    SELECT LESSEE_NO, GRNCAT, GRNTP, GRNNAME, GRNDOB, GRNADD, GRNCITY, GRNPHONE, GRNRELATION, GRNOCCUPATION,
+           GRNTTL, GRNIDCARD, GRNIDVAL, GRNZIPCODE, GRNFAX, GRNLOB, GRNContact, CON_SIGNPOS, GRNSpouse, GRNStatus,
+           GRNSPOUSEADD, GRNSPOUSECITY, GRNSPOUSECODE, GRNNAME_WITHOUT_TITLE, GRNNPWP, GRNCITIZEN, GRNNATIONALITY,
+           GRNPASSPORTNO, GRN_BITYPE, GRNNAME_NPWP, GRNCITY_NPWP, GRNZIPCODE_NPWP, GRNADD_NPWP, Gender, Marital,
+           GRNSPOUSEIDCARD, GRNEMAIL, GRNSpouseMobilePhone, GRNSpouseEmail, GRNConSignerMobilePhone,
+           GRNConSignerEmail, GRNSpouseCitizenship, GRNSpouseNationality, APLESS
+    FROM CAFGUARN WITH (NOLOCK)
+    WHERE GRNID = :grn_id AND APPL_NO = :applno
+"""
+
+def _g_info_row(r) -> dict:
+    return {
+        "lesseeNo": r["LESSEE_NO"] or "",
+        "grnCat": r["GRNCAT"] or "",
+        "grnTp": r["GRNTP"] or "",
+        "grnName": r["GRNNAME"] or "",
+        "grnNameNpwp": r["GRNNAME_NPWP"] or "",
+        "grnNameId": r["GRNNAME_WITHOUT_TITLE"] or "",
+        "grnDob": _g_iso(r["GRNDOB"]),
+        "grnAdd": r["GRNADD"] or "",
+        "grnCity": r["GRNCITY"] or "",
+        "grnZipcode": r["GRNZIPCODE"] or "",
+        "grnFax": r["GRNFAX"] or "",
+        "grnPhone": _g_phone_display(r["GRNPHONE"]),
+        "grnRelation": r["GRNRELATION"] or "",
+        "grnOccupation": r["GRNOCCUPATION"] or "",
+        "grnTtl": float(r["GRNTTL"] or 0),
+        "grnIdCard": r["GRNIDCARD"] or "",
+        "grnIdVal": _g_iso(r["GRNIDVAL"]),
+        "grnLob": r["GRNLOB"] or "",
+        "grnContact": r["GRNContact"] or "",
+        "conSignPos": r["CON_SIGNPOS"] or "",
+        "grnSpouse": r["GRNSpouse"] or "",
+        "spouseSts": r["GRNStatus"] or "",
+        "grnSpouseAdd": r["GRNSPOUSEADD"] or "",
+        "grnSpouseCity": r["GRNSPOUSECITY"] or "",
+        "grnSpouseCode": r["GRNSPOUSECODE"] or "",
+        "npwp": r["GRNNPWP"] or "",
+        "citizen": r["GRNCITIZEN"] or "",
+        "nationality": r["GRNNATIONALITY"] or "",
+        "passportNo": r["GRNPASSPORTNO"] or "",
+        "custType": r["GRN_BITYPE"] or "",
+        "addrNpwp": r["GRNADD_NPWP"] or "",
+        "cityNpwp": r["GRNCITY_NPWP"] or "",
+        "postNpwp": r["GRNZIPCODE_NPWP"] or "",
+        "gender": r["Gender"] or "",
+        "marital": r["Marital"] or "",
+        "idCardSpouse": r["GRNSPOUSEIDCARD"] or "",
+        "grnEmail": r["GRNEMAIL"] or "",
+        "spouseMobilePhone": _g_phone_display(r["GRNSpouseMobilePhone"]),
+        "spouseEmail": r["GRNSpouseEmail"] or "",
+        "conSignerMobilePhone": _g_phone_display(r["GRNConSignerMobilePhone"]),
+        "conSignerEmail": r["GRNConSignerEmail"] or "",
+        "spouseCitizenship": r["GRNSpouseCitizenship"] or "",
+        "spouseNationality": r["GRNSpouseNationality"] or "",
+    }
+
+def _g_options(grn_id: str) -> dict:
+    def q(sql, params=None):
+        return db.session.execute(text(sql), params or {}).mappings().all()
+
+    signers = q("""
+        SELECT Nama, NIK, Citizen FROM TEMP_CAFLESS_OCR WITH (NOLOCK)
+        WHERE Prechecking_Id = (SELECT TOP 1 Prechecking_Id FROM Mst_Guarantor WITH (NOLOCK) WHERE GRNID = :g)
+    """, {"g": grn_id})
+    return {
+        "categories": [{"value": r["Code"], "label": r["Name"]} for r in q("SELECT Code, Name FROM MSTCATEGORY WITH (NOLOCK)")],
+        "maritals": [{"value": r["Marital"], "label": r["name"]} for r in q("SELECT Marital, name FROM MSTMARITAL")],
+        "genders": [{"value": r["VALUE"], "label": r["DESC_VALUE"]} for r in
+                    q("SELECT VALUE, DESC_VALUE FROM MSTCOMBO WITH (NOLOCK) WHERE CAT_VALUE = 'Gender'")],
+        "biTypes": [{"value": r["OJK_Code"], "label": r["MLCI_Desc"]} for r in
+                    q("SELECT OJK_Code, MLCI_Desc FROM UMFBITYP_LBPP WITH (NOLOCK) WHERE OJK_Code IS NOT NULL ORDER BY MLCI_Desc")],
+        "countries": [{"value": r["ID2digit"], "label": r["Name"]} for r in q("SELECT ID2digit, Name FROM Mst_Country")],
+        "signers": [{"name": r["Nama"] or "", "idCard": r["NIK"] or "", "citizen": r["Citizen"] or ""} for r in signers],
+    }
+
+@cam_edit_bp.route("/guarantor/info", methods=["GET"])
+@login_required
+def get_guarantor_info():
+    applno = request.args.get("applno", "").strip()
+    grn_id = request.args.get("grnId", "").strip()
+    if not applno or not grn_id:
+        return jsonify({"success": False, "message": "applno and grnId are required"}), 400
+
+    row = db.session.execute(text(_GUARANTOR_INFO_SELECT), {"grn_id": grn_id, "applno": applno}).mappings().first()
+    if not row:
+        return jsonify({"success": False, "message": "Guarantor not found in this CAM"}), 404
+
+    blocked, message = _check_cam_editable(applno)
+    return jsonify({
+        "success": True,
+        "blocked": bool(blocked),
+        "blockedMessage": message if blocked else "",
+        "guarantor": _g_info_row(row),
+        "options": _g_options(grn_id),
+    })
+
+@cam_edit_bp.route("/guarantor/info", methods=["PUT"])
+@login_required
+def update_guarantor_info():
+    b = request.get_json(silent=True) or {}
+    applno = _g_clean(b.get("applno"))
+    grn_id = _g_clean(b.get("grnId"))
+    if not applno or not grn_id:
+        return jsonify({"success": False, "message": "applno and grnId are required"}), 400
+
+    try:
+        own = _g_own(applno, grn_id)
+        if not own:
+            return jsonify({"success": False, "message": "Guarantor not found in this CAM"}), 404
+
+        blocked, message = _check_cam_editable(applno)
+        if blocked:
+            return jsonify({"success": False, "message": message}), 403
+
+        grn_tp = own["GRNTP"]
+        errors = []
+
+        try:
+            dob = _g_parse_date(b.get("grnDob"))
+        except ValueError:
+            return jsonify({"success": False, "message": "Date is not valid"}), 400
+
+        zipcode = _g_clean(b.get("grnZipcode"), 5)
+        if zipcode and len(zipcode) != 5:
+            errors.append("Post Code not valid")
+        if grn_tp == "PR" and dob and (date.today().year - dob.year) <= 17:
+            errors.append("Age Not Qualified to Guarantor")
+
+        for field, label in (("grnCat", "Guarantor Category"), ("grnName", "Guarantor Name"),
+                             ("grnNameId", "Guarantor Name Without Title"), ("grnAdd", "Address"), ("grnCity", "City"),
+                             ("custType", "BI Customer Type"), ("grnPhone", "Mobile Phone No.")):
+            if not _g_clean(b.get(field)):
+                errors.append(f"{label} is required")
+        if not dob:
+            errors.append("Date is required")
+
+        citizen = _g_clean(b.get("citizen"), 3)
+        nationality = "ID" if citizen == "WNI" else _g_clean(b.get("nationality"), 2)
+        if grn_tp == "PR" and citizen == "WNA" and not (nationality and _g_clean(b.get("passportNo"))):
+            errors.append("Nationality and Passport No. are required for WNA")
+
+        if errors:
+            return jsonify({"success": False, "message": "<br>".join(dict.fromkeys(errors))}), 400
+
+        ttl = _g_clean(b.get("grnTtl") or "0").replace(",", "")
+        try:
+            ttl_val = float(ttl or 0)
+        except ValueError:
+            return jsonify({"success": False, "message": "Total Exposure is not valid"}), 400
+
+        params = {
+            "applno": applno, "grn_id": grn_id, "grn_tp": grn_tp,
+            "cat": _g_clean(b.get("grnCat"), 10), "name": _g_clean(b.get("grnName"), 100), "dob": dob,
+            "add": _g_clean(b.get("grnAdd"), 250), "city": _g_clean(b.get("grnCity"), 30),
+            "phone": _g_phone_db(b.get("grnPhone")), "relation": _g_clean(b.get("grnRelation"), 100),
+            "ttl": ttl_val, "zip": zipcode, "fax": _g_clean(b.get("grnFax"), 20),
+            "name_id": _g_clean(b.get("grnNameId"), 100), "cust_type": _g_clean(b.get("custType"), 20),
+            "citizen": citizen, "nationality": nationality,
+            "idcard": _g_clean(b.get("grnIdCard"), 30),
+        }
+
+        if grn_tp == "PR":
+            id_val = None
+            if _g_clean(b.get("validity")) == "0":
+                try:
+                    id_val = _g_parse_date(b.get("grnIdVal"))
+                except ValueError:
+                    return jsonify({"success": False, "message": "Validity ID Card date is not valid"}), 400
+            sp_cit = _g_clean(b.get("spouseCitizenship"), 3)
+            params.update({
+                "occupation": _g_clean(b.get("grnOccupation"), 100), "idval": id_val,
+                "spouse": _g_clean(b.get("grnSpouse"), 50), "spouse_sts": _g_clean(b.get("spouseSts"), 100),
+                "spouse_add": _g_clean(b.get("grnSpouseAdd"), 250), "spouse_city": _g_clean(b.get("grnSpouseCity"), 50),
+                "spouse_code": _g_clean(b.get("grnSpouseCode"), 5), "gender": _g_clean(b.get("gender"), 5),
+                "marital": _g_clean(b.get("marital"), 5), "spouse_idcard": _g_clean(b.get("idCardSpouse"), 100),
+                "email": _g_clean(b.get("grnEmail"), 100),
+                "spouse_mobile": _g_phone_db(b.get("spouseMobilePhone")),
+                "spouse_email": _g_clean(b.get("spouseEmail"), 100),
+                "spouse_cit": sp_cit,
+                "spouse_nat": "ID" if sp_cit == "WNI" else _g_clean(b.get("spouseNationality"), 2),
+                "passport": _g_clean(b.get("passportNo"), 30) if citizen != "WNI" else "",
+            })
+            sql = """
+                UPDATE CAFGUARN SET GRNCAT=:cat, GRNNAME=:name, GRNDOB=:dob, GRNADD=:add, GRNCITY=:city,
+                    GRNPHONE=:phone, GRNRELATION=:relation, GRNOCCUPATION=:occupation, GRNTTL=:ttl,
+                    GRNIDCARD=:idcard, GRNIDVAL=:idval, GRNZIPCODE=:zip, GRNFAX=:fax,
+                    GRNSpouse=:spouse, GRNStatus=:spouse_sts, GRNSPOUSEADD=:spouse_add, GRNSPOUSECITY=:spouse_city,
+                    GRNSPOUSECODE=:spouse_code, GRNNAME_WITHOUT_TITLE=:name_id, GRNCITIZEN=:citizen,
+                    GRNNATIONALITY=:nationality, GRNPASSPORTNO=:passport, GRN_BITYPE=:cust_type, Gender=:gender,
+                    Marital=:marital, GRNSPOUSEIDCARD=:spouse_idcard, GRNEMAIL=:email,
+                    GRNSpouseMobilePhone=:spouse_mobile, GRNSpouseEmail=:spouse_email,
+                    GRNSpouseCitizenship=:spouse_cit, GRNSpouseNationality=:spouse_nat
+                WHERE GRNID=:grn_id AND GRNTP=:grn_tp AND APPL_NO=:applno
+            """
+        else:
+            npwp = re.sub(r"\D", "", _g_clean(b.get("npwp")))[:16]
+            params.update({
+                "name_npwp": _g_clean(b.get("grnNameNpwp"), 100), "npwp": npwp,
+                "addr_npwp": _g_clean(b.get("addrNpwp"), 250), "city_npwp": _g_clean(b.get("cityNpwp"), 50),
+                "post_npwp": _g_clean(b.get("postNpwp"), 5), "lob": _g_clean(b.get("grnLob"), 100),
+                "contact": _g_clean(b.get("grnContact"), 100), "signpos": _g_clean(b.get("conSignPos"), 100),
+                "signer_mobile": _g_phone_db(b.get("conSignerMobilePhone")),
+                "signer_email": _g_clean(b.get("conSignerEmail"), 100),
+            })
+            sql = """
+                UPDATE CAFGUARN SET GRNCAT=:cat, GRNNAME=:name, GRNNAME_NPWP=:name_npwp, GRNDOB=:dob, GRNADD=:add,
+                    GRNCITY=:city, GRNPHONE=:phone, GRNRELATION=:relation, GRNTTL=:ttl, GRNIDCARD=:idcard,
+                    GRNZIPCODE=:zip, GRNFAX=:fax, GRNLOB=:lob, GRNContact=:contact, CON_SIGNPOS=:signpos,
+                    GRNNAME_WITHOUT_TITLE=:name_id, GRNNPWP=:npwp, GRNCITIZEN=:citizen, GRNNATIONALITY=:nationality,
+                    GRN_BITYPE=:cust_type, GRNADD_NPWP=:addr_npwp, GRNCITY_NPWP=:city_npwp,
+                    GRNZIPCODE_NPWP=:post_npwp, GRNConSignerMobilePhone=:signer_mobile,
+                    GRNConSignerEmail=:signer_email
+                WHERE GRNID=:grn_id AND GRNTP=:grn_tp AND APPL_NO=:applno
+            """
+        db.session.execute(text(sql), params)
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        current_app.logger.exception("update_guarantor_info failed")
+        return jsonify({"success": False, "message": "Failed to save guarantor information",
+                        "detail": str(getattr(e, "orig", None) or e)[:500]}), 500
+
+    return jsonify({"success": True})
+
+_BANK_TABLE = "GUARANTOR_BANK_STATEMENT_DOCUMENT"
+_BANK_SUBFOLDER = "DATA_GUARANTOR/BANK_STATEMENT"
+_BANK_TAG = "GUARANTOR_BANK_STATEMENT"
+
+def _bank_cols() -> dict:
+    cols = {k: v["name"] for k, v in _table_columns(_BANK_TABLE).items()}
+    applno_col = cols.get("APPL_NO") or cols.get("APPLNO")
+    return {"all": cols, "applno": applno_col}
+
+def _bank_list(applno: str, grn_id: str) -> list:
+    c = _bank_cols()
+    if not c["applno"]:
+        return []
+    created = c["all"].get("CREATEDDATE")
+    rows = db.session.execute(text(f"""
+        SELECT Id, DocumentName, AWSKey FROM {_BANK_TABLE} WITH (NOLOCK)
+        WHERE [{c['applno']}] = :applno AND GuarantorId = :grn_id
+        ORDER BY {('[' + created + '] DESC') if created else 'Id DESC'}
+    """), {"applno": applno, "grn_id": grn_id}).mappings().all()
+    return [{"id": r["Id"], "documentName": r["DocumentName"] or "",
+             "downloadUrl": _generate_download_url(r["AWSKey"], r["DocumentName"]) or ""}
+            for r in rows if r["DocumentName"] and r["DocumentName"] != "-"]
+
+@cam_edit_bp.route("/guarantor/bank", methods=["GET"])
+@login_required
+def get_guarantor_bank():
+    applno = request.args.get("applno", "").strip()
+    grn_id = request.args.get("grnId", "").strip()
+    if not applno or not grn_id:
+        return jsonify({"success": False, "message": "applno and grnId are required"}), 400
+    if not _g_own(applno, grn_id):
+        return jsonify({"success": False, "message": "Guarantor not found in this CAM"}), 404
+    blocked, message = _check_cam_editable(applno)
+    return jsonify({"success": True, "blocked": bool(blocked), "blockedMessage": message if blocked else "",
+                    "files": _bank_list(applno, grn_id)})
+
+@cam_edit_bp.route("/guarantor/bank/upload", methods=["POST"])
+@login_required
+def upload_guarantor_bank():
+    applno = (request.form.get("applno") or "").strip()
+    grn_id = (request.form.get("grnId") or "").strip()
+    if not applno or not grn_id:
+        return jsonify({"success": False, "message": "applno and grnId are required"}), 400
+
+    own = _g_own(applno, grn_id)
+    if not own:
+        return jsonify({"success": False, "message": "Guarantor not found in this CAM"}), 404
+    blocked, message = _check_cam_editable(applno)
+    if blocked:
+        return jsonify({"success": False, "message": message}), 403
+
+    files = [f for f in request.files.getlist("files") if f and f.filename]
+    if not files:
+        return jsonify({"success": False, "message": "No file selected."}), 400
+
+    apless = own["APLESS"] or ""
+    username = session.get("username", "") or session.get("emp_id", "") or ""
+    c = _bank_cols()
+    if not c["applno"]:
+        return jsonify({"success": False, "message": f"{_BANK_TABLE} has no ApplNo column"}), 500
+
+    uploaded_keys = []
+    try:
+        stamp = int(time.time())
+        for i, f in enumerate(files):
+            error = _validate_cam_file(f.mimetype, _file_size(f))
+            if error:
+                raise ValueError(f"{f.filename}: {error}")
+            name = _build_document_name(applno, _BANK_TAG, stamp + i, f.filename)
+            key = _build_s3_key(apless, applno, _BANK_SUBFOLDER, name)
+            ctype = f.mimetype or "application/octet-stream"
+            _s3_client().upload_fileobj(f, _s3_bucket(), key, ExtraArgs={"ContentType": ctype})
+            uploaded_keys.append(key)
+
+            cols = {c["applno"]: applno, "GuarantorId": grn_id, "DocumentName": name, "AWSKey": key}
+            all_cols = c["all"]
+            if "APLESS" in all_cols:
+                cols[all_cols["APLESS"]] = apless
+            if "CREATEDBY" in all_cols:
+                cols[all_cols["CREATEDBY"]] = username
+            names = list(cols)
+            db.session.execute(text(
+                f"INSERT INTO {_BANK_TABLE} ({', '.join('[' + n + ']' for n in names)}"
+                f"{', [' + all_cols['CREATEDDATE'] + ']' if 'CREATEDDATE' in all_cols else ''}) "
+                f"VALUES ({', '.join(':p' + str(j) for j in range(len(names)))}"
+                f"{', GETDATE()' if 'CREATEDDATE' in all_cols else ''})"
+            ), {f"p{j}": cols[n] for j, n in enumerate(names)})
+        db.session.commit()
+    except ValueError as e:
+        db.session.rollback()
+        for k in uploaded_keys:
+            try: delete_object(k)
+            except Exception: pass
+        return jsonify({"success": False, "message": str(e)}), 400
+    except Exception as e:
+        db.session.rollback()
+        for k in uploaded_keys:
+            try: delete_object(k)
+            except Exception: pass
+        current_app.logger.exception("upload_guarantor_bank failed")
+        return jsonify({"success": False, "message": "Upload failed. Please try again.",
+                        "detail": str(getattr(e, "orig", None) or e)[:500]}), 500
+
+    return jsonify({"success": True, "files": _bank_list(applno, grn_id)})
+
+@cam_edit_bp.route("/guarantor/bank", methods=["DELETE"])
+@login_required
+def delete_guarantor_bank():
+    applno = request.args.get("applno", "").strip()
+    grn_id = request.args.get("grnId", "").strip()
+    doc_id = request.args.get("id", "").strip()
+    if not applno or not grn_id or not doc_id.isdigit():
+        return jsonify({"success": False, "message": "applno, grnId and id are required"}), 400
+    blocked, message = _check_cam_editable(applno)
+    if blocked:
+        return jsonify({"success": False, "message": message}), 403
+
+    try:
+        row = db.session.execute(text(f"""
+            SELECT AWSKey FROM {_BANK_TABLE} WITH (NOLOCK) WHERE Id = :id AND GuarantorId = :grn_id
+        """), {"id": int(doc_id), "grn_id": grn_id}).mappings().first()
+        if not row:
+            return jsonify({"success": False, "message": "File not found"}), 404
+        if row["AWSKey"]:
+            delete_object(row["AWSKey"])
+        db.session.execute(text(f"DELETE FROM {_BANK_TABLE} WHERE Id = :id AND GuarantorId = :grn_id"),
+                           {"id": int(doc_id), "grn_id": grn_id})
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        current_app.logger.exception("delete_guarantor_bank failed")
+        return jsonify({"success": False, "message": "Delete failed. Please try again."}), 500
+    return jsonify({"success": True})
+
+
+_GUARANTOR_DOC_PR = {
+    "guarantor-spouse-kk": ("GUARANTOR_SPOUSE_KK", "DATA_DIRI/SPOUSE_KK"),
+    "guarantor-ktp": ("GUARANTOR_KTP", "DATA_DIRI/KTP"),
+    "guarantor-kitas": ("GUARANTOR_KITAS", "DATA_DIRI/KITAS"),
+    "guarantor-spouse-ktp": ("GUARANTOR_SPOUSE_KTP", "DATA_DIRI/SPOUSE_KTP"),
+    "guarantor-kk": ("GUARANTOR_KK", "DATA_DIRI/KK"),
+    "guarantor-npwp": ("GUARANTOR_NPWP", "DATA_DIRI/NPWP"),
+    "guarantor-marriage-or-death-statement": ("GUARANTOR_MARRIAGE_OR_DEATH_STATEMENT", "DATA_DIRI/MARRIAGE_OR_DEATH_STATEMENT"),
+}
+_GUARANTOR_DOC_PT = {
+    "corp-guarantor-kk": ("CORP_GUARANTOR_KK", "DATA_DIRI/KK_PENGURUS"),
+    "corp-guarantor-akta": ("CORP_GUARANTOR_AKTA", "DATA_DIRI/AKTA_PENGURUS"),
+    "corp-guarantor-sk-akta": ("CORP_GUARANTOR_SK_AKTA", "DATA_DIRI/SK_AKTA_PENGURUS"),
+    "corp-guarantor-akta-terakhir": ("CORP_GUARANTOR_AKTA_TERAKHIR", "DATA_DIRI/AKTA_TERAKHIR_PENGURUS"),
+    "corp-guarantor-sk-akta-terakhir": ("CORP_GUARANTOR_SK_AKTA_TERAKHIR", "DATA_DIRI/SK_AKTA_TERAKHIR_PENGURUS"),
+    "corp-guarantor-npwp": ("CORP_GUARANTOR_NPWP", "DATA_DIRI/NPWP_PENGURUS"),
+}
+_GUARANTOR_BOARD_PREFIXES = ("corp-guarantor-ocr-ktp_", "wna-corp-guarantor-board_")
+_GUARANTOR_BOARD_EXACT = ("corp-ktp-akta-terakhir",)
+_GUARANTOR_BOARD_TOKEN = re.compile(r"^[A-Za-z0-9_.\-]{1,100}$")
+
+def _guarantor_doc_meta(grn_tp: str, document_type: str):
+    table = _GUARANTOR_DOC_PR if grn_tp == "PR" else _GUARANTOR_DOC_PT if grn_tp == "PT" else {}
+    if document_type in table:
+        return table[document_type]
+    if grn_tp == "PT":
+        if document_type in _GUARANTOR_BOARD_EXACT:
+            return ("CORP_KTP_AKTA_TERAKHIR", "DATA_GUARANTOR/KTP_PENGURUS")
+        for p in _GUARANTOR_BOARD_PREFIXES:
+            if document_type.startswith(p) and _GUARANTOR_BOARD_TOKEN.match(document_type):
+                return ("CORP_GUARANTOR_BOARD", "DATA_GUARANTOR/KTP_PENGURUS")
+    return None
+
+def _guarantor_docs(applno: str, grn_id: str) -> dict:
+    rows = db.session.execute(text("""
+        SELECT id_customer_document, AWSKey, file_document, DocumentType
+        FROM CUSTOMER_DOCUMENT WITH (NOLOCK)
+        WHERE doc_type = 'guarn' AND APPL_NO = :applno AND GRNID = :grn_id AND APLESS IS NOT NULL
+        ORDER BY DocumentType, Upload_Dt DESC
+    """), {"applno": applno, "grn_id": grn_id}).mappings().all()
+    out: dict = {}
+    for r in rows:
+        if not r["file_document"] or r["file_document"] == "-":
+            continue
+        out.setdefault(r["DocumentType"], []).append({
+            "id": r["id_customer_document"],
+            "documentName": r["file_document"],
+            "downloadUrl": _generate_download_url(r["AWSKey"], r["file_document"]) or "",
+        })
+    return out
+
+@cam_edit_bp.route("/guarantor/document", methods=["GET"])
+@login_required
+def get_guarantor_document():
+    applno = request.args.get("applno", "").strip()
+    grn_id = request.args.get("grnId", "").strip()
+    if not applno or not grn_id:
+        return jsonify({"success": False, "message": "applno and grnId are required"}), 400
+    own = _g_own(applno, grn_id)
+    if not own:
+        return jsonify({"success": False, "message": "Guarantor not found in this CAM"}), 404
+    blocked, message = _check_cam_editable(applno)
+    return jsonify({
+        "success": True, "blocked": bool(blocked), "blockedMessage": message if blocked else "",
+        "guarantorType": own["GRNTP"] or "", "citizen": own["GRNCITIZEN"] or "",
+        "files": _guarantor_docs(applno, grn_id),
+    })
+
+@cam_edit_bp.route("/guarantor/document/upload", methods=["POST"])
+@login_required
+def upload_guarantor_document():
+    applno = (request.form.get("applno") or "").strip()
+    grn_id = (request.form.get("grnId") or "").strip()
+    document_type = (request.form.get("documentType") or "").strip()
+    if not applno or not grn_id or not document_type:
+        return jsonify({"success": False, "message": "applno, grnId and documentType are required"}), 400
+
+    own = _g_own(applno, grn_id)
+    if not own:
+        return jsonify({"success": False, "message": "Guarantor not found in this CAM"}), 404
+    meta = _guarantor_doc_meta(own["GRNTP"], document_type)
+    if not meta:
+        return jsonify({"success": False, "message": "Invalid document type."}), 400
+    blocked, message = _check_cam_editable(applno)
+    if blocked:
+        return jsonify({"success": False, "message": message}), 403
+
+    files = [f for f in request.files.getlist("files") if f and f.filename]
+    if not files:
+        return jsonify({"success": False, "message": "No file selected."}), 400
+
+    tag, subfolder = meta
+    apless = own["APLESS"] or ""
+    org_type = "GUARN" + (own["GRNTP"] or "")
+    uploaded_keys = []
+    try:
+        stamp = int(time.time())
+        for i, f in enumerate(files):
+            error = _validate_cam_file(f.mimetype, _file_size(f))
+            if error:
+                raise ValueError(f"{f.filename}: {error}")
+            name = _build_document_name(applno, tag, stamp + i, f.filename)
+            key = _build_s3_key(apless, applno, subfolder, name)
+            ctype = f.mimetype or "application/octet-stream"
+            _s3_client().upload_fileobj(f, _s3_bucket(), key, ExtraArgs={"ContentType": ctype})
+            uploaded_keys.append(key)
+            db.session.execute(text("""
+                INSERT INTO CUSTOMER_DOCUMENT
+                    (appl_no, APLESS, DocumentType, doc_type, organization_type, file_document, AWSKey, Upload_Dt, GRNID)
+                VALUES (:applno, :apless, :dt, 'guarn', :org, :name, :key, GETDATE(), :grn_id)
+            """), {"applno": applno, "apless": apless, "dt": document_type, "org": org_type,
+                   "name": name, "key": key, "grn_id": grn_id})
+        db.session.commit()
+    except ValueError as e:
+        db.session.rollback()
+        for k in uploaded_keys:
+            try: delete_object(k)
+            except Exception: pass
+        return jsonify({"success": False, "message": str(e)}), 400
+    except Exception as e:
+        db.session.rollback()
+        for k in uploaded_keys:
+            try: delete_object(k)
+            except Exception: pass
+        current_app.logger.exception("upload_guarantor_document failed")
+        return jsonify({"success": False, "message": "Upload failed. Please try again.",
+                        "detail": str(getattr(e, "orig", None) or e)[:500]}), 500
+
+    return jsonify({"success": True, "files": _guarantor_docs(applno, grn_id).get(document_type, [])})
+
+@cam_edit_bp.route("/guarantor/document", methods=["DELETE"])
+@login_required
+def delete_guarantor_document():
+    applno = request.args.get("applno", "").strip()
+    grn_id = request.args.get("grnId", "").strip()
+    doc_id = request.args.get("id", "").strip()
+    if not applno or not grn_id or not doc_id.isdigit():
+        return jsonify({"success": False, "message": "applno, grnId and id are required"}), 400
+    blocked, message = _check_cam_editable(applno)
+    if blocked:
+        return jsonify({"success": False, "message": message}), 403
+
+    try:
+        row = db.session.execute(text("""
+            SELECT AWSKey FROM CUSTOMER_DOCUMENT WITH (NOLOCK)
+            WHERE id_customer_document = :id AND appl_no = :applno AND GRNID = :grn_id AND doc_type = 'guarn'
+        """), {"id": int(doc_id), "applno": applno, "grn_id": grn_id}).mappings().first()
+        if not row:
+            return jsonify({"success": False, "message": "File not found"}), 404
+        if row["AWSKey"]:
+            delete_object(row["AWSKey"])
+        db.session.execute(text("""
+            DELETE FROM CUSTOMER_DOCUMENT
+            WHERE id_customer_document = :id AND appl_no = :applno AND GRNID = :grn_id AND doc_type = 'guarn'
+        """), {"id": int(doc_id), "applno": applno, "grn_id": grn_id})
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        current_app.logger.exception("delete_guarantor_document failed")
+        return jsonify({"success": False, "message": "Delete failed. Please try again."}), 500
+    return jsonify({"success": True})

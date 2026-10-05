@@ -575,6 +575,11 @@ def _corp_doc_meta(document_type: str):
         token = m.group(1)
         return (f"-WNA_CORP_BOARD-{token}", "DATA_DIRI/KTP_PENGURUS")
 
+    m = re.match(r"^shareholder-npwp_([A-Za-z0-9]+)$", document_type)
+    if m:
+        token = m.group(1)
+        return (f"-SHAREHOLDER_NPWP-{token}-", "DATA_DIRI/SHAREHOLDER_NPWP")
+
     return (f"-{document_type.upper().replace('-', '_')}-", document_type)
 
 _ORG_TYPE_MAP = {
@@ -600,7 +605,7 @@ def _cleanup_ocr_for_nik(prechecking_id: str, nik: str) -> None:
     ocr_row = db.session.execute(
         text("""
             SELECT Id FROM TEMP_CAFLESS_OCR WITH(NOLOCK)
-            WHERE Prechecking_Id = :pid AND NIK = :nik
+            WHERE Prechecking_Id = :pid AND NIK = :nik AND ISNULL(OCR_For, '') <> 'H'
         """),
         {"pid": prechecking_id, "nik": nik},
     ).fetchone()
@@ -944,6 +949,12 @@ _DIR_REQUIRED = [f[0] for f in _DIR_FIELDS if f[0] not in ("blood_type", "religi
 _DIR_PREFIX = "corp-ocr-ktp_"
 _WNA_PREFIX = "wna-corp-board_"
 
+_SH_OCR_FOR = "H"
+_SH_ID_TYPE = "NPWP"
+_SH_PREFIX = "shareholder-npwp_"
+_SH_NAME_MAX = 100
+_SH_NPWP_MAX = 16
+
 def _s(value) -> str:
     return "" if value is None else str(value).strip()
 
@@ -995,6 +1006,15 @@ def _fetch_board(prechecking_id: str, ocr_for: str) -> list:
         WHERE o.Prechecking_Id = :pid AND o.OCR_For = :ocr_for
         ORDER BY o.Id
     """), {"pid": prechecking_id, "ocr_for": ocr_for}).mappings().all()
+    return [dict(r) for r in rows]
+
+def _fetch_shareholders(prechecking_id: str) -> list:
+    rows = db.session.execute(text("""
+        SELECT Id, NIK, Nama
+        FROM TEMP_CAFLESS_OCR WITH(NOLOCK)
+        WHERE Prechecking_Id = :pid AND OCR_For = :ocr_for
+        ORDER BY Id
+    """), {"pid": prechecking_id, "ocr_for": _SH_OCR_FOR}).mappings().all()
     return [dict(r) for r in rows]
 
 def _is_wna(rec) -> bool:
@@ -1152,6 +1172,14 @@ def get_edit_corporate():
                 for r in types_map[t]:
                     unassigned.append({"id": r.CustomerDocumentId, "name": r.DocumentName, "type": t, "key": r.AWSKey})
 
+        shareholders = [{
+            "id": r["Id"],
+            "name": _s(r.get("Nama")),
+            "npwp_no": _s(r.get("NIK")),
+            "id_type": _SH_ID_TYPE,
+            "doc_types": [f"{_SH_PREFIX}{_token(r.get('NIK'))}"] if _token(r.get("NIK")) else [],
+        } for r in _fetch_shareholders(prechecking_id)]
+
         sik_rows = db.session.execute(text("""
             SELECT Subject, CreditBureau, Status, Score, Grade
             FROM TEMP_SIK_CHECKING_DOCUMENT WITH(NOLOCK)
@@ -1182,6 +1210,7 @@ def get_edit_corporate():
             "outstanding": outstanding,
             "directors": directors,
             "wna_board": wna_board,
+            "shareholders": shareholders,
             "unassigned_documents": unassigned,
             "sik": sik,
         })
@@ -1317,6 +1346,23 @@ def _save_wna(prechecking_id: str, ocr_for: str, ocr_id, w: dict) -> int:
         VALUES (:pid, :ocr_for, 'WNA', 'WNA', :id_type, :name, :nik, GETDATE())
     """), params).fetchone().Id
 
+def _save_shareholder(prechecking_id: str, ocr_id, sh: dict) -> int:
+    params = {"pid": prechecking_id, "ocr_for": _SH_OCR_FOR, "id_type": _SH_ID_TYPE,
+              "name": _s(sh.get("name")), "npwp": _s(sh.get("npwp_no"))}
+    if ocr_id:
+        db.session.execute(text("""
+            UPDATE TEMP_CAFLESS_OCR SET
+                Id_Type = :id_type, Nama = :name, NIK = :npwp, UpdatedDate = GETDATE()
+            WHERE Id = :id AND Prechecking_Id = :pid AND OCR_For = :ocr_for
+        """), {**params, "id": ocr_id})
+        return ocr_id
+    return db.session.execute(text("""
+        INSERT INTO TEMP_CAFLESS_OCR
+            (Prechecking_Id, OCR_For, Citizen, Id_Type, Nama, NIK, UpdatedDate)
+        OUTPUT INSERTED.Id
+        VALUES (:pid, :ocr_for, '', :id_type, :name, :npwp, GETDATE())
+    """), params).fetchone().Id
+
 def _docs_of_types(prechecking_id: str, types) -> list:
     types = [t for t in dict.fromkeys(types) if t]
     if not types:
@@ -1434,6 +1480,9 @@ def update_corporate():
     carro = _carro(body.get("is_carro"))
     directors = [d for d in (body.get("directors") or []) if isinstance(d, dict)]
     wna_board = [w for w in (body.get("wna_board") or []) if isinstance(w, dict)]
+    shareholders = [x for x in (body.get("shareholders") or []) if isinstance(x, dict)]
+    sh_board = _fetch_shareholders(prechecking_id)
+    sh_by_id = {r["Id"]: r for r in sh_board}
 
     errors: dict = {}
     if not corp_name:
@@ -1500,6 +1549,34 @@ def update_corporate():
             if not (staged and _docs_of_types(prechecking_id, [f"{_WNA_PREFIX}{staged}"])):
                 errors[f"wna_{i}_document"] = f"{label}: upload the {id_type} file when changing ID Type"
 
+    active_shareholders: list = []
+    seen_npwp: dict = {}
+    for i, sh in enumerate(shareholders):
+        label = f"Shareholder #{i + 1}"
+        sh_rec = sh_by_id.get(sh.get("id"))
+        if sh.get("id") and sh_rec is None:
+            errors[f"shareholder_{i}_id"] = f"{label} no longer exists. Reload the page."
+            continue
+        sh_name = _s(sh.get("name"))
+        sh_npwp = _s(sh.get("npwp_no"))
+        sh_staged = _token(sh.get("doc_token"))
+        has_staged = bool(sh_staged and _docs_of_types(prechecking_id, [f"{_SH_PREFIX}{sh_staged}"]))
+        if not sh.get("id") and not sh_name and not sh_npwp and not has_staged:
+            continue
+        if not sh_name:
+            errors[f"shareholder_{i}_name"] = f"{label}: Name is required"
+        elif len(sh_name) > _SH_NAME_MAX:
+            errors[f"shareholder_{i}_name"] = f"{label}: Name must be at most {_SH_NAME_MAX} characters"
+        if not sh_npwp:
+            errors[f"shareholder_{i}_npwp_no"] = f"{label}: NPWP No is required"
+        elif not sh_npwp.isdigit() or len(sh_npwp) > _SH_NPWP_MAX:
+            errors[f"shareholder_{i}_npwp_no"] = f"{label}: NPWP No must be numbers only, max {_SH_NPWP_MAX} digits"
+        elif sh_npwp in seen_npwp:
+            errors[f"shareholder_{i}_npwp_no"] = f"{label}: NPWP No is already used by {seen_npwp[sh_npwp]}"
+        else:
+            seen_npwp[sh_npwp] = label
+        active_shareholders.append(sh)
+
     if errors:
         return jsonify({"success": False, "errors": errors, "message": "\n".join(errors.values())}), 422
 
@@ -1531,9 +1608,22 @@ def update_corporate():
         return (_s(w.get("name")), _s(w.get("id_card_no")), _norm_wna_id_type(w.get("id_type"))) != \
                (_s(rec.get("Nama")), _s(rec.get("NIK")), _norm_wna_id_type(rec.get("Id_Type")))
 
+    kept_sh_ids = {x.get("id") for x in active_shareholders if x.get("id")}
+    removed_sh = [r for r in sh_board if r["Id"] not in kept_sh_ids]
+
+    def shareholder_changed(x):
+        rec = sh_by_id.get(x.get("id"))
+        if rec is None:
+            return True
+        staged = _token(x.get("doc_token"))
+        if staged and _docs_of_types(prechecking_id, [f"{_SH_PREFIX}{staged}"]):
+            return True
+        return (_s(x.get("name")), _s(x.get("npwp_no"))) != (_s(rec.get("Nama")), _s(rec.get("NIK")))
+
     changed_dirs = [d for d in directors if director_changed(d)]
     changed_wna = [w for w in wna_board if wna_changed(w)]
-    if not (header_changed or removed or changed_dirs or changed_wna):
+    changed_sh = [x for x in active_shareholders if shareholder_changed(x)]
+    if not (header_changed or removed or changed_dirs or changed_wna or removed_sh or changed_sh):
         return jsonify({"success": True, "no_changes": True, "message": "No data changes"})
 
     s3_to_delete: list = []
@@ -1565,6 +1655,21 @@ def update_corporate():
             s3_to_delete += _finalize_member_docs(
                 prechecking_id, apless, _WNA_PREFIX, _token(w.get("id_card_no")),
                 _token(w.get("doc_token")), existing, None, username)
+
+        for r in removed_sh:
+            s3_to_delete += _delete_doc_rows(_docs_of_types(prechecking_id, [f"{_SH_PREFIX}{_token(r.get('NIK'))}"]))
+        _delete_ocr_ids([r["Id"] for r in removed_sh])
+
+        for x in changed_sh:
+            _save_shareholder(prechecking_id, x.get("id"), x)
+            rec = sh_by_id.get(x.get("id"))
+            existing = list(x.get("doc_types") or [])
+            if rec is not None:
+                existing.append(f"{_SH_PREFIX}{_token(rec.get('NIK'))}")
+            existing = list(dict.fromkeys(existing))
+            s3_to_delete += _finalize_member_docs(
+                prechecking_id, apless, _SH_PREFIX, _token(x.get("npwp_no")),
+                _token(x.get("doc_token")), existing, None, username)
 
         db.session.commit()
     except CorpCarryError as exc:

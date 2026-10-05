@@ -23,6 +23,60 @@ def _clean_db_value(value):
 def _clean_row(mapping) -> dict:
     return {k: _clean_db_value(v) for k, v in dict(mapping).items()}
 
+def _resolve_company_type(id_card: str, apless: str, prechecking_id) -> tuple:
+    debug: dict = {}
+
+    try:
+        row = db.session.execute(text("""
+            SELECT TOP 1
+                RTRIM(LTRIM(m.CUST_TYPE)) AS CustType,
+                c.LESSEE_CAT              AS RawCat
+            FROM CAFLESS c WITH (NOLOCK)
+            INNER JOIN MSTLESSEETYPE m WITH (NOLOCK)
+                ON m.LESSEE_TP = 'PT'
+               AND (UPPER(RTRIM(LTRIM(m.CUST_TYPE))) = UPPER(RTRIM(LTRIM(c.LESSEE_CAT)))
+                    OR UPPER(RTRIM(LTRIM(m.[NAME]))) = UPPER(RTRIM(LTRIM(c.LESSEE_CAT))))
+            WHERE c.APLESS = :apless
+        """), {"apless": apless or ""}).fetchone()
+        if row and row.CustType:
+            debug["picked"] = f"CAFLESS.LESSEE_CAT ({row.RawCat})"
+            return row.CustType, debug
+        raw = db.session.execute(
+            text("SELECT TOP 1 LESSEE_CAT FROM CAFLESS WITH (NOLOCK) WHERE APLESS = :apless"),
+            {"apless": apless or ""},
+        ).fetchone()
+        debug["CAFLESS.LESSEE_CAT"] = (
+            f"'{raw.LESSEE_CAT}' not found in MSTLESSEETYPE (LESSEE_TP='PT')" if raw else "no CAFLESS row"
+        )
+    except Exception as exc:
+        current_app.logger.exception("company type: CAFLESS.LESSEE_CAT lookup failed")
+        debug["CAFLESS.LESSEE_CAT"] = f"error: {exc.__class__.__name__}"
+
+    try:
+        row = db.session.execute(text("""
+            SELECT TOP 1
+                RTRIM(LTRIM(m.CUST_TYPE)) AS CustType,
+                t.Prechecking_Id          AS SourcePid
+            FROM TEMP_CAFLESS t WITH (NOLOCK)
+            INNER JOIN MSTLESSEETYPE m WITH (NOLOCK)
+                ON m.LESSEE_TP = 'PT'
+               AND UPPER(RTRIM(LTRIM(m.CUST_TYPE))) = UPPER(RTRIM(LTRIM(t.LesseeType)))
+            WHERE t.CustomerType = 'PT'
+              AND (t.NPWP = :id_card OR t.IdCardNo = :id_card
+                   OR (:apless <> '' AND t.Apless = :apless))
+            ORDER BY CASE WHEN t.Prechecking_Id = :pid THEN 0 ELSE 1 END,
+                     t.CreatedDate DESC
+        """), {"id_card": id_card, "apless": apless or "", "pid": prechecking_id or ""}).fetchone()
+        if row and row.CustType:
+            debug["picked"] = f"TEMP_CAFLESS.LesseeType (prechecking {row.SourcePid})"
+            return row.CustType, debug
+        debug["TEMP_CAFLESS.LesseeType"] = "no row with a valid Company Type"
+    except Exception as exc:
+        current_app.logger.exception("company type: TEMP_CAFLESS lookup failed")
+        debug["TEMP_CAFLESS.LesseeType"] = f"error: {exc.__class__.__name__}"
+
+    return "", debug
+
 _MONTHS_SHORT = ("Jan", "Feb", "Mar", "Apr", "May", "Jun",
                  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 
@@ -34,12 +88,16 @@ def _fmt_display_date(value) -> str:
 _WNI_ID_DOC_TYPES = ("cust-ktp", "cust-spouse-ktp", "cust-wna-spouse-ktp")
 _WNA_ID_DOC_TYPES = ("cust-kitas", "cust-kitap", "cust-spouse-kitas", "cust-spouse-kitap")
 
-def _fetch_identity_documents(prechecking_id, citizen: str) -> list:
+def _fetch_identity_documents(prechecking_id, citizen: str, nik: str = "") -> list:
 
     if not prechecking_id:
         return []
 
     doc_types = _WNA_ID_DOC_TYPES if (citizen or "").strip().upper() == "WNA" else _WNI_ID_DOC_TYPES
+
+    nik = re.sub(r"\D", "", nik or "")
+    if nik:
+        doc_types = tuple(doc_types) + (f"corp-ocr-ktp_{nik}", f"corp-guarantor-ocr-ktp_{nik}")
 
     placeholders = ", ".join(f":dtype_{i}" for i in range(len(doc_types)))
     params = {"pid": prechecking_id}
@@ -66,6 +124,41 @@ def _fetch_identity_documents(prechecking_id, citizen: str) -> list:
         }
         for r in rows
     ]
+
+def _fetch_latest_own_ktp(prechecking_id, citizen: str) -> list:
+    if not prechecking_id:
+        return []
+
+    doc_types = (
+        ("cust-kitas", "cust-kitap", "guarantor-kitas", "guarantor-kitap")
+        if (citizen or "").strip().upper() == "WNA"
+        else ("cust-ktp", "guarantor-ktp")
+    )
+    placeholders = ", ".join(f":dtype_{i}" for i in range(len(doc_types)))
+    params = {"pid": prechecking_id}
+    params.update({f"dtype_{i}": t for i, t in enumerate(doc_types)})
+
+    row = db.session.execute(
+        text(f"""
+            SELECT TOP 1 CustomerDocumentId, DocumentName, DocumentType, AWSKey
+            FROM TEMP_CUSTOMER_DOCUMENT WITH (NOLOCK)
+            WHERE Prechecking_Id = :pid
+                AND DocumentType IN ({placeholders})
+            ORDER BY CreatedDate DESC
+        """),
+        params,
+    ).fetchone()
+
+    if not row or not row.DocumentName:
+        return []
+
+    return [{
+        "id":       row.CustomerDocumentId,
+        "name":     row.DocumentName,
+        "type":     row.DocumentType,
+        "key":      row.AWSKey,
+        "view_url": _aws_presign(row.AWSKey, row.DocumentName) if row.AWSKey else None,
+    }]
 
 _RATE_FIELD_MAP = {
     "idCardNo": "NIK", "name": "Nama", "placeOfBirth": "Tempat_Lahir",
@@ -130,6 +223,7 @@ def _ocr_row_to_dict(row: dict) -> dict:
         "pekerjaan": row.get("Pekerjaan") or "",
         "status_perkawinan": row.get("Status_Perkawinan") or "",
         "kewarnegaraan": row.get("Kewarnegaraan") or "",
+        "citizen": row.get("Citizen") or "",
         "idType": row.get("Id_Type") or "",
         "foto": row.get("Foto") or "",
         "tandaTangan": row.get("Tanda_Tangan") or ""
@@ -202,27 +296,36 @@ def _copy_temp_document_to_final(aws_key_old: str, aws_key_new: str) -> bool:
 @login_required
 def check():
     try:
-        data = request.get_json()
-        if not data:
+        payload = request.get_json()
+        if not payload:
             return jsonify({"message": "Invalid JSON"}), 400
 
-        id_card = (data.get('idCard') or '').strip()
-        lessee_tp = (data.get('customerType') or '').strip()
+        id_card = (payload.get('idCard') or '').strip()
+        lessee_tp = (payload.get('customerType') or '').strip()
 
         query = """
-            SELECT LESSEE_NM, APLESS, LESSEE_TP
+            SELECT
+                LESSEE_NM,
+                APLESS,
+                LESSEE_TP,
+                CASE
+                    WHEN DATEDIFF(D, documentApproval.LastActionDate, GETDATE()) <= 30 THEN 1
+                    ELSE 0
+                END AS IsRecentPrecheck
             FROM CAFLESS WITH (NOLOCK)
+            LEFT JOIN documentApproval ON documentApproval.DocumentNumber = CAFLESS.Prechecking_id
             WHERE (ID_CARD = :id_card OR NPWP = :id_card) AND LESSEE_TP = :lessee_tp
         """
 
-        result = db.session.execute(db.text(query), {"id_card": id_card, "lessee_tp": lessee_tp})
+        result = db.session.execute(text(query), {"id_card": id_card, "lessee_tp": lessee_tp})
 
-        data = result.fetchone()
-        if data:
+        row = result.fetchone()
+        if row:
             return jsonify({
-                "customerName": data[0],
-                "APLESS": data[1],
-                "LESSEE_TP": data[2]
+                "customerName": row[0],
+                "APLESS": row[1],
+                "LESSEE_TP": row[2],
+                "isRecentPrecheck": bool(row[3]),
             })
         else:
             return jsonify({"customerName": ""})
@@ -230,6 +333,32 @@ def check():
     except Exception:
         current_app.logger.exception("CAM check error")
         return jsonify({"message": "Failed to check customer"}), 500
+
+@cam_bp.route('/company-type', methods=['POST'])
+@login_required
+def get_company_type():
+   
+    data = request.get_json(silent=True) or {}
+    apless = (data.get("apless") or "").strip()
+    id_card = (data.get("idCard") or "").strip()
+    pid = (data.get("previousPrecheckingId") or "").strip()
+
+    if not apless and not id_card:
+        return jsonify({"lesseeType": "", "debug": {"error": "apless or idCard is required"}}), 400
+
+    try:
+        if not apless:
+            row = db.session.execute(text("""
+                SELECT TOP 1 APLESS FROM CAFLESS WITH (NOLOCK)
+                WHERE (ID_CARD = :id_card OR NPWP = :id_card) AND LESSEE_TP = 'PT'
+            """), {"id_card": id_card}).fetchone()
+            apless = (row.APLESS or "").strip() if row else ""
+
+        lessee_type, debug = _resolve_company_type(id_card, apless, pid)
+        return jsonify({"lesseeType": lessee_type, "debug": debug})
+    except Exception:
+        current_app.logger.exception("get_company_type error")
+        return jsonify({"lesseeType": "", "debug": {"error": "Database error"}}), 500
 
 @cam_bp.route('/lookup-ocr-by-nik', methods=['POST'])
 @login_required
@@ -248,6 +377,8 @@ def lookup_ocr_by_nik():
                 FROM TEMP_CAFLESS_OCR WITH (NOLOCK)
                 WHERE NIK = :nik
                     AND (:exclude_pid = '' OR Prechecking_Id <> :exclude_pid)
+                    AND UpdatedDate IS NOT NULL
+                    AND DATEDIFF(DAY, UpdatedDate, GETDATE()) <= 30
                 ORDER BY ISNULL(UpdatedDate, CAST('1900-01-01' AS datetime)) DESC, Id DESC
             """),
             {"nik": nik, "exclude_pid": exclude_pid},
@@ -279,7 +410,7 @@ def lookup_ocr_by_nik():
         payload["verified"] = verified
         payload["dukcapil"] = dukcapil
 
-        documents = _fetch_identity_documents(
+        documents = _fetch_latest_own_ktp(
             ocr.get("Prechecking_Id"),
             ocr.get("Citizen") or ocr.get("Kewarnegaraan"),
         )
@@ -297,7 +428,7 @@ def lookup_ocr_by_nik():
         current_app.logger.exception("lookup_ocr_by_nik error")
         return jsonify({"found": False, "message": "Database error"}), 500
 
-@cam_bp.route('/get_data_customer', methods=['POST'])
+@cam_bp.route('/get-data-customer', methods=['POST'])
 @login_required
 def get_data_customer():
     try:
@@ -371,10 +502,19 @@ def get_data_customer():
                 "documents": documents,
             })
 
+        company_type = ""
+        company_type_debug: dict = {}
+        if lessee_tp == "PT":
+            company_type, company_type_debug = _resolve_company_type(
+                id_card, apless, prechecking_id,
+            )
+
         meta = {
             "maritalStatus": temp_row.get("MaritalStatus") or "",
             "isCarro": _truthy_bit(temp_row.get("Carro")),
             "workAddress": temp_row.get("WorkAddress") or "",
+            "lesseeType": company_type,
+            "lesseeTypeDebug": company_type_debug,
         }
 
         ocr_query = text(f"""
@@ -511,7 +651,6 @@ def get_data_customer():
 
 @cam_bp.route('/init', methods=['GET'])
 def init_cam():
-   
     try:
         purpose_result = db.session.execute(
             text("SELECT PURPOFFINC, [DESC] FROM MSTPURPOFFINC WITH (NOLOCK) WHERE Flag_Active = '1'")
@@ -540,19 +679,31 @@ def init_cam():
 @cam_bp.route('/finance-types', methods=['GET'])
 @login_required
 def finance_types():
-   
     purpoffinc = (request.args.get('purpoffinc') or '').strip()
     lessee_tp = (request.args.get('lesseeTp') or '').strip().upper()
 
     if not purpoffinc:
         return jsonify([])
 
+    if purpoffinc in ('1', '2'):
+        allowed = ['C', 'F']
+    elif purpoffinc == '3':
+        allowed = ['F', 'S', 'I']
+    elif purpoffinc == '4':
+        allowed = ['S', 'M', 'W']
+    elif purpoffinc == '5':
+        allowed = ['F', 'I', 'D'] if lessee_tp == 'PR' else ['I']
+    else:
+        allowed = ['I']
+
     try:
-        rows = db.session.execute(text("""
+        placeholders = ", ".join(f":c{i}" for i in range(len(allowed)))
+        params = {f"c{i}": c for i, c in enumerate(allowed)}
+        rows = db.session.execute(text(f"""
             SELECT Cons_Leas, name
             FROM MSTCFFL WITH (NOLOCK)
-            ORDER BY name
-        """)).mappings().all()
+            WHERE Cons_Leas IN ({placeholders}) AND Flag_Active = '1'
+        """), params).mappings().all()
 
         return jsonify([{"value": r["Cons_Leas"], "label": r["name"]} for r in rows])
     except Exception:
@@ -562,7 +713,6 @@ def finance_types():
 @cam_bp.route('/contract-types', methods=['GET'])
 @login_required
 def contract_types():
-    
     fin_type = (request.args.get('finType') or '').strip().upper()
 
     if not fin_type:
@@ -576,9 +726,46 @@ def contract_types():
 @cam_bp.route('/dp-confirmation', methods=['GET'])
 @login_required
 def dp_confirmation():
-    
-    current_app.logger.warning("CAM /dp-confirmation is not implemented yet")
-    return jsonify({"message": "DP confirmation is not available"}), 501
+    def _pick(row, *names):
+        if not row:
+            return None
+        lowered = {str(k).lower(): v for k, v in row.items()}
+        for n in names:
+            if n.lower() in lowered:
+                return lowered[n.lower()]
+        return None
+
+    def _num(v):
+        if v is None or v == "":
+            return 0
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return 0
+
+    try:
+        ratio = db.session.execute(
+            text("SET NOCOUNT ON; EXEC USP_CHECK_RATIO ''")
+        ).mappings().first()
+        dp = db.session.execute(
+            text("SET NOCOUNT ON; EXEC USP_CHECK_DP ''")
+        ).mappings().first()
+
+        tgl_acuan = _pick(ratio, "tgl_acuan")
+        tgl_from = _pick(ratio, "tgl_from")
+        tgl_to = _pick(ratio, "tgl_to")
+
+        return jsonify({
+            "asOfDate":       str(tgl_acuan) if tgl_acuan not in (None, "") else "",
+            "periodFrom":     str(tgl_from) if tgl_from not in (None, "") else "",
+            "periodTo":       str(tgl_to) if tgl_to not in (None, "") else "",
+            "npfRatio":       _num(_pick(dp, "npf")),
+            "minDpInvestasi": _num(_pick(dp, "I")),
+            "minDpMultiguna": _num(_pick(dp, "M")),
+        })
+    except Exception:
+        current_app.logger.exception("Error in CAM /dp-confirmation")
+        return jsonify({"message": "Could not load the minimum DP figures."}), 500
 
 @cam_bp.route('/submit', methods=['POST'])
 @login_required
@@ -622,8 +809,8 @@ def submit():
         if lessee_tp == 'PT' and fin_type != 'D' and not public:
             errors['publicStatus'] = "Go Public must not be empty"
 
-        if not boa:
-            errors['boa'] = "Beneficial Owner Availability must not be empty"
+        if public == '1' and not boa:
+            boa = '1'
         if boa == '2' and not bot:
             errors['bot'] = "Beneficial Owner Type must not be empty"
 

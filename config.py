@@ -56,6 +56,7 @@ _ODBC = (
     f"PWD={_odbc_val(_DB_PASSWORD)};"
     f"Encrypt={'yes' if _DB_ENCRYPT else 'no'};"
     f"TrustServerCertificate={'yes' if _DB_TRUST_CERT else 'no'};"
+    "MARS_Connection=Yes;"
 )
 
 class Config:

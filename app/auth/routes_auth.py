@@ -132,7 +132,7 @@ def login():
 
         if not user:
             _insert_audit_log(username, "Login failed")
-            return jsonify({"message": "Invalid credentials"}), 401
+            return jsonify({"message": "Username/Password incorrect"}), 401
 
         db_username, emp_id, accesscam, branchcode, branch_call, telegram_chat_id, full_name, branch_name = user
 
@@ -176,7 +176,6 @@ def login():
             _insert_audit_log(db_username, "Login failed - Telegram send failed")
             return jsonify({"message": "Failed to send PIN via Telegram. Please try again."}), 500
 
-        session.clear()
         session['pending_username']     = db_username
         session['pending_emp_id']       = emp_id
         session['pending_id_no']        = id_no

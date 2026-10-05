@@ -8,7 +8,7 @@ from botocore.exceptions import BotoCoreError, ClientError
 from app import db
 from app.auth.decorators import login_required
 from app.utils.helpers.aws_helpers import (
-    _aws_upload, _aws_delete, _aws_presign, _validate_file,
+    _aws_upload, _aws_delete, _aws_presign, _validate_file, copy_object,
 )
 
 from app.utils.helpers.base_format import (
@@ -25,6 +25,125 @@ _MARITAL_MAP = {
 
 def _normalize_marital(val):
     return _MARITAL_MAP.get((val or "").strip().upper(), val)
+
+_SH_OCR_FOR = "H"
+_SH_ID_TYPE = "NPWP"
+_SH_PREFIX = "shareholder-npwp_"
+_SH_NAME_MAX = 100
+_SH_NPWP_MAX = 16
+
+def _save_shareholders(prechecking_id: str, shareholders) -> None:
+    db.session.execute(text("""
+        DELETE FROM TEMP_CAFLESS_OCR
+        WHERE Prechecking_Id = :pid AND OCR_For = :ocr_for
+    """), {"pid": prechecking_id, "ocr_for": _SH_OCR_FOR})
+
+    for s in (shareholders or []):
+        db.session.execute(text("""
+            INSERT INTO TEMP_CAFLESS_OCR
+                (Prechecking_Id, OCR_For, Citizen, Id_Type, NIK, Nama)
+            VALUES (:pid, :ocr_for, '', :id_type, :npwp, :nama)
+        """), {
+            "pid": prechecking_id, "ocr_for": _SH_OCR_FOR, "id_type": _SH_ID_TYPE,
+            "npwp": s["npwp_no"], "nama": s["name"],
+        })
+
+def _retype_member_docs(prechecking_id: str, directors, wna_board, shareholders=None) -> None:
+    for members, prefix in ((directors, "corp-ocr-ktp_"), (wna_board, "wna-corp-board_"),
+                            (shareholders, _SH_PREFIX)):
+        for m in (members or []):
+            idno = re.sub(r"[^A-Za-z0-9]", "", str(m.get("id_card_no") or m.get("npwp_no") or ""))
+            token = re.sub(r"[^A-Za-z0-9]", "", str(m.get("doc_token") or ""))
+            if not idno or not token or token == idno:
+                continue
+
+            staging, target = f"{prefix}{token}", f"{prefix}{idno}"
+            staged = db.session.execute(text("""
+                SELECT TOP 1 CustomerDocumentId FROM TEMP_CUSTOMER_DOCUMENT WITH(NOLOCK)
+                WHERE Prechecking_Id = :pid AND DocumentType = :t
+            """), {"pid": prechecking_id, "t": staging}).fetchone()
+            if not staged:
+                continue
+
+            old_rows = db.session.execute(text("""
+                SELECT CustomerDocumentId, AWSKey FROM TEMP_CUSTOMER_DOCUMENT WITH(NOLOCK)
+                WHERE Prechecking_Id = :pid AND DocumentType = :t
+            """), {"pid": prechecking_id, "t": target}).fetchall()
+            for r in old_rows:
+                db.session.execute(text("DELETE FROM TEMP_CUSTOMER_DOCUMENT WHERE CustomerDocumentId = :id"),
+                                   {"id": r.CustomerDocumentId})
+                if r.AWSKey:
+                    try:
+                        _aws_delete(r.AWSKey)
+                    except Exception:
+                        current_app.logger.exception("S3 delete failed for %s", r.AWSKey)
+
+            db.session.execute(text("""
+                UPDATE TEMP_CUSTOMER_DOCUMENT SET DocumentType = :new
+                WHERE Prechecking_Id = :pid AND DocumentType = :old
+            """), {"pid": prechecking_id, "old": staging, "new": target})
+
+def _copy_carried_documents(prechecking_id: str, apless: str, lessee_type: str,
+                            carried, username: str, report=None) -> list:
+    failed: list = []
+    org_type = _org_type_for(lessee_type)
+    report = report if report is not None else []
+
+    current_app.logger.info("carry-over: %s carried document(s) received for %s",
+                            len(carried or []), prechecking_id)
+
+    for c in (carried or []):
+        if not isinstance(c, dict):
+            report.append({"item": str(c)[:80], "result": "skipped: not an object"})
+            continue
+        doc_id = c.get("customer_document_id")
+        dtype = (c.get("document_type") or "").strip()
+        if not doc_id or not dtype:
+            report.append({"item": str(c)[:80], "result": "skipped: missing id/type"})
+            continue
+
+        exists = db.session.execute(text("""
+            SELECT TOP 1 CustomerDocumentId FROM TEMP_CUSTOMER_DOCUMENT WITH(NOLOCK)
+            WHERE Prechecking_Id = :pid AND DocumentType = :dtype
+        """), {"pid": prechecking_id, "dtype": dtype}).fetchone()
+        if exists:
+            report.append({"id": doc_id, "type": dtype, "result": "skipped: type already exists on this prechecking"})
+            continue
+
+        src = db.session.execute(text("""
+            SELECT DocumentName, AWSKey FROM TEMP_CUSTOMER_DOCUMENT WITH(NOLOCK)
+            WHERE CustomerDocumentId = :id
+        """), {"id": doc_id}).fetchone()
+        if not src or not src.AWSKey:
+            report.append({"id": doc_id, "type": dtype, "result": "FAILED: source row/AWSKey not found"})
+            failed.append(dtype)
+            continue
+
+        name_prefix, subfolder = _corp_doc_meta(dtype)
+        source_name = re.sub(r"^[^-]*-[A-Z0-9_]+-", "", src.DocumentName or "", count=1) or "document"
+        doc_name = f"{prechecking_id}{name_prefix}{source_name}"
+        aws_key = f"upload_doc/{apless}/{prechecking_id}/{subfolder}/{doc_name}"
+
+        try:
+            copied = copy_object(src.AWSKey, aws_key)
+        except (BotoCoreError, ClientError):
+            current_app.logger.exception("corporate carry-over copy failed for %s", src.AWSKey)
+            copied = False
+        if not copied:
+            report.append({"id": doc_id, "type": dtype, "result": "FAILED: S3 copy_object returned falsy", "src_key": src.AWSKey})
+            failed.append(dtype)
+            continue
+
+        db.session.execute(text("""
+            INSERT INTO TEMP_CUSTOMER_DOCUMENT
+                (Apless, DocumentName, OrganizationType, NumberOfDocuments,
+                 DocumentType, CreatedBy, CreatedDate, AWSKey, Prechecking_Id)
+            VALUES (:apless, :name, :org, '1', :dt, :user, GETDATE(), :key, :pid)
+        """), {"apless": apless, "name": doc_name, "org": org_type,
+               "dt": dtype, "user": username, "key": aws_key, "pid": prechecking_id})
+        report.append({"id": doc_id, "type": dtype, "result": "copied", "key": aws_key})
+
+    return failed
 
 @prechecking_corporate_bp.route("/lessee-types", methods=["GET"])
 @login_required
@@ -74,6 +193,7 @@ def submit_prechecking_corporate():
 
     directors = body.get("directors") or []
     wna_board = body.get("wna_board") or []
+    shareholders_raw = body.get("shareholders") or []
 
     if not prechecking_id:
         return jsonify({"success": False, "message": "prechecking_id is required"}), 400
@@ -108,6 +228,29 @@ def submit_prechecking_corporate():
         for key, label in required_director:
             if not (d.get(key) or "").strip() if isinstance(d.get(key), str) else not d.get(key):
                 errors[f"corp_board_{key}_error_{i}"] = f"{label} is required"
+
+    shareholders = []
+    seen_npwp: dict = {}
+    for i, sh in enumerate(shareholders_raw):
+        if not isinstance(sh, dict):
+            continue
+        sh_name = str(sh.get("name") or "").strip()
+        sh_npwp = str(sh.get("npwp_no") or "").strip()
+        if not sh_name and not sh_npwp:
+            continue
+        if not sh_name:
+            errors[f"shareholder_{i}_name"] = f"Name is required (Shareholder #{i + 1})"
+        elif len(sh_name) > _SH_NAME_MAX:
+            errors[f"shareholder_{i}_name"] = f"Name must be at most {_SH_NAME_MAX} characters (Shareholder #{i + 1})"
+        if not sh_npwp:
+            errors[f"shareholder_{i}_npwp_no"] = f"NPWP No is required (Shareholder #{i + 1})"
+        elif not sh_npwp.isdigit() or len(sh_npwp) > _SH_NPWP_MAX:
+            errors[f"shareholder_{i}_npwp_no"] = f"NPWP No must be numbers only, max {_SH_NPWP_MAX} digits (Shareholder #{i + 1})"
+        elif sh_npwp in seen_npwp:
+            errors[f"shareholder_{i}_npwp_no"] = f"NPWP No is already used by Shareholder #{seen_npwp[sh_npwp]} (Shareholder #{i + 1})"
+        else:
+            seen_npwp[sh_npwp] = i + 1
+        shareholders.append({"name": sh_name, "npwp_no": sh_npwp, "doc_token": sh.get("doc_token")})
 
     if errors:
         return jsonify({"success": False, "errors": errors}), 422
@@ -200,7 +343,7 @@ def submit_prechecking_corporate():
                     continue
 
                 ocr_row = db.session.execute(
-                    text("SELECT Id FROM TEMP_CAFLESS_OCR WITH(NOLOCK) WHERE Prechecking_Id=:pid AND NIK=:nik"),
+                    text("SELECT Id FROM TEMP_CAFLESS_OCR WITH(NOLOCK) WHERE Prechecking_Id=:pid AND NIK=:nik AND ISNULL(OCR_For, '') <> 'H'"),
                     {"pid": prechecking_id, "nik": nik},
                 ).fetchone()
                 director_id = ocr_row.Id if ocr_row else 0
@@ -265,10 +408,11 @@ def submit_prechecking_corporate():
             wna_rows = [w for w in wna_board if (w.get("id_card_no") or "").strip()]
             for w in wna_rows:
                 db.session.execute(text("""
-                    INSERT INTO TEMP_CAFLESS_OCR (Prechecking_Id, OCR_For, Citizen, NIK, Nama)
-                    VALUES (:pid, :ocr_for, 'WNA', :nik, :nama)
+                    INSERT INTO TEMP_CAFLESS_OCR (Prechecking_Id, OCR_For, Citizen, Id_Type, NIK, Nama)
+                    VALUES (:pid, :ocr_for, 'WNA', :id_type, :nik, :nama)
                 """), {
                     "pid": prechecking_id, "ocr_for": ocr_for,
+                    "id_type": (w.get("id_type") or "KITAS").strip().upper(),
                     "nik": w.get("id_card_no"), "nama": w.get("name") or "",
                 })
 
@@ -310,7 +454,7 @@ def submit_prechecking_corporate():
                         Provinsi=:province, Agama=:religion, Pekerjaan=:job,
                         Status_Perkawinan=:marital, Kewarnegaraan=:citizen2,
                         Foto=:photo, Tanda_Tangan=:sign, UpdatedDate=GETDATE()
-                    WHERE Prechecking_Id=:pid AND NIK=:nik
+                    WHERE Prechecking_Id=:pid AND NIK=:nik AND ISNULL(OCR_For, '') <> 'H'
                 """), {
                     "ocr_for": ocr_for,
                     "citizen": d.get("citizen") or "WNI",
@@ -342,7 +486,7 @@ def submit_prechecking_corporate():
                 if not nik:
                     continue
                 ocr_row = db.session.execute(
-                    text("SELECT Id FROM TEMP_CAFLESS_OCR WITH(NOLOCK) WHERE Prechecking_Id=:pid AND NIK=:nik"),
+                    text("SELECT Id FROM TEMP_CAFLESS_OCR WITH(NOLOCK) WHERE Prechecking_Id=:pid AND NIK=:nik AND ISNULL(OCR_For, '') <> 'H'"),
                     {"pid": prechecking_id, "nik": nik},
                 ).fetchone()
                 director_ids[nik] = ocr_row.Id if ocr_row else 0
@@ -411,32 +555,43 @@ def submit_prechecking_corporate():
             for w in wna_rows:
                 nik = w.get("id_card_no")
                 nama = w.get("name") or ""
+                id_type = (w.get("id_type") or "KITAS").strip().upper()
 
                 exists_row = db.session.execute(
                     text("""
                         SELECT COUNT(1) AS cnt FROM TEMP_CAFLESS_OCR
-                        WHERE Prechecking_Id=:pid AND NIK=:nik
+                        WHERE Prechecking_Id=:pid AND NIK=:nik AND ISNULL(OCR_For, '') <> 'H'
                     """),
                     {"pid": prechecking_id, "nik": nik},
                 ).fetchone()
 
                 if exists_row and exists_row.cnt == 0:
                     db.session.execute(text("""
-                        INSERT INTO TEMP_CAFLESS_OCR (OCR_For, Citizen, Nama, Prechecking_Id, NIK)
-                        VALUES (:ocr_for, 'WNA', :nama, :pid, :nik)
-                    """), {"ocr_for": ocr_for, "nama": nama, "pid": prechecking_id, "nik": nik})
+                        INSERT INTO TEMP_CAFLESS_OCR (OCR_For, Citizen, Id_Type, Nama, Prechecking_Id, NIK)
+                        VALUES (:ocr_for, 'WNA', :id_type, :nama, :pid, :nik)
+                    """), {"ocr_for": ocr_for, "id_type": id_type, "nama": nama, "pid": prechecking_id, "nik": nik})
                 else:
                     db.session.execute(text("""
                         UPDATE TEMP_CAFLESS_OCR SET
-                            OCR_For=:ocr_for, Citizen='WNA', Nama=:nama, UpdatedDate=GETDATE()
-                        WHERE Prechecking_Id=:pid AND NIK=:nik
-                    """), {"ocr_for": ocr_for, "nama": nama, "pid": prechecking_id, "nik": nik})
+                            OCR_For=:ocr_for, Citizen='WNA', Id_Type=:id_type, Nama=:nama, UpdatedDate=GETDATE()
+                        WHERE Prechecking_Id=:pid AND NIK=:nik AND ISNULL(OCR_For, '') <> 'H'
+                    """), {"ocr_for": ocr_for, "id_type": id_type, "nama": nama, "pid": prechecking_id, "nik": nik})
 
             db.session.execute(text("""
                 UPDATE TEMP_CUSTOMER_DOCUMENT
                 SET OrganizationType = (SELECT LesseeType FROM TEMP_CAFLESS WHERE Prechecking_Id = :pid)
                 WHERE Prechecking_Id = :pid
             """), {"pid": prechecking_id})
+
+        _save_shareholders(prechecking_id, shareholders)
+
+        _retype_member_docs(prechecking_id, directors, wna_board, shareholders)
+
+        carry_report: list = []
+        documents_failed = _copy_carried_documents(
+            prechecking_id, apless, lessee_type, body.get("carried_documents"), username,
+            report=carry_report,
+        )
 
         existing_approval = db.session.execute(
             text("SELECT Id FROM DocumentApproval WITH(NOLOCK) WHERE DocumentNumber = :pid"),
@@ -488,7 +643,10 @@ def submit_prechecking_corporate():
         })
 
         db.session.commit()
-        return jsonify({"success": True, "prechecking_id": prechecking_id, "apless": apless})
+        return jsonify({"success": True, "prechecking_id": prechecking_id, "apless": apless,
+                        "documents_failed": documents_failed,
+                        "carry_report": carry_report,
+                        "carried_received": len(body.get("carried_documents") or [])})
 
     except Exception:
         db.session.rollback()
@@ -518,6 +676,11 @@ def _corp_doc_meta(document_type: str):
         token = m.group(1)
         return (f"-WNA_CORP_BOARD-{token}", "DATA_DIRI/KTP_PENGURUS")
 
+    m = re.match(r"^shareholder-npwp_([A-Za-z0-9]+)$", document_type)
+    if m:
+        token = m.group(1)
+        return (f"-SHAREHOLDER_NPWP-{token}-", "DATA_DIRI/SHAREHOLDER_NPWP")
+
     return (f"-{document_type.upper().replace('-', '_')}-", document_type)
 
 _ORG_TYPE_MAP = {
@@ -543,7 +706,7 @@ def _cleanup_ocr_for_nik(prechecking_id: str, nik: str) -> None:
     ocr_row = db.session.execute(
         text("""
             SELECT Id FROM TEMP_CAFLESS_OCR WITH(NOLOCK)
-            WHERE Prechecking_Id = :pid AND NIK = :nik
+            WHERE Prechecking_Id = :pid AND NIK = :nik AND ISNULL(OCR_For, '') <> 'H'
         """),
         {"pid": prechecking_id, "nik": nik},
     ).fetchone()
