@@ -39,16 +39,9 @@ def get_group_report():
             FROM CLFGROUP a WITH(NOLOCK)
                 LEFT JOIN CAFLESS b WITH(NOLOCK) ON a.GrpCode = b.GrpCode
                 OUTER APPLY (
-                    SELECT SUM(lp.OUTS_PRINC) AS OUTS_PRINC
-                    FROM CLFCONT cc WITH(NOLOCK)
-                        INNER JOIN CAFCONT bc WITH(NOLOCK) ON cc.APPL_NO = bc.APPL_NO
-                    OUTER APPLY (
-                        SELECT TOP 1 OUTS_PRINC
-                        FROM CLFPAY WITH(NOLOCK)
-                        WHERE LEASE_NO = cc.LEASE_NO
-                        ORDER BY DATE_PAY DESC
-                    ) lp
-                    WHERE bc.APLESS = b.APLESS
+                    SELECT SUM(vco.outstanding) AS OUTS_PRINC
+                    FROM V_CustomerOutstanding vco WITH(NOLOCK)
+                    WHERE vco.APLESS = b.APLESS
                 ) latest_pay
             WHERE a.GrpName LIKE :grpname
               AND a.FLGDEL = '0'
@@ -74,16 +67,9 @@ def get_group_report():
             FROM CLFGROUP a WITH(NOLOCK)
                 LEFT JOIN CAFLESS b WITH(NOLOCK) ON a.GrpCode = b.GrpCode
                 OUTER APPLY (
-                    SELECT SUM(lp.OUTS_PRINC) AS OUTS_PRINC
-                    FROM CLFCONT cc WITH(NOLOCK)
-                        INNER JOIN CAFCONT bc WITH(NOLOCK) ON cc.APPL_NO = bc.APPL_NO
-                    OUTER APPLY (
-                        SELECT TOP 1 OUTS_PRINC
-                        FROM CLFPAY WITH(NOLOCK)
-                        WHERE LEASE_NO = cc.LEASE_NO
-                        ORDER BY DATE_PAY DESC
-                    ) lp
-                    WHERE bc.APLESS = b.APLESS
+                    SELECT SUM(vco.outstanding) AS OUTS_PRINC
+                    FROM V_CustomerOutstanding vco WITH(NOLOCK)
+                    WHERE vco.APLESS = b.APLESS
                 ) latest_pay
             WHERE a.GrpName LIKE :grpname
               AND a.FLGDEL = '0'
@@ -125,16 +111,9 @@ def export_group_report():
             FROM CLFGROUP a WITH(NOLOCK)
                 LEFT JOIN CAFLESS b WITH(NOLOCK) ON a.GrpCode = b.GrpCode
                 OUTER APPLY (
-                    SELECT SUM(lp.OUTS_PRINC) AS OUTS_PRINC
-                    FROM CLFCONT cc WITH(NOLOCK)
-                        INNER JOIN CAFCONT bc WITH(NOLOCK) ON cc.APPL_NO = bc.APPL_NO
-                    OUTER APPLY (
-                        SELECT TOP 1 OUTS_PRINC
-                        FROM CLFPAY WITH(NOLOCK)
-                        WHERE LEASE_NO = cc.LEASE_NO
-                        ORDER BY DATE_PAY DESC
-                    ) lp
-                    WHERE bc.APLESS = b.APLESS
+                    SELECT SUM(vco.outstanding) AS OUTS_PRINC
+                    FROM V_CustomerOutstanding vco WITH(NOLOCK)
+                    WHERE vco.APLESS = b.APLESS
                 ) latest_pay
             WHERE a.GrpName LIKE :grpname
               AND a.FLGDEL = '0'

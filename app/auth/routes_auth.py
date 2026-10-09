@@ -2,7 +2,7 @@ from app import db
 from flask import Blueprint, request, jsonify, session, current_app
 from datetime import datetime, timedelta
 from config import is_dev_login_bypass_enabled
-from app.auth.active_sessions import set_active_session, clear_active_session
+from app.auth.active_sessions import set_active_session, get_active_session, clear_active_session
 
 import secrets
 import requests
@@ -276,6 +276,12 @@ def verify_pin():
 def user_info():
     if not session.get('logged_in'):
         return jsonify({"authenticated": False}), 200
+
+    _uname = session.get('username')
+    _tok = session.get('session_token')
+    if not _uname or not _tok or get_active_session(_uname) != _tok:
+        session.clear()
+        return jsonify({"authenticated": False, "reason": "session_replaced"}), 200
 
     if session.get('fullname') and session.get('branch_name'):
         return jsonify({

@@ -285,26 +285,19 @@ def list_entries():
 @watchlist_bp.route('/watchlist/reasons')
 @login_required
 def get_reasons():
-    current = (request.args.get('current') or '').strip()
-    values = list(ENTRY_REASONS)
-    if current and current not in values:
-        values.append(current)
-
-    placeholders = ", ".join(f":v{i}" for i in range(len(values)))
-    params = {f"v{i}": v for i, v in enumerate(values)}
-
     try:
-        rows = db.session.execute(text(f"""
+        rows = db.session.execute(text("""
             SELECT VALUE, DESC_VALUE
             FROM MSTCOMBO WITH(NOLOCK)
-            WHERE CAT_VALUE = 'BLACKLIST_CATEGORY' AND VALUE IN ({placeholders})
+            WHERE CAT_VALUE = 'BLACKLIST_CATEGORY'
+              AND (VALUE IN ('3','6','7','8') OR VALUE = :cur)
             ORDER BY VALUE
-        """), params).fetchall()
+        """), {'cur': (request.args.get('current') or '').strip() or '-'}).fetchall()
 
         return jsonify([{
             'value': (r.VALUE or '').strip(),
             'label': r.DESC_VALUE,
-            'disabled': (r.VALUE or '').strip() in ('6', '7') or (r.VALUE or '').strip() not in ENTRY_REASONS,
+            'disabled': False,
         } for r in rows])
     except Exception:
         current_app.logger.exception('Watchlist reasons error')
@@ -432,10 +425,13 @@ def save_entry():
     reason_other = (body.get('reason_other') or '').strip()
     remark = (body.get('remark') or '').strip()
     create_user = session.get('username', '')
+    members = body.get('members', [])
 
     errors, birth, es_birth = _validate_core(body, cust_type, reason)
     if cust_type == 'PT' and not npwp:
         errors.append('NPWP must not be empty')
+    if cust_type == 'PT':
+        errors += _validate_members(members)
     if errors:
         return jsonify({'success': False, 'errors': errors}), 422
 
@@ -517,6 +513,15 @@ def save_entry():
         if alias_name and cust_type == 'PR':
             _insert_alias(no, alias_name)
 
+        if cust_type == 'PT':
+            member_apless = apless or _lookup_apless(name, address)
+            file_errors = _save_members(
+                name, npwp, cust_type, members, request.files, member_apless
+            )
+            if file_errors:
+                db.session.rollback()
+                return jsonify({'success': False, 'errors': file_errors}), 422
+
         db.session.commit()
         return jsonify({'success': True, 'no': no}), 201
 
@@ -551,6 +556,16 @@ def get_detail():
         npwp = row.NPWP or ''
         category = str(row.Reason_Category or '').strip()
 
+        reason_label = ''
+        if category:
+            reason_label = db.session.execute(
+                text("""
+                    SELECT TOP 1 DESC_VALUE FROM MSTCOMBO WITH(NOLOCK)
+                    WHERE CAT_VALUE = 'BLACKLIST_CATEGORY' AND VALUE = :v
+                """),
+                {'v': category}
+            ).scalar() or ''
+
         files = db.session.execute(text("""
             SELECT File_Nm, File_Ext, File_Nm + '.' + File_Ext AS fname
             FROM CLFCONT_FILE WITH(NOLOCK)
@@ -574,6 +589,7 @@ def get_detail():
             'contact_address': row.ContactAddress or '',
             'group_code': row.Contact_Group or '',
             'reason_category': category,
+            'reason_label': reason_label,
             'reason_other': (row.Reason_Other or '').strip(),
             'remark': row.Reason or '',
             'problem_since': fmt_date(row.Problem_Since, "%Y-%m-%d") if row.Problem_Since else '',
@@ -630,7 +646,7 @@ def update_entry():
         errors, birth, es_birth = _validate_core(
             {**d, 'id_card': d.get('id_card')}, cust_type, reason_category
         )
-        if cust_type == 'PT' and reason_category != CORSEC_REASON:
+        if cust_type == 'PT':
             errors += _validate_members(members)
         if errors:
             return jsonify({'errors': errors}), 422
@@ -685,7 +701,7 @@ def update_entry():
                 'reason_other': (d.get('reason_other') or '').strip(), 'npwp': npwp, 'no': no,
             })
 
-        if cust_type == 'PT' and reason_category != CORSEC_REASON:
+        if cust_type == 'PT':
             apless = existing.apless or _lookup_apless(name, address)
             file_errors = _save_members(
                 name, npwp, cust_type, members, request.files, apless,

@@ -1,14 +1,23 @@
+from datetime import datetime, time, timedelta, timezone
 from flask import Blueprint, jsonify, request, current_app, session
 from app import db
 from app.auth.decorators import login_required
 from sqlalchemy import text
 import re
-import httpx
 
 insurance_entry_bp = Blueprint('insurance_entry', __name__, url_prefix='/InsuranceEntry')
 
+WIB = timezone(timedelta(hours=7))
+
 def _clean_lease(lease_no: str) -> str:
-    return re.sub(r'\s+', '', lease_no)
+    return re.sub(r'\s+', '', lease_no or '')
+
+def _can_add() -> bool:
+    return str(session.get('branchcode') or '').strip() == '100'
+
+def _within_save_window() -> bool:
+    now = datetime.now(WIB).time()
+    return time(6, 0, 0) <= now <= time(12, 0, 0)
 
 @insurance_entry_bp.route('/companies')
 @login_required
@@ -30,8 +39,8 @@ def get_list():
     ins_cd     = request.args.get('ins_cd',     '00')
     search_val = request.args.get('search_val', '')
     is_failed  = request.args.get('is_failed',  0, type=int)
-    page       = request.args.get('page',       1, type=int)
-    limit      = request.args.get('limit',      25, type=int)
+    page       = max(request.args.get('page',  1, type=int), 1)
+    limit      = min(max(request.args.get('limit', 25, type=int), 1), 200)
 
     try:
         result = db.session.execute(
@@ -56,7 +65,7 @@ def get_list():
         start     = (page - 1) * limit
         paginated = all_rows[start:start + limit]
 
-        return jsonify({"data": paginated, "total": total})
+        return jsonify({"data": paginated, "total": total, "can_add": _can_add()})
 
     except Exception:
         current_app.logger.exception("insurance list error")
@@ -103,15 +112,21 @@ def save_insurance():
     array_data = body.get('arrayData', [])
     username   = session.get('username', 'SYSTEM')
 
-    if not array_data:
+    if not _can_add():
+        return jsonify({"error": "Only branch 100 can add entries"}), 403
+    if not _within_save_window():
+        return jsonify({"error": "Save data hanya saat diantara jam 6 dan 12 WIB!"}), 403
+
+    leases = [_clean_lease(item.get('lease_no', '')) for item in array_data if isinstance(item, dict)]
+    leases = [l for l in leases if l]
+    if not leases:
         return jsonify({"error": "No data provided"}), 400
 
     try:
         values_clauses = []
         params: dict = {}
 
-        for i, item in enumerate(array_data):
-            lease_no = _clean_lease(item.get('lease_no', ''))
+        for i, lease_no in enumerate(leases):
             k_lease  = f"lease_{i}"
             k_user   = f"user_{i}"
             values_clauses.append(f"(:{k_lease}, GETDATE(), :{k_user})")
@@ -125,8 +140,6 @@ def save_insurance():
         db.session.execute(text(insert_sql), params)
         db.session.commit()
 
-        _fire_h2h_requests(array_data)
-
         return jsonify({"success": True})
 
     except Exception:
@@ -134,24 +147,6 @@ def save_insurance():
         current_app.logger.exception("save insurance error")
         return jsonify({"error": "Failed to save"}), 500
     
-def _fire_h2h_requests(array_data: list[dict]) -> None:
-    h2h_urls = current_app.config.get("INSURANCE_H2H_URLS", {})
-    verify_ssl = current_app.config.get("INSURANCE_H2H_VERIFY_SSL", False)
-    timeout = current_app.config.get("INSURANCE_H2H_TIMEOUT", 30)
-
-    with httpx.Client(verify=verify_ssl, timeout=timeout) as client:
-        for item in array_data:
-            ins_cd   = item.get('ins_cd', '').strip()
-            lease_no = _clean_lease(item.get('lease_no', ''))
-            url      = h2h_urls.get(ins_cd)
-            if not url:
-                current_app.logger.warning("Unknown or unconfigured ins_cd %s — skipping H2H call", ins_cd)
-                continue
-            try:
-                client.post(url, data={"lease_no": lease_no})
-            except Exception:
-                current_app.logger.exception("H2H call failed for lease_no=%s", lease_no)
-
 @insurance_entry_bp.route('/cancel', methods=['POST'])
 @login_required
 def cancel_insurance():

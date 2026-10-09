@@ -566,7 +566,7 @@ def _bank_rows(supp: str, acc_type: str) -> list:
         "resident_status":        r["ResidentStatus"]  or "",
         "resident_status_desc":   r["ResidentDesc"]    or "",
         "acc_type":               acc_type,
-        "is_default":             str(r["Default"] or "0") == "1",
+        "is_default":             str(r["Default"]).strip().lower() in ("1", "true"),  # [Default] is a bit -> pyodbc True/False
         "last_update":            _fd(r["UpdateDate"]),
     } for r in rows]
 
