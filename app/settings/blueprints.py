@@ -150,6 +150,7 @@ BLUEPRINT_REGISTRY: List[BlueprintEntry] = [
     # ── E-Pay / Virtual Account
     BlueprintEntry("app.espay.routes_espay_va",                                                 	    "va_bp",								 "/va"),
     BlueprintEntry("app.espay.routes_espay_invoice",                                                    "espay_bp",								 "/Espay"),
+    BlueprintEntry("app.espay.routes_settle_espay",                                                     "settle_espay_bp",						 "/SettleEspay"),
 
     # ── OJK
     BlueprintEntry("app.ojk.routes_form10",                                                  			"form10_bp",							 "/Form10"),
