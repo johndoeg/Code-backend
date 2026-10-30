@@ -121,7 +121,8 @@ INNER JOIN (
 
 _LIST_SELECT = f"""
 SELECT a.APPL_NO, a.Cons_Leas, b.LESSEE_NM, a.TENOR, a.DECLRATE, a.CREATE_DATE,
-       c.fullname AS cmo, h.BRAND_NM, i.TYPE_NM, v.Net_Finance, k.fullname AS approver, d.tot_outs
+       c.fullname AS cmo, h.BRAND_NM, i.TYPE_NM, v.Net_Finance, k.fullname AS approver, d.tot_outs,
+       a.APLESS, a.HAS_GUARANTOR, b.LESSEE_TP, g.SUPP, LTRIM(RTRIM(g.[CONDITION])) AS CONDITION
 FROM CAFCONT a WITH (NOLOCK)
     LEFT JOIN CAFLESS b WITH (NOLOCK) ON a.APLESS = b.APLESS
     LEFT JOIN APP_USRMST c WITH (NOLOCK) ON a.CMO = c.EMPLOYEE_ID
@@ -182,6 +183,21 @@ def _fetch_revisions(appl_nos: list[str]) -> dict[str, str]:
     )
     return {r['NEWAPPL_NO']: f"R{r['REVISI']}" for r in rows}
 
+def _edit_link_params(r: dict) -> dict:
+    cons_leas = r.get('Cons_Leas')
+    fin_type = 1 if cons_leas == 'C' else 2 if cons_leas == 'L' else None
+    guarantor = 2 if r.get('HAS_GUARANTOR') == '1' else 1
+    ind_cor = 2 if r.get('LESSEE_TP') == 'PT' else 1
+    c2c = 1 if str(r.get('SUPP')) == '999999' else 0
+    condition = (r.get('CONDITION') or '').strip()
+    new_car = 2 if condition == 'NEW' else 1
+
+    return {
+        'id1': fin_type, 'id2': ind_cor, 'id3': 1, 'id4': guarantor, 'id5': new_car,
+        'id6': 'Edit', 'id7': r.get('TENOR'), 'id8': c2c,
+        'apless': r.get('APLESS'), 'applno': r.get('APPL_NO'),
+    }
+
 def _row_to_detail(r: dict, no: int, revision: str) -> dict:
     create_date = r.get('CREATE_DATE')
     brand = (r.get('BRAND_NM') or '').strip()
@@ -200,6 +216,7 @@ def _row_to_detail(r: dict, no: int, revision: str) -> dict:
         'cmo': r.get('cmo') or '-',
         'status': r.get('approver') or '-',
         'is_revision': bool(revision),
+        'edit_link_params': _edit_link_params(r),
     }
 
 _GRANDTOTAL_BASE = """

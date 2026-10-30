@@ -21,6 +21,8 @@ _FONT_HEADER = Font(name="Tahoma", size=10, bold=True)
 _FONT_DATA   = Font(name="Tahoma", size=10)
 _FILL_HEADER = PatternFill("solid", fgColor="D9E1F2")
 
+MAX_PAGE_SIZE = 200
+
 def _apply(cell, font=None, alignment=None, border=None, fill=None):
     if font:      cell.font      = font
     if alignment: cell.alignment = alignment
@@ -44,6 +46,14 @@ def _serialize_rows(rows) -> list[dict]:
             "cmo":       r["Cmo"]       or "",
         })
     return result
+
+def _fetch_all(branch_cd: str) -> list[dict]:
+    today = date.today().strftime("%Y-%m-%d")
+    rows = db.session.execute(
+        text("EXEC USP_AutoDeleteContractList :today_date, :branch"),
+        {"today_date": today, "branch": branch_cd},
+    ).mappings().all()
+    return _serialize_rows(rows)
 
 def _build_excel(rows: list[dict], branch_name: str) -> bytes:
     today_str = datetime.now().strftime("%d %B %Y")
@@ -114,13 +124,13 @@ def _build_excel(rows: list[dict], branch_name: str) -> bytes:
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)
-    
+
     return buf.read()
 
 @pending_contract_delete_bp.route("/PendingContractDelete/branches")
 @login_required
 def get_branches():
-  
+
     try:
         user_branch_cd = session.get("branchcode", "")
         admin = _is_admin()
@@ -174,20 +184,33 @@ def get_branches():
 @pending_contract_delete_bp.route("/PendingContractDelete/data")
 @login_required
 def get_data():
-   
+
     branch_cd = request.args.get("branch_cd", "").strip()
     if not branch_cd:
         return jsonify({"error": "branch_cd is required"}), 400
 
-    today = date.today().strftime("%Y-%m-%d")
+    want_all = request.args.get("all", "").strip().lower() in ("1", "true", "yes")
+
+    page  = max(request.args.get("page", 1, type=int) or 1, 1)
+    limit = request.args.get("limit", 25, type=int) or 25
+    limit = min(max(limit, 1), MAX_PAGE_SIZE)
 
     try:
-        rows = db.session.execute(
-            text("EXEC USP_AutoDeleteContractList :today_date, :branch"),
-            {"today_date": today, "branch": branch_cd},
-        ).mappings().all()
+        all_rows = _fetch_all(branch_cd)
+        total    = len(all_rows)
 
-        return jsonify(_serialize_rows(rows))
+        if want_all:
+            page_rows = all_rows
+        else:
+            start = (page - 1) * limit
+            page_rows = all_rows[start:start + limit]
+
+        return jsonify({
+            "rows":  page_rows,
+            "total": total,
+            "page":  1 if want_all else page,
+            "limit": total if want_all else limit,
+        })
 
     except Exception:
         current_app.logger.exception("Pending Contract Delete data fetch error")
@@ -196,12 +219,10 @@ def get_data():
 @pending_contract_delete_bp.route("/PendingContractDelete/excel")
 @login_required
 def export_excel():
-   
+
     branch_cd = request.args.get("branch_cd", "").strip()
     if not branch_cd:
         return jsonify({"error": "branch_cd is required"}), 400
-
-    today = date.today().strftime("%Y-%m-%d")
 
     try:
         branch_row = db.session.execute(
@@ -210,12 +231,7 @@ def export_excel():
         ).mappings().first()
         branch_name = branch_row["BRANCH_NAME"] if branch_row else branch_cd
 
-        rows = db.session.execute(
-            text("EXEC USP_AutoDeleteContractList :today_date, :branch"),
-            {"today_date": today, "branch": branch_cd},
-        ).mappings().all()
-
-        xlsx_bytes = _build_excel(_serialize_rows(rows), branch_name)
+        xlsx_bytes = _build_excel(_fetch_all(branch_cd), branch_name)
 
         resp = make_response(xlsx_bytes)
         resp.headers["Content-Type"] = (

@@ -21,13 +21,15 @@ _FONT_HEADER = Font(name="Tahoma", size=10, bold=True)
 _FONT_DATA   = Font(name="Tahoma", size=10)
 _FILL_HEADER = PatternFill("solid", fgColor="D9E1F2")
 
+MAX_PAGE_SIZE = 200
+
 def _apply(cell, font=None, alignment=None, border=None, fill=None):
     if font:      cell.font      = font
     if alignment: cell.alignment = alignment
     if border:    cell.border    = border
     if fill:      cell.fill      = fill
 
-_QUERY = text("""
+_BASE_SELECT = """
     SELECT
         d.LESSEE_NM            AS cust_name,
         e.employee_fullname    AS emp_name,
@@ -77,8 +79,28 @@ _QUERY = text("""
     WHERE b.AdmSts = '1'
         AND a.DateTrans IS NULL
         AND (a.branch_cd = :branch_cd OR :branch_cd = '000')
-        
-    ORDER BY AdmDate
+"""
+
+_PAGE_QUERY = text(f"""
+    WITH base AS (
+        {_BASE_SELECT}
+    )
+    SELECT
+        base.*,
+        COUNT(*)              OVER() AS total_rows,
+        SUM(base.Net_Finance) OVER() AS total_net_finance
+    FROM base
+    ORDER BY base.AdmDate
+    OFFSET :offset ROWS FETCH NEXT :limit ROWS ONLY
+""")
+
+_ALL_QUERY = text(f"""
+    WITH base AS (
+        {_BASE_SELECT}
+    )
+    SELECT base.*
+    FROM base
+    ORDER BY base.AdmDate
 """)
 
 def _serialize_rows(rows) -> list[dict]:
@@ -175,13 +197,13 @@ def _build_excel(rows: list[dict], branch_name: str) -> bytes:
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)
-    
+
     return buf.read()
 
 @undisburse_contract_bp.route("/UndisbursedContract/branches")
 @login_required
 def get_branches():
-   
+
     try:
         rows = db.session.execute(
             text("SELECT BRANCH_CD, BRANCH_NAME FROM umfbranch WITH(NOLOCK) ORDER BY BRANCH_NAME")
@@ -197,14 +219,31 @@ def get_branches():
 @undisburse_contract_bp.route("/UndisbursedContract/data")
 @login_required
 def get_data():
-   
+
     branch_cd = request.args.get("branch_cd", "").strip()
     if not branch_cd:
         return jsonify({"error": "branch_cd is required"}), 400
 
+    page  = max(request.args.get("page", 1, type=int) or 1, 1)
+    limit = request.args.get("limit", 25, type=int) or 25
+    limit = min(max(limit, 1), MAX_PAGE_SIZE)
+
     try:
-        rows = db.session.execute(_QUERY, {"branch_cd": branch_cd}).mappings().all()
-        return jsonify(_serialize_rows(rows))
+        rows = db.session.execute(
+            _PAGE_QUERY,
+            {"branch_cd": branch_cd, "offset": (page - 1) * limit, "limit": limit},
+        ).mappings().all()
+
+        total     = int(rows[0]["total_rows"]) if rows else 0
+        total_nf  = float(rows[0]["total_net_finance"] or 0) if rows else 0.0
+
+        return jsonify({
+            "rows":              _serialize_rows(rows),
+            "total":             total,
+            "total_net_finance": total_nf,
+            "page":              page,
+            "limit":             limit,
+        })
     except Exception:
         current_app.logger.exception("Undisburse Contract data fetch error")
         return jsonify({"error": "Failed to load data"}), 500
@@ -212,7 +251,7 @@ def get_data():
 @undisburse_contract_bp.route("/UndisbursedContract/excel")
 @login_required
 def export_excel():
-    
+
     branch_cd = request.args.get("branch_cd", "").strip()
     if not branch_cd:
         return jsonify({"error": "branch_cd is required"}), 400
@@ -224,7 +263,7 @@ def export_excel():
         ).mappings().first()
         branch_name = branch_row["BRANCH_NAME"] if branch_row else branch_cd
 
-        rows = db.session.execute(_QUERY, {"branch_cd": branch_cd}).mappings().all()
+        rows = db.session.execute(_ALL_QUERY, {"branch_cd": branch_cd}).mappings().all()
         xlsx_bytes = _build_excel(_serialize_rows(rows), branch_name)
 
         resp = make_response(xlsx_bytes)

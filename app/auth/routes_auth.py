@@ -7,7 +7,10 @@ from app.auth.active_sessions import set_active_session, get_active_session, cle
 import secrets
 import requests
 import threading
+import time
 import uuid
+
+from requests.adapters import HTTPAdapter
 
 auth_bp = Blueprint('auth', __name__)
 
@@ -15,6 +18,12 @@ PIN_LENGTH = 6
 PIN_EXPIRY_MINUTES = 5
 MAX_PIN_ATTEMPTS = 3
 OTP_REQUEST_TYPE = 'CAM'
+
+TELEGRAM_TIMEOUT = (3.05, 5)
+TELEGRAM_SLOW_WARN_SECONDS = 3.0
+
+_telegram_http = requests.Session()
+_telegram_http.mount("https://", HTTPAdapter(pool_connections=4, pool_maxsize=8))
 
 def _client_ip() -> str:
     return request.headers.get('X-Forwarded-For', request.remote_addr) or ''
@@ -64,8 +73,9 @@ def _send_telegram_pin(chat_id: str, pin: str, expires_in_minutes: int) -> bool:
         current_app.logger.error("Telegram send skipped: missing bot token or chat_id")
         return False
 
+    started = time.perf_counter()
     try:
-        resp = requests.post(
+        resp = _telegram_http.post(
             f"https://api.telegram.org/bot{bot_token}/sendMessage",
             json={
                 "chat_id": chat_id,
@@ -75,12 +85,27 @@ def _send_telegram_pin(chat_id: str, pin: str, expires_in_minutes: int) -> bool:
                     f"{'s' if expires_in_minutes != 1 else ''}."
                 ),
             },
-            timeout=10,
+            timeout=TELEGRAM_TIMEOUT,
         )
         return resp.ok
     except Exception:
         current_app.logger.exception("Telegram send failed")
         return False
+    finally:
+        elapsed = time.perf_counter() - started
+        if elapsed >= TELEGRAM_SLOW_WARN_SECONDS:
+            current_app.logger.warning("Telegram send took %.2fs", elapsed)
+
+def _discard_otp(otp_id) -> None:
+    try:
+        db.session.execute(
+            db.text("DELETE FROM Datalog..OTP WHERE ID = :otp_id"),
+            {"otp_id": otp_id},
+        )
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        current_app.logger.exception("Failed to discard undelivered OTP %s", otp_id)
 
 @auth_bp.route('/login', methods=['POST'])
 def login():
@@ -173,6 +198,7 @@ def login():
         expires_in_minutes = max(1, round(expires_in_seconds / 60))
 
         if not _send_telegram_pin(telegram_chat_id, pin, expires_in_minutes):
+            _discard_otp(otp_id)
             _insert_audit_log(db_username, "Login failed - Telegram send failed")
             return jsonify({"message": "Failed to send PIN via Telegram. Please try again."}), 500
 

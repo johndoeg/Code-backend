@@ -116,11 +116,47 @@ def _exec_sp_approver(start_date: Optional[date], end_date: Optional[date], bran
         [start_date.isoformat() if start_date else '', end_date.isoformat() if end_date else '', branch_cd, mode],
     )
 
-def _row_to_detail(r: dict, no: int) -> dict:
+def _edit_link_params(r: dict) -> dict:
+    cons_leas = r.get('Cons_Leas')
+    fin_type = 1 if cons_leas == 'C' else 2 if cons_leas == 'L' else None
+    guarantor = 2 if r.get('HAS_GUARANTOR') == '1' else 1
+    ind_cor = 2 if r.get('LESSEE_TP') == 'PT' else 1
+    c2c = 1 if str(r.get('SUPP')) == '999999' else 0
+    condition = (r.get('CONDITION') or '').strip()
+    new_car = 2 if condition == 'NEW' else 1
+
+    return {
+        'id1': fin_type, 'id2': ind_cor, 'id3': 1, 'id4': guarantor, 'id5': new_car,
+        'id6': 'Edit', 'id7': r.get('TENOR'), 'id8': c2c,
+        'apless': r.get('APLESS'), 'applno': r.get('APPL_NO'),
+    }
+
+def _fetch_link_extra(appl_nos: list[str]) -> dict[str, dict]:
+    result: dict[str, dict] = {}
+    unique = list(dict.fromkeys(appl_nos))
+    for i in range(0, len(unique), 1000):
+        chunk = unique[i:i + 1000]
+        placeholders = ','.join('?' for _ in chunk)
+        rows = _exec_rows(
+            f"""
+            SELECT a.APPL_NO, a.APLESS, a.TENOR, a.HAS_GUARANTOR, b.LESSEE_TP, g.SUPP,
+                   LTRIM(RTRIM(g.[CONDITION])) AS CONDITION
+            FROM CAFCONT a WITH (NOLOCK)
+                LEFT JOIN CAFLESS b WITH (NOLOCK) ON a.APLESS = b.APLESS
+                LEFT JOIN CAFEQUIP g WITH (NOLOCK) ON a.APPL_NO = g.APPL_NO
+            WHERE a.APPL_NO IN ({placeholders})
+            """,
+            chunk,
+        )
+        for row in rows:
+            result.setdefault(row['APPL_NO'], row)
+    return result
+
+def _row_to_detail(r: dict, no: int, link_extra: Optional[dict] = None) -> dict:
     revisi = r.get('Revisi')
     revision_suffix = f"R{revisi}" if revisi else ''
     appr_date = r.get('APPR_DATE')
-    return {
+    detail = {
         'no': no,
         'branch_name': r.get('BRANCH_NAME') or '-',
         'customer_name': r.get('LESSEE_NM') or '-',
@@ -136,15 +172,31 @@ def _row_to_detail(r: dict, no: int) -> dict:
         'total_outstanding': _num(r.get('TotOut')),
         'cmo': r.get('CMO') or '-',
     }
+    if link_extra is not None:
+        detail['edit_link_params'] = _edit_link_params({**r, **link_extra})
+    return detail
 
-def _fetch_report(start_date: Optional[date], end_date: Optional[date], branch_cd: str) -> dict:
+def _fetch_report(start_date: Optional[date], end_date: Optional[date], branch_cd: str,
+                  with_links: bool = False) -> dict:
+    raw_sections = [
+        (role_code, role_label, _exec_sp_approver(start_date, end_date, branch_cd, role_code))
+        for role_code, role_label in _APPROVER_ROLES
+    ]
+
+    link_extra: dict[str, dict] = {}
+    if with_links:
+        appl_nos = [r['APPL_NO'] for _, _, rows in raw_sections for r in rows if r.get('APPL_NO')]
+        link_extra = _fetch_link_extra(appl_nos)
+
     sections = []
-    for role_code, role_label in _APPROVER_ROLES:
-        rows = _exec_sp_approver(start_date, end_date, branch_cd, role_code)
+    for role_code, role_label, rows in raw_sections:
         sections.append({
             'role_code': role_code,
             'role_label': role_label,
-            'rows': [_row_to_detail(r, i) for i, r in enumerate(rows, start=1)],
+            'rows': [
+                _row_to_detail(r, i, link_extra.get(r.get('APPL_NO'), {}) if with_links else None)
+                for i, r in enumerate(rows, start=1)
+            ],
         })
 
     total_rows = _exec_sp_approver(start_date, end_date, branch_cd, 'TOTAL')
@@ -166,7 +218,7 @@ def get_list():
 
     scope = _resolve_branch(requested_branch)
     try:
-        result = _fetch_report(start_date, end_date, scope['search_branch'])
+        result = _fetch_report(start_date, end_date, scope['search_branch'], with_links=True)
         return jsonify({**result, 'disabled': scope['disabled'], 'search_branch': scope['search_branch']})
     except Exception as e:
         current_app.logger.exception("CAM by Approver list error")

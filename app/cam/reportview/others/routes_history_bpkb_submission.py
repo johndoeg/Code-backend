@@ -20,6 +20,8 @@ _FONT_HEADER = Font(name="Tahoma", size=10, bold=True)
 _FONT_DATA   = Font(name="Tahoma", size=10)
 _FILL_HEADER = PatternFill("solid", fgColor="D9E1F2")
 
+MAX_PAGE_SIZE = 200
+
 def _apply(cell, font=None, alignment=None, border=None, fill=None):
     if font:      cell.font      = font
     if alignment: cell.alignment = alignment
@@ -84,6 +86,30 @@ _EXTRA_WHERE = {
     "2": " AND b.SUPP = :supp",
 }
 
+def _page_sql(print_by: str) -> str:
+    return f"""
+        WITH base AS (
+            {_BASE_SQL + _EXTRA_WHERE.get(print_by, "")}
+        )
+        SELECT base.*,
+               COUNT(*) OVER() AS total_rows,
+               SUM(CASE WHEN base.Status = 'Not Due' THEN 1 ELSE 0 END) OVER() AS not_due_count,
+               SUM(CASE WHEN base.Status = 'Due'     THEN 1 ELSE 0 END) OVER() AS due_count
+        FROM base
+        ORDER BY base.EXECUTION DESC
+        OFFSET :offset ROWS FETCH NEXT :limit ROWS ONLY
+    """
+
+def _all_sql(print_by: str) -> str:
+    return f"""
+        WITH base AS (
+            {_BASE_SQL + _EXTRA_WHERE.get(print_by, "")}
+        )
+        SELECT base.*
+        FROM base
+        ORDER BY base.EXECUTION DESC
+    """
+
 def _serialize(rows) -> list[dict]:
     def fmt(d) -> str | None:
         if d is None: return None
@@ -108,6 +134,14 @@ def _date_range(bulan_awal, tahun_awal, bulan_akhir, tahun_akhir) -> tuple[str, 
     last  = calendar.monthrange(int(tahun_akhir), int(bulan_akhir))[1]
     to1   = f"{tahun_akhir}-{str(bulan_akhir).zfill(2)}-{last:02d}"
     return from1, to1
+
+def _filter_params(print_by: str, branch_cd: str, supp: str, from1: str, to1: str) -> dict:
+    params = {"from1": from1, "to1": to1}
+    if print_by == "1":
+        params["branch_cd"] = branch_cd
+    elif print_by == "2":
+        params["supp"] = supp
+    return params
 
 def _build_excel(rows: list[dict], mode: str, period: str, subjudul: str) -> bytes:
     headers = _HEADERS[mode]
@@ -182,7 +216,7 @@ def get_branches():
 @history_bpkb_submission_bp.route("/HistoryBPKBSubmission/dealers")
 @login_required
 def get_dealers():
-    
+
     q = request.args.get("q", "").strip()
     try:
         rows = db.session.execute(
@@ -210,7 +244,7 @@ def get_dealers():
 @history_bpkb_submission_bp.route("/HistoryBPKBSubmission/data")
 @login_required
 def get_data():
-   
+
     bulan_awal  = request.args.get("bulan_awal",  "").strip()
     tahun_awal  = request.args.get("tahun_awal",  "").strip()
     bulan_akhir = request.args.get("bulan_akhir", "").strip()
@@ -222,19 +256,44 @@ def get_data():
     if not all([bulan_awal, tahun_awal, bulan_akhir, tahun_akhir]):
         return jsonify({"error": "Period params required"}), 400
 
+    want_all = request.args.get("all", "").strip().lower() in ("1", "true", "yes")
+
+    page  = max(request.args.get("page", 1, type=int) or 1, 1)
+    limit = request.args.get("limit", 25, type=int) or 25
+    limit = min(max(limit, 1), MAX_PAGE_SIZE)
+
     from1, to1 = _date_range(bulan_awal, tahun_awal, bulan_akhir, tahun_akhir)
-    params = {"from1": from1, "to1": to1}
-
-    if print_by == "1":
-        params["branch_cd"] = branch_cd
-    elif print_by == "2":
-        params["supp"] = supp
-
-    sql = _BASE_SQL + _EXTRA_WHERE.get(print_by, "") + " ORDER BY a.EXECUTION DESC"
+    params = _filter_params(print_by, branch_cd, supp, from1, to1)
 
     try:
-        rows = db.session.execute(text(sql), params).mappings().all()
-        return jsonify(_serialize(rows))
+        if want_all:
+            rows = db.session.execute(text(_all_sql(print_by)), params).mappings().all()
+            data = _serialize(rows)
+            return jsonify({
+                "rows":    data,
+                "total":   len(data),
+                "not_due": sum(1 for r in data if r["status"] == "Not Due"),
+                "due":     sum(1 for r in data if r["status"] == "Due"),
+                "page":    1,
+                "limit":   len(data),
+            })
+
+        params = {**params, "offset": (page - 1) * limit, "limit": limit}
+        rows = db.session.execute(text(_page_sql(print_by)), params).mappings().all()
+
+        total   = int(rows[0]["total_rows"])    if rows else 0
+        not_due = int(rows[0]["not_due_count"]) if rows else 0
+        due     = int(rows[0]["due_count"])     if rows else 0
+
+        return jsonify({
+            "rows":    _serialize(rows),
+            "total":   total,
+            "not_due": not_due,
+            "due":     due,
+            "page":    page,
+            "limit":   limit,
+        })
+
     except Exception:
         current_app.logger.exception("BPKB Submission data fetch error")
         return jsonify({"error": "Failed to load data"}), 500
@@ -242,7 +301,7 @@ def get_data():
 @history_bpkb_submission_bp.route("/HistoryBPKBSubmission/excel")
 @login_required
 def export_excel():
-   
+
     bulan_awal  = request.args.get("bulan_awal",  "").strip()
     tahun_awal  = request.args.get("tahun_awal",  "").strip()
     bulan_akhir = request.args.get("bulan_akhir", "").strip()
@@ -254,9 +313,7 @@ def export_excel():
     dealer_nm   = request.args.get("dealer_nm",   "").strip()
 
     from1, to1 = _date_range(bulan_awal, tahun_awal, bulan_akhir, tahun_akhir)
-    params = {"from1": from1, "to1": to1}
-    if print_by == "1": params["branch_cd"] = branch_cd
-    if print_by == "2": params["supp"] = supp
+    params = _filter_params(print_by, branch_cd, supp, from1, to1)
 
     period = f"{_MONTHS_ID[int(bulan_awal)]} {tahun_awal} - {_MONTHS_ID[int(bulan_akhir)]} {tahun_akhir}"
     subjudul = (
@@ -265,10 +322,8 @@ def export_excel():
         f"Dealer - {dealer_nm}"
     )
 
-    sql = _BASE_SQL + _EXTRA_WHERE.get(print_by, "") + " ORDER BY a.EXECUTION DESC"
-
     try:
-        rows = db.session.execute(text(sql), params).mappings().all()
+        rows = db.session.execute(text(_all_sql(print_by)), params).mappings().all()
         xlsx = _build_excel(_serialize(rows), print_by, period, subjudul)
 
         resp = make_response(xlsx)
