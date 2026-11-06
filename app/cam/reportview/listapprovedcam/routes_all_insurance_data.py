@@ -11,6 +11,7 @@ from openpyxl.utils import get_column_letter
 
 from app import db
 from app.auth.decorators import login_required
+from app.utils.helpers.settings_helpers import company_name as get_company_name
 
 all_insurance_data_bp = Blueprint('all_insurance_data', __name__, url_prefix='/CAM/Approved')
 
@@ -136,7 +137,7 @@ def _build_workbook(search_by: str, date_from: date, date_to: date, branch_cd: s
 
     last_col = _COLUMNS[-1][0]
     
-    company_name = current_app.config.get('COMPANY_NAME', '')
+    company_name = get_company_name()
     ws.merge_cells(f'A2:BC2')
     ws['A2'] = company_name
     ws['A2'].alignment = Alignment(horizontal='left')

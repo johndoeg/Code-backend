@@ -10,6 +10,7 @@ from openpyxl.styles import Alignment, Border, Font, Side
 
 from app import db
 from app.auth.decorators import login_required
+from app.utils.helpers.settings_helpers import company_name as get_company_name
 
 in_progress_cam_bp = Blueprint('in_progress_cam', __name__, url_prefix='/CAM/Approved')
 
@@ -48,14 +49,22 @@ def _fmt_ddmmyyyy(d: Optional[date]) -> str:
     return d.strftime('%d-%m-%Y') if d else ''
 
 def _branch_name(branch_cd: str) -> str:
-    if not branch_cd or branch_cd == '000':
+    if not branch_cd:
         return ''
     rows = _exec_rows("SELECT BRANCH_NAME FROM UMFBRANCH WITH (NOLOCK) WHERE BRANCH_CD = ?", [branch_cd])
-    return rows[0]['BRANCH_NAME'] if rows else ''
+    return (rows[0]['BRANCH_NAME'] or '').strip() if rows else ''
 
 def _period_label(start_date: Optional[date], end_date: Optional[date]) -> str:
     if start_date and end_date:
         return f"Period : {_fmt_ddmmyyyy(start_date)} to {_fmt_ddmmyyyy(end_date)}"
+    return ''
+
+def _fmt_long(d: Optional[date]) -> str:
+    return d.strftime('%d %B %Y') if d else ''
+
+def _period_label_long(start_date: Optional[date], end_date: Optional[date]) -> str:
+    if start_date and end_date:
+        return f"{_fmt_long(start_date)} - {_fmt_long(end_date)}"
     return ''
 
 def _resolve_scope(requested_branch: str) -> dict:
@@ -140,6 +149,7 @@ def _fetch_count(where_sql: str, params: list) -> int:
     SELECT COUNT(*) AS cnt
     FROM CAFCONT a WITH (NOLOCK)
         LEFT JOIN CAFLESS b WITH (NOLOCK) ON a.APLESS = b.APLESS
+        LEFT JOIN CAFEQUIP g WITH (NOLOCK) ON a.APPL_NO = g.APPL_NO
         INNER JOIN V_LastCAMStatusApproval j WITH (NOLOCK) ON a.APPL_NO = j.APPL_NO AND j.APPR_STS = 'P'
         INNER JOIN V_NetFinance v WITH (NOLOCK) ON j.APPL_NO = v.APPL_NO
     {_OUTS_SUBQUERY}
@@ -162,6 +172,7 @@ def _fetch_date_range(where_sql: str, params: list) -> tuple[Optional[date], Opt
     SELECT MIN(a.CREATE_DATE) AS min_dt, MAX(a.CREATE_DATE) AS max_dt
     FROM CAFCONT a WITH (NOLOCK)
         LEFT JOIN CAFLESS b WITH (NOLOCK) ON a.APLESS = b.APLESS
+        LEFT JOIN CAFEQUIP g WITH (NOLOCK) ON a.APPL_NO = g.APPL_NO
         INNER JOIN V_LastCAMStatusApproval j WITH (NOLOCK) ON a.APPL_NO = j.APPL_NO AND j.APPR_STS = 'P'
         INNER JOIN V_NetFinance v WITH (NOLOCK) ON j.APPL_NO = v.APPL_NO
     {_OUTS_SUBQUERY}
@@ -184,8 +195,8 @@ def _fetch_revisions(appl_nos: list[str]) -> dict[str, str]:
     return {r['NEWAPPL_NO']: f"R{r['REVISI']}" for r in rows}
 
 def _edit_link_params(r: dict) -> dict:
-    cons_leas = r.get('Cons_Leas')
-    fin_type = 1 if cons_leas == 'C' else 2 if cons_leas == 'L' else None
+    cons_leas = (r.get('Cons_Leas') or '').strip()
+    fin_type = cons_leas or None
     guarantor = 2 if r.get('HAS_GUARANTOR') == '1' else 1
     ind_cor = 2 if r.get('LESSEE_TP') == 'PT' else 1
     c2c = 1 if str(r.get('SUPP')) == '999999' else 0
@@ -300,10 +311,13 @@ def get_list():
         grand_totals = _fetch_grand_totals(where_sql, params)
 
         if start_date and end_date:
-            period = _period_label(start_date, end_date)
+            date_label = _period_label(start_date, end_date)
+            period_long = _period_label_long(start_date, end_date)
         else:
             data_start, data_end = _fetch_date_range(where_sql, params)
-            period = _period_label(data_start, data_end)
+            date_label = ''
+            period_long = _period_label_long(data_start, data_end)
+        period = f"Name : {lessee_nm}" if lessee_nm else date_label
 
         return jsonify({
             'rows': details,
@@ -313,6 +327,9 @@ def get_list():
             'total_pages': total_pages,
             'grand_totals': grand_totals,
             'period_label': period,
+            'grand_total_period': period_long,
+            'company_name': get_company_name(),
+            'printed_by': session.get('username', ''),
             'disabled': scope['disabled'],
             'search_branch': scope['branch'],
             'branch_name': _branch_name(scope['branch']),
@@ -337,14 +354,16 @@ _SEGMENT_LABELS = [
     ('commercial_used', 'Commercial', 'Used'),
 ]
 
-def _build_workbook(period_label: str, lessee_nm: str, branch_name: str, rows: list[dict], grand_totals: dict) -> Workbook:
+def _build_workbook(period_label: str, period_long: str, lessee_nm: str, branch_name: str, rows: list[dict], grand_totals: dict) -> Workbook:
     wb = Workbook()
     ws = wb.active
     ws.title = 'InProgressCAM'
 
-    ws['A1'] = current_app.config.get('COMPANY_NAME', '')
-    ws['D1'] = f"Date : {datetime.now().strftime('%d-%m-%Y')}\nPrint By : {session.get('username', '')}"
-    ws['D1'].alignment = Alignment(wrap_text=True)
+    ws['A1'] = get_company_name()
+
+    ws['K1'] = f"Date : {datetime.now().strftime('%d-%m-%Y')}\nPrint By : {session.get('username', '')}"
+    ws['K1'].alignment = Alignment(wrap_text=True, horizontal='left', vertical='top')
+    ws.row_dimensions[1].height = 30
 
     ws.merge_cells('A2:D2')
     ws['A2'] = 'List In Progress CAM'
@@ -352,10 +371,10 @@ def _build_workbook(period_label: str, lessee_nm: str, branch_name: str, rows: l
     ws['A2'].alignment = _CENTER
 
     ws.merge_cells('A3:D3')
-    ws['A3'] = f"Branch : {branch_name or 'All Branches'}"
+    ws['A3'] = f"Branch : {branch_name or 'Consolidate'}"
 
     ws.merge_cells('A4:D4')
-    ws['A4'] = period_label or (f"Name : {lessee_nm}" if lessee_nm else '')
+    ws['A4'] = period_label
 
     row_num = 6
     for col_idx, label in enumerate(_LIST_COLUMNS, start=1):
@@ -385,7 +404,7 @@ def _build_workbook(period_label: str, lessee_nm: str, branch_name: str, rows: l
 
     row_num += 2
     ws.merge_cells(f'A{row_num}:D{row_num}')
-    ws[f'A{row_num}'] = f"Grand Total* ({period_label.replace('Period : ', '') or 'All Dates'})"
+    ws[f'A{row_num}'] = f"Grand Total* ({period_long or 'All Dates'})"
     ws[f'A{row_num}'].font = _HEADER_FONT
     row_num += 1
 
@@ -425,6 +444,8 @@ def _build_workbook(period_label: str, lessee_nm: str, branch_name: str, rows: l
     for col in 'BCDEFGHIJK':
         ws.column_dimensions[col].width = 16
 
+    ws.column_dimensions['K'].width = 22
+
     return wb
 
 @in_progress_cam_bp.route('/in-progress-cam/export')
@@ -446,12 +467,15 @@ def export_excel():
         grand_totals = _fetch_grand_totals(where_sql, params)
 
         if start_date and end_date:
-            period = _period_label(start_date, end_date)
+            date_label = _period_label(start_date, end_date)
+            period_long = _period_label_long(start_date, end_date)
         else:
             data_start, data_end = _fetch_date_range(where_sql, params)
-            period = _period_label(data_start, data_end)
+            date_label = ''
+            period_long = _period_label_long(data_start, data_end)
+        period = f"Name : {lessee_nm}" if lessee_nm else date_label
 
-        wb = _build_workbook(period, lessee_nm, _branch_name(scope['branch']), rows, grand_totals)
+        wb = _build_workbook(period, period_long, lessee_nm, _branch_name(scope['branch']), rows, grand_totals)
         buffer = io.BytesIO()
         wb.save(buffer)
         buffer.seek(0)
@@ -580,18 +604,21 @@ def print_view():
         gt = grand_totals['grand_total']
 
         if start_date and end_date:
-            period = _period_label(start_date, end_date)
+            date_label = _period_label(start_date, end_date)
+            period_long = _period_label_long(start_date, end_date)
         else:
             data_start, data_end = _fetch_date_range(where_sql, params)
-            period = _period_label(data_start, data_end) or (f"Name : {lessee_nm}" if lessee_nm else '')
+            date_label = ''
+            period_long = _period_label_long(data_start, data_end)
+        period = f"Name : {lessee_nm}" if lessee_nm else date_label
 
         html = _PRINT_TEMPLATE.format(
-            company=current_app.config.get('COMPANY_NAME', ''),
+            company=get_company_name(),
             today=datetime.now().strftime('%d-%m-%Y'),
             printed_by=session.get('username', ''),
-            branch_name=_branch_name(scope['branch']) or 'All Branches',
+            branch_name=_branch_name(scope['branch']) or 'Consolidate',
             period=period,
-            period_plain=period.replace('Period : ', '') or 'All Dates',
+            period_plain=period_long or 'All Dates',
             rows_html=_render_rows_html(rows),
             segment_rows=_render_segment_rows_html(grand_totals),
             grand_fin=f"{gt['net_finance']:,.0f}",

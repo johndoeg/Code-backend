@@ -10,6 +10,7 @@ from openpyxl.styles import Alignment, Border, Font, Side
 
 from app import db
 from app.auth.decorators import login_required
+from app.utils.helpers.settings_helpers import company_name as get_company_name
 
 cam_by_car_condition_bp = Blueprint('cam_by_car_condition', __name__, url_prefix='/CAM/Approved')
 
@@ -198,6 +199,10 @@ def get_list():
             'has_data': result['has_data'],
             'disabled': scope['disabled'],
             'search_branch': scope['search_branch'],
+            'company_name': get_company_name(),
+            'printed_by': session.get('username', ''),
+            'branch_name': _branch_name(scope['search_branch']),
+            'period_label': _period_label(start_date, end_date),
         })
     except Exception as e:
         current_app.logger.exception("CAM by Car Condition list error")
@@ -215,9 +220,11 @@ def _build_workbook(start_date, end_date, scope, result: dict) -> Workbook:
     ws = wb.active
     ws.title = 'CamByCarCondition'
 
-    ws['A1'] = current_app.config.get('COMPANY_NAME', '')
-    ws['D1'] = f"Date : {datetime.now().strftime('%d-%m-%Y')}\nPrint By : {session.get('username', '')}"
-    ws['D1'].alignment = Alignment(wrap_text=True)
+    ws['A1'] = get_company_name()
+
+    ws['I1'] = f"Date : {datetime.now().strftime('%d-%m-%Y')}\nPrint By : {session.get('username', '')}"
+    ws['I1'].alignment = Alignment(wrap_text=True, horizontal='left', vertical='top')
+    ws.row_dimensions[1].height = 30
 
     ws.merge_cells('A2:D2')
     ws['A2'] = "List Approved Cam By Car's Condition"
@@ -326,6 +333,8 @@ def _build_workbook(start_date, end_date, scope, result: dict) -> Workbook:
     ws.column_dimensions['A'].width = 16
     for col in 'BCDEFGHI':
         ws.column_dimensions[col].width = 14
+
+    ws.column_dimensions['I'].width = 22
 
     return wb
 
@@ -457,7 +466,7 @@ def print_view():
         by_type = result['summary']['by_type']
 
         html = _PRINT_TEMPLATE.format(
-            company=current_app.config.get('COMPANY_NAME', ''),
+            company=get_company_name(),
             today=datetime.now().strftime('%d-%m-%Y'),
             printed_by=session.get('username', ''),
             branch_name=_branch_name(scope['search_branch']),

@@ -5,6 +5,7 @@ from app.auth.decorators import login_required
 import pandas as pd
 import io
 from datetime import datetime
+from app.utils.helpers.settings_helpers import company_name as get_company_name
 
 history_payment_bp = Blueprint('historypayment', __name__, url_prefix='/HistoryPayment')
 
@@ -422,7 +423,7 @@ def export_aging_detail_excel():
             
             worksheet.merge_cells('A1:AA1')
             worksheet.merge_cells('A2:AA2')
-            worksheet['A2'] = current_app.config.get('COMPANY_NAME', 'PT Genie Finance Indonesia')
+            worksheet['A2'] = get_company_name()
             worksheet['A2'].font = Font(name='Tahoma', size=10)
             worksheet['A2'].alignment = Alignment(horizontal='left')
             
@@ -538,7 +539,7 @@ def get_history_payment_print():
             type_nm = f"{type_nm} + {karoseri_desc}"
 
         contract_info = {
-            "COMPANY_NAME":   current_app.config.get("COMPANY_NAME", "PT Genie Finance Indonesia"),
+            "COMPANY_NAME":   get_company_name(),
             "LESSEE_NO":      row.LESSEE_NO      or "",
             "trans_code":     row.trans_code      or "",
             "LESSEE_NM":      row.LESSEE_NM       or "",

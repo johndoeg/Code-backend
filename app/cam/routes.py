@@ -46,7 +46,7 @@ def get_data_customer():
             return jsonify({"message": "Invalid JSON"}), 400
 
         id_card = (data.get('idCard') or '').strip()
-        lessee_tp = (data.get('customerType') or '').strip().upper()  # Normalize case
+        lessee_tp = (data.get('customerType') or '').strip().upper()
 
         if not id_card or not lessee_tp:
             return jsonify({"message": "Missing idCard or customerType"}), 400

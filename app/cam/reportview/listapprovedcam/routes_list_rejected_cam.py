@@ -10,6 +10,7 @@ from openpyxl.styles import Alignment, Border, Font, Side
 
 from app import db
 from app.auth.decorators import login_required
+from app.utils.helpers.settings_helpers import company_name as get_company_name
 
 rejected_cam_bp = Blueprint('rejected_cam', __name__, url_prefix='/CAM/Approved')
 
@@ -206,7 +207,7 @@ def _fetch_detail_rows(
 
 def _row_to_detail(row: dict) -> dict:
     appr_date = row.get('APPR_DATE')
-    fin_type = 1 if row.get('Cons_Leas') == 'C' else 2 if row.get('Cons_Leas') == 'L' else None
+    fin_type = (row.get('Cons_Leas') or '').strip() or None
     has_guarantor = row.get('HAS_GUARANTOR')
     guarantor = 2 if has_guarantor == '1' else 1
     ind_cor = 2 if row.get('LESSEE_TP') == 'PT' else 1
@@ -280,6 +281,11 @@ def _fetch_grand_total(start_date: Optional[date], end_date: Optional[date], sco
 def _period_label(start_date: Optional[date], end_date: Optional[date], rows: list[dict]) -> str:
     if start_date and end_date:
         return f"Period : {_fmt_ddmmyyyy(start_date)} to {_fmt_ddmmyyyy(end_date)}"
+    return ''
+
+def _grand_total_period(start_date: Optional[date], end_date: Optional[date], rows: list[dict]) -> str:
+    if start_date and end_date:
+        return f"{_fmt_ddmmyyyy(start_date)} to {_fmt_ddmmyyyy(end_date)}"
     if rows:
         first = rows[0].get('APPR_DATE')
         last = rows[-1].get('APPR_DATE')
@@ -311,6 +317,10 @@ def get_list():
             'grand_total': grand_total,
             'disabled': scope['disabled'],
             'search_branch': scope['search_branch'],
+            'company_name': get_company_name(),
+            'printed_by': session.get('username', ''),
+            'branch_name': _branch_name(scope['search_branch']),
+            'period_label': _period_label(start_date, end_date, rows),
         })
     except Exception as e:
         current_app.logger.exception("Rejected CAM list error")
@@ -328,9 +338,12 @@ def _build_workbook(start_date, end_date, scope, reject_detail, rows, grand_tota
     ws = wb.active
     ws.title = 'ListRejectedCam'
 
-    ws['A1'] = current_app.config.get('COMPANY_NAME', '')
-    ws['D1'] = f"Date : {datetime.now().strftime('%d-%m-%Y')}\nPrint By : {session.get('username', '')}"
-    ws['D1'].alignment = Alignment(wrap_text=True)
+    ws['A1'] = get_company_name()
+
+    ws['E1'] = f"Date : {datetime.now().strftime('%d-%m-%Y')}\nPrint By : {session.get('username', '')}"
+    ws['E1'].alignment = Alignment(wrap_text=True, horizontal='left', vertical='top')
+    ws.row_dimensions[1].height = 30
+    ws.column_dimensions['E'].width = max(ws.column_dimensions['E'].width or 0, 20)
 
     ws.merge_cells('A2:D2')
     ws['A2'] = 'List Rejected CAM'
@@ -482,7 +495,7 @@ table {{ border-collapse: collapse; }}
     </table>
     <br>
     <table style="border:thin solid #000" cellpadding="2" cellspacing="0" width="40%">
-        <tr><td colspan="4"><u><strong>Grand Total* ({period}):</strong></u></td></tr>
+        <tr><td colspan="4"><u><strong>Grand Total* ({period_plain}):</strong></u></td></tr>
         <tr style="background-color:#E5E5E5">
         <td width="10%"><strong>Type</strong></td>
         <td width="10%"><strong>Condition</strong></td>
@@ -549,11 +562,12 @@ def print_view():
         rows, _total = _fetch_detail_rows(start_date, end_date, scope, reject_detail)
         grand_total = _fetch_grand_total(start_date, end_date, scope, reject_detail)
         html = _PRINT_TEMPLATE.format(
-            company=current_app.config.get('COMPANY_NAME', ''),
+            company=get_company_name(),
             today=datetime.now().strftime('%d-%m-%Y'),
             printed_by=session.get('username', ''),
             branch_name=_branch_name(scope['search_branch']),
             period=_period_label(start_date, end_date, rows),
+            period_plain=_grand_total_period(start_date, end_date, rows) or 'All Dates',
             rows_html=_render_detail_rows_html(rows),
             grand_rows_html=_render_grand_rows_html(grand_total),
             grand_fin=f"{grand_total['grand_total']['net_finance']:,.0f}",

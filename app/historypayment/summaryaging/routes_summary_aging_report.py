@@ -20,6 +20,7 @@ from .summary_aging_excel import (
     _fmt_date, _safe_pct,
     _KEYS_T1, _KEYS_T2, _KEYS_CMO,
 )
+from app.utils.helpers.settings_helpers import company_name as get_company_name
 
 summary_aging_bp = Blueprint('summary_aging', __name__, url_prefix='/SummaryAging')
 
@@ -123,7 +124,7 @@ def export_pdf():
 
     try:
         rows    = _exec_sp('USP_SUMMARY_AGING', [asof, cek_jf])
-        company = session.get('company', '') or current_app.config.get('COMPANY_NAME', '')
+        company = session.get('company', '') or get_company_name()
         pdf     = _build_pdf(rows, asof, company)
 
         response = make_response(pdf)

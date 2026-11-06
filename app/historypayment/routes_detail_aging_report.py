@@ -8,6 +8,7 @@ from flask import Blueprint, request, jsonify, session, current_app, make_respon
 
 from app import db
 from app.auth.decorators import login_required
+from app.utils.helpers.settings_helpers import company_name as get_company_name
 
 detail_aging_report_bp = Blueprint("detail_aging_report_bp", __name__, url_prefix="/DetailAgingReport")
 
@@ -108,7 +109,7 @@ def _validate_request():
     return asof, (request.args.get("branch_cd") or "").strip(), (request.args.get("type_of") or "").strip(), None
 
 def _company() -> str:
-    return current_app.config.get("COMPANY_NAME", "") or session.get("company", "") or ""
+    return get_company_name() or session.get("company", "") or ""
 
 def _load(asof, branch_cd, type_of):
     try:

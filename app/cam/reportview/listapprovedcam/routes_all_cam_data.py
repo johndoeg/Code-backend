@@ -10,6 +10,7 @@ from openpyxl.styles import Alignment, Border, Font, Side
 
 from app import db
 from app.auth.decorators import login_required
+from app.utils.helpers.settings_helpers import company_name as get_company_name
 
 all_cam_data_bp = Blueprint('all_cam_data', __name__, url_prefix='/CAM/Report')
 
@@ -144,7 +145,7 @@ def _build_workbook(search_by: str, date_from: date, date_to: date, branch_cd: s
     last_col = _COLUMNS[-1][0]
     second_last_col = _COLUMNS[-2][0]
 
-    company_name = current_app.config.get('COMPANY_NAME', '')
+    company_name = get_company_name()
     ws.merge_cells(f'A1:{second_last_col}1')
     ws.merge_cells(f'A2:{second_last_col}2')
     ws['A2'] = company_name

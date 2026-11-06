@@ -13,6 +13,7 @@ from sqlalchemy import text
 
 from app import db
 from app.auth.decorators import login_required
+from app.utils.helpers.settings_helpers import company_name as get_company_name
 
 amortization_report_bp = Blueprint("amortization_report", __name__, url_prefix="/AmortizationReport")
 
@@ -80,7 +81,7 @@ def _rate(v) -> str:
     return f"{round(_num(v), 2):g}"
 
 def _company() -> str:
-    return current_app.config.get("COMPANY_NAME", "") or ""
+    return get_company_name() or ""
 
 def _load_schedule(lease_no: str):
     res = db.session.execute(text(_SQL_SCHEDULE), {"lease_no": lease_no})

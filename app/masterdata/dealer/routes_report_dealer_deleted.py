@@ -33,14 +33,17 @@ def get_branches():
 
         result = db.session.execute(stmt, params)
         branches = [
-            {"BRANCH_CD": row.BRANCH_CD, "BRANCH_NAME": row.BRANCH_NAME}
+            {
+                "branchCd":   (row.BRANCH_CD   or "").strip(),
+                "branchName": (row.BRANCH_NAME or "").strip(),
+            }
             for row in result
         ]
-        return jsonify(branches)
+        return jsonify({"data": branches, "total": len(branches)})
 
     except Exception:
         current_app.logger.exception("Branch list error")
-        return jsonify([]), 500
+        return jsonify({"data": [], "total": 0}), 500
 
 @deleted_dealer_report_bp.route("/dealer-deleted-report")
 @login_required

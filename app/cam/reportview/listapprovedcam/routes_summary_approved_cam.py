@@ -11,6 +11,7 @@ from openpyxl.utils import get_column_letter
 
 from app import db
 from app.auth.decorators import login_required
+from app.utils.helpers.settings_helpers import company_name as get_company_name
 
 summary_approved_cam_bp = Blueprint('summary_approved_cam', __name__, url_prefix='/CAM/Approved')
 
@@ -178,6 +179,10 @@ def get_list():
             'data': data,
             'disabled': resolved['disabled'],
             'search_branch': resolved['search_branch'],
+            'company_name': get_company_name(),
+            'printed_by': session.get('username', ''),
+            'branch_name': _branch_name(resolved['search_branch']),
+            'period_label': _period_label(start_date, end_date, resolved['search_branch']),
         })
     except Exception as e:
         current_app.logger.exception("Summary Approved CAM list error")
@@ -290,7 +295,7 @@ def print_view():
         rows = _fetch_rows(start_date, end_date, resolved['sp_branch_param'])
         data = _process_rows(rows)
         html = _PRINT_TEMPLATE.format(
-            company=current_app.config.get('COMPANY_NAME', ''),
+            company=get_company_name(),
             today=datetime.now().strftime('%d-%m-%Y'),
             printed_by=session.get('username', ''),
             branch_name=_branch_name(resolved['search_branch']),
@@ -313,10 +318,11 @@ def _build_workbook(start_date: Optional[date], end_date: Optional[date], resolv
     ws = wb.active
     ws.title = 'SummaryApprovedCam'
 
-    ws['A1'] = current_app.config.get('COMPANY_NAME', '')
-    ws['D1'] = f"Date : {datetime.now().strftime('%d-%m-%Y')}"
-    ws['D1'].alignment = Alignment(wrap_text=True)
-    ws['D1'] = f"Date : {datetime.now().strftime('%d-%m-%Y')}\nPrint By : {session.get('username', '')}"
+    ws['A1'] = get_company_name()
+
+    ws['H1'] = f"Date : {datetime.now().strftime('%d-%m-%Y')}\nPrint By : {session.get('username', '')}"
+    ws['H1'].alignment = Alignment(wrap_text=True, horizontal='left', vertical='top')
+    ws.row_dimensions[1].height = 30
 
     ws.merge_cells('A2:D2')
     ws['A2'] = 'Summary Approved CAM'
@@ -383,8 +389,9 @@ def _build_workbook(start_date: Optional[date], end_date: Optional[date], resolv
 
     ws.column_dimensions['A'].width = 20
     ws.column_dimensions['B'].width = 14
-    for col in 'CDEFGH':
+    for col in 'CDEFG':
         ws.column_dimensions[col].width = 14
+    ws.column_dimensions['H'].width = 20
 
     return wb
 

@@ -34,7 +34,8 @@ def _s3_client():
 def _s3_bucket() -> str:
     return current_app.config["AWS_S3_BUCKET"]
 
-def _aws_presign(aws_key: str, file_name: str, expires: int = 3600) -> str | None:
+def _aws_presign(aws_key: str, file_name: str, expires: int = 3600,
+                 disposition: str = "inline") -> str | None:
     if not aws_key:
         return None
     return _s3_client().generate_presigned_url(
@@ -42,10 +43,21 @@ def _aws_presign(aws_key: str, file_name: str, expires: int = 3600) -> str | Non
         Params={
             "Bucket": _s3_bucket(),
             "Key": aws_key,
-            "ResponseContentDisposition": f'inline; filename="{file_name}"',
+            "ResponseContentDisposition": f'{disposition}; filename="{file_name}"',
         },
         ExpiresIn=expires,
     )
+
+def _aws_object_exists(aws_key: str) -> bool:
+    if not aws_key:
+        return False
+    try:
+        _s3_client().head_object(Bucket=_s3_bucket(), Key=aws_key)
+        return True
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") in ("404", "NoSuchKey", "NotFound"):
+            return False
+        raise
 
 def _aws_presign_bucket(aws_key: str, file_name: str, bucket: str, expires: int = 3600) -> str | None:
     if not aws_key or not bucket:

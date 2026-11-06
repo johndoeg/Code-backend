@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from typing import Optional
-from flask import Blueprint, jsonify, request, current_app
+from flask import Blueprint, jsonify, request, current_app, session
 
 from app import db
 from app.auth.decorators import login_required
+from app.utils.helpers.settings_helpers import company_name as get_company_name
 
 cam_by_disbursement_date_bp = Blueprint('cam_by_disbursement_date', __name__, url_prefix='/CAM/Report')
 
@@ -44,6 +45,12 @@ def _num(val) -> float:
     if val is None:
         return 0.0
     return float(val)
+
+def _branch_name(branch_cd: str) -> str:
+    if not branch_cd:
+        return ''
+    rows = _exec_rows("SELECT BRANCH_NAME FROM UMFBRANCH WITH (NOLOCK) WHERE BRANCH_CD = ?", [branch_cd])
+    return (rows[0]['BRANCH_NAME'] or '').strip() if rows else ''
 
 def _safe_div(a, b):
     return (a / b) if b else 0
@@ -249,7 +256,11 @@ def get_detail():
         return jsonify({'error': 'Please fill at least one search field'}), 400
 
     try:
-        return jsonify(_fetch_detail(branch_cd, start_date, end_date, exclude_jf))
+        detail = _fetch_detail(branch_cd, start_date, end_date, exclude_jf)
+        detail['company_name'] = get_company_name()
+        detail['printed_by'] = session.get('username', '')
+        detail['branch_name'] = _branch_name(branch_cd)
+        return jsonify(detail)
     except Exception as e:
         current_app.logger.exception("CAM by disbursement date detail error")
         return jsonify({'error': str(e)}), 500

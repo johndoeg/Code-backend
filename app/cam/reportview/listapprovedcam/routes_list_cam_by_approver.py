@@ -10,6 +10,7 @@ from openpyxl.styles import Alignment, Border, Font, Side
 
 from app import db
 from app.auth.decorators import login_required
+from app.utils.helpers.settings_helpers import company_name as get_company_name
 
 cam_by_approver_bp = Blueprint('cam_by_approver', __name__, url_prefix='/CAM/Approved')
 
@@ -117,8 +118,8 @@ def _exec_sp_approver(start_date: Optional[date], end_date: Optional[date], bran
     )
 
 def _edit_link_params(r: dict) -> dict:
-    cons_leas = r.get('Cons_Leas')
-    fin_type = 1 if cons_leas == 'C' else 2 if cons_leas == 'L' else None
+    cons_leas = (r.get('Cons_Leas') or '').strip()
+    fin_type = cons_leas or None
     guarantor = 2 if r.get('HAS_GUARANTOR') == '1' else 1
     ind_cor = 2 if r.get('LESSEE_TP') == 'PT' else 1
     c2c = 1 if str(r.get('SUPP')) == '999999' else 0
@@ -219,7 +220,15 @@ def get_list():
     scope = _resolve_branch(requested_branch)
     try:
         result = _fetch_report(start_date, end_date, scope['search_branch'], with_links=True)
-        return jsonify({**result, 'disabled': scope['disabled'], 'search_branch': scope['search_branch']})
+        return jsonify({
+            **result,
+            'disabled': scope['disabled'],
+            'search_branch': scope['search_branch'],
+            'company_name': get_company_name(),
+            'printed_by': session.get('username', ''),
+            'branch_name': _branch_name(scope['search_branch']),
+            'period_label': _period_label(start_date, end_date),
+        })
     except Exception as e:
         current_app.logger.exception("CAM by Approver list error")
         return jsonify({'error': str(e)}), 500
@@ -241,9 +250,11 @@ def _build_workbook(start_date, end_date, branch_cd, result: dict) -> Workbook:
     ws = wb.active
     ws.title = 'CamByApprover'
 
-    ws['A1'] = current_app.config.get('COMPANY_NAME', '')
-    ws['D1'] = f"Date : {datetime.now().strftime('%d/%m/%Y')}\nPrint By : {session.get('username', '')}"
-    ws['D1'].alignment = Alignment(wrap_text=True)
+    ws['A1'] = get_company_name()
+
+    ws['M1'] = f"Date : {datetime.now().strftime('%d-%m-%Y')}\nPrint By : {session.get('username', '')}"
+    ws['M1'].alignment = Alignment(wrap_text=True, horizontal='left', vertical='top')
+    ws.row_dimensions[1].height = 30
 
     ws.merge_cells('A2:D2')
     ws['A2'] = 'List CAM by Approver'
@@ -309,6 +320,8 @@ def _build_workbook(start_date, end_date, branch_cd, result: dict) -> Workbook:
     ws.column_dimensions['A'].width = 6
     for col in 'BCDEFGHIJKLM':
         ws.column_dimensions[col].width = 16
+
+    ws.column_dimensions['M'].width = 22
 
     return wb
 
@@ -434,7 +447,7 @@ def print_view():
         result = _fetch_report(start_date, end_date, scope['search_branch'])
         period = _period_label(start_date, end_date)
         html = _PRINT_TEMPLATE.format(
-            company=current_app.config.get('COMPANY_NAME', ''),
+            company=get_company_name(),
             today=datetime.now().strftime('%d-%m-%Y'),
             printed_by=session.get('username', ''),
             branch_name=_branch_name(scope['search_branch']),

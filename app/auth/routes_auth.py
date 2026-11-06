@@ -3,6 +3,7 @@ from flask import Blueprint, request, jsonify, session, current_app
 from datetime import datetime, timedelta
 from config import is_dev_login_bypass_enabled
 from app.auth.active_sessions import set_active_session, get_active_session, clear_active_session
+from app.utils.helpers.settings_helpers import otp_required
 
 import secrets
 import requests
@@ -96,6 +97,20 @@ def _send_telegram_pin(chat_id: str, pin: str, expires_in_minutes: int) -> bool:
         if elapsed >= TELEGRAM_SLOW_WARN_SECONDS:
             current_app.logger.warning("Telegram send took %.2fs", elapsed)
 
+def _start_session(username, emp_id, accesscam, branchcode, branch_call, full_name, branch_name) -> None:
+    session['logged_in']   = True
+    session['username']    = username
+    session['accesslevel'] = accesscam
+    session['emp_id']      = emp_id
+    session['branchcode']  = branchcode
+    session['branch_call'] = branch_call
+    session['fullname']    = full_name
+    session['branch_name'] = branch_name
+
+    token = uuid.uuid4().hex
+    session['session_token'] = token
+    set_active_session(username, token)
+
 def _discard_otp(otp_id) -> None:
     try:
         db.session.execute(
@@ -170,6 +185,16 @@ def login():
             return jsonify({
                 "message": "Your Access Cam is still empty, please contact helpdesk"
             }), 403
+
+        if not otp_required():
+            for key in [k for k in session.keys() if k.startswith('pending_')]:
+                session.pop(key, None)
+            _start_session(db_username, emp_id, accesscam, branchcode, branch_call, full_name, branch_name)
+            _insert_audit_log(db_username, "Login")
+            return jsonify({
+                "message": "Login successful",
+                "pin_required": False,
+            }), 200
 
         if not telegram_chat_id:
             _insert_audit_log(db_username, "Login failed - no Telegram chat ID on file")
@@ -273,22 +298,19 @@ def verify_pin():
             _insert_audit_log(pending_username, "Login failed - incorrect PIN")
             return jsonify({"message": "Incorrect PIN"}), 401
 
-        session['logged_in']    = True
-        session['username']     = pending_username
-        session['accesslevel']  = session.pop('pending_accesscam', None)
-        session['emp_id']       = session.pop('pending_emp_id', None)
-        session['branchcode']   = session.pop('pending_branchcode', None)
-        session['branch_call']  = session.pop('pending_branch_call', None)
-        session['fullname']     = session.pop('pending_fullname', None)
-        session['branch_name']  = session.pop('pending_branch_name', None)
+        _start_session(
+            pending_username,
+            session.pop('pending_emp_id', None),
+            session.pop('pending_accesscam', None),
+            session.pop('pending_branchcode', None),
+            session.pop('pending_branch_call', None),
+            session.pop('pending_fullname', None),
+            session.pop('pending_branch_name', None),
+        )
         session.pop('pending_username', None)
         session.pop('pending_id_no', None)
         session.pop('pending_otp_id', None)
         session.pop('pending_pin_attempts', None)
-
-        token = uuid.uuid4().hex
-        session['session_token'] = token
-        set_active_session(pending_username, token)
 
         _insert_audit_log(pending_username, "Login")
 

@@ -10,6 +10,7 @@ from openpyxl.styles import Alignment, Border, Font, Side
 
 from app import db
 from app.auth.decorators import login_required
+from app.utils.helpers.settings_helpers import company_name as get_company_name
 
 cam_by_cust_group_bp = Blueprint('cam_by_cust_group', __name__, url_prefix='/CAM/Approved')
 
@@ -74,10 +75,17 @@ def _own_branch_name() -> str:
     rows = _exec_rows("SELECT BRANCH_NAME FROM UMFBRANCH WITH (NOLOCK) WHERE BRANCH_CD = ?", [branch_cd])
     return rows[0]['BRANCH_NAME'] if rows else ''
 
-
 def _period_label(start_date: Optional[date], end_date: Optional[date]) -> str:
     if start_date and end_date:
         return f"Period : {_fmt_ddmmyyyy(start_date)} to {_fmt_ddmmyyyy(end_date)}"
+    return ''
+
+def _fmt_long(d: Optional[date]) -> str:
+    return d.strftime('%d %B %Y') if d else ''
+
+def _period_label_long(start_date: Optional[date], end_date: Optional[date]) -> str:
+    if start_date and end_date:
+        return f"{_fmt_long(start_date)} - {_fmt_long(end_date)}"
     return ''
 
 def _resolve_scope() -> dict:
@@ -150,6 +158,7 @@ def _fetch_count(where_sql: str, params: list) -> int:
     SELECT COUNT(*) AS cnt
     FROM CAFCONT a WITH (NOLOCK)
         LEFT JOIN CAFLESS b WITH (NOLOCK) ON a.APLESS = b.APLESS
+        LEFT JOIN CAFEQUIP g WITH (NOLOCK) ON a.APPL_NO = g.APPL_NO
         INNER JOIN mcmocamcompletelist j WITH (NOLOCK) ON a.APPL_NO = j.APPL_NO
         INNER JOIN V_NetFinance v WITH (NOLOCK) ON a.APPL_NO = v.APPL_NO
     WHERE {where_sql}
@@ -171,6 +180,7 @@ def _fetch_date_range(where_sql: str, params: list) -> tuple[Optional[date], Opt
     SELECT MIN(j.AdmDate) AS min_dt, MAX(j.AdmDate) AS max_dt
     FROM CAFCONT a WITH (NOLOCK)
         LEFT JOIN CAFLESS b WITH (NOLOCK) ON a.APLESS = b.APLESS
+        LEFT JOIN CAFEQUIP g WITH (NOLOCK) ON a.APPL_NO = g.APPL_NO
         INNER JOIN mcmocamcompletelist j WITH (NOLOCK) ON a.APPL_NO = j.APPL_NO
         INNER JOIN V_NetFinance v WITH (NOLOCK) ON a.APPL_NO = v.APPL_NO
     WHERE {where_sql}
@@ -192,8 +202,8 @@ def _fetch_revisions(appl_nos: list[str]) -> dict[str, str]:
     return {r['NEWAPPL_NO']: f"R{r['REVISI']}" for r in rows}
 
 def _edit_link_params(r: dict) -> dict:
-    cons_leas = r.get('Cons_Leas')
-    fin_type = 1 if cons_leas == 'C' else 2 if cons_leas == 'L' else None
+    cons_leas = (r.get('Cons_Leas') or '').strip()
+    fin_type = cons_leas or None
     guarantor = 2 if r.get('HAS_GUARANTOR') == '1' else 1
     ind_cor = 2 if r.get('LESSEE_TP') == 'PT' else 1
     c2c = 1 if str(r.get('SUPP')) == '999999' else 0
@@ -288,10 +298,13 @@ def get_list():
         grand_total = _fetch_grand_total(where_sql, params)
 
         if start_date and end_date:
-            period = _period_label(start_date, end_date)
+            date_label = _period_label(start_date, end_date)
+            period_long = _period_label_long(start_date, end_date)
         else:
             data_start, data_end = _fetch_date_range(where_sql, params)
-            period = _period_label(data_start, data_end)
+            date_label = ''
+            period_long = _period_label_long(data_start, data_end)
+        period = f"Name : {lessee_nm}" if lessee_nm else date_label
 
         return jsonify({
             'rows': details,
@@ -301,6 +314,9 @@ def get_list():
             'total_pages': total_pages,
             'grand_total': grand_total,
             'period_label': period,
+            'grand_total_period': period_long,
+            'company_name': get_company_name(),
+            'printed_by': session.get('username', ''),
             'branch_name': _own_branch_name(),
         })
     except Exception as e:
@@ -317,14 +333,17 @@ _RIGHT = Alignment(horizontal='right')
 _LIST_COLUMNS = ['No.', 'CAM No.', 'Customer Name', 'Brand/Type', 'Net Finance', 'Interest (%)', 'Tenor (Month)',
                   'Approval Date', 'CMO']
 
-def _build_workbook(period_label: str, lessee_nm: str, branch_name: str, rows: list[dict], grand_total: dict) -> Workbook:
+def _build_workbook(period_label: str, period_long: str, lessee_nm: str, branch_name: str, rows: list[dict], grand_total: dict) -> Workbook:
     wb = Workbook()
     ws = wb.active
     ws.title = 'CamByCustGroup'
 
-    ws['A1'] = current_app.config.get('COMPANY_NAME', '')
-    ws['D1'] = f"Date : {datetime.now().strftime('%d-%m-%Y')}\nPrint By : {session.get('username', '')}"
-    ws['D1'].alignment = Alignment(wrap_text=True)
+    ws['A1'] = get_company_name()
+
+    ws['I1'] = f"Date : {datetime.now().strftime('%d-%m-%Y')}\nPrint By : {session.get('username', '')}"
+    ws['I1'].alignment = Alignment(wrap_text=True, horizontal='left', vertical='top')
+    ws.row_dimensions[1].height = 28
+    ws.column_dimensions['I'].width = max(ws.column_dimensions['I'].width or 0, 20)
 
     ws.merge_cells('A2:D2')
     ws['A2'] = 'List CAM by Customer / Group'
@@ -335,7 +354,7 @@ def _build_workbook(period_label: str, lessee_nm: str, branch_name: str, rows: l
     ws['A3'] = f"Branch : {branch_name}"
 
     ws.merge_cells('A4:D4')
-    ws['A4'] = period_label or (f"Name : {lessee_nm}" if lessee_nm else '')
+    ws['A4'] = period_label
 
     row_num = 6
     for col_idx, label in enumerate(_LIST_COLUMNS, start=1):
@@ -365,7 +384,7 @@ def _build_workbook(period_label: str, lessee_nm: str, branch_name: str, rows: l
 
     row_num += 2
     ws.merge_cells(f'A{row_num}:B{row_num}')
-    ws[f'A{row_num}'] = f"Grand Total* ({period_label.replace('Period : ', '') or 'All Dates'})"
+    ws[f'A{row_num}'] = f"Grand Total* ({period_long or 'All Dates'})"
     ws[f'A{row_num}'].font = _HEADER_FONT
     row_num += 1
     ws.cell(row=row_num, column=1, value='Net Finance')
@@ -403,12 +422,15 @@ def export_excel():
         grand_total = _fetch_grand_total(where_sql, params)
 
         if start_date and end_date:
-            period = _period_label(start_date, end_date)
+            date_label = _period_label(start_date, end_date)
+            period_long = _period_label_long(start_date, end_date)
         else:
             data_start, data_end = _fetch_date_range(where_sql, params)
-            period = _period_label(data_start, data_end)
+            date_label = ''
+            period_long = _period_label_long(data_start, data_end)
+        period = f"Name : {lessee_nm}" if lessee_nm else date_label
 
-        wb = _build_workbook(period, lessee_nm, _own_branch_name(), rows, grand_total)
+        wb = _build_workbook(period, period_long, lessee_nm, _own_branch_name(), rows, grand_total)
         buffer = io.BytesIO()
         wb.save(buffer)
         buffer.seek(0)
@@ -520,18 +542,21 @@ def print_view():
         grand_total = _fetch_grand_total(where_sql, params)
 
         if start_date and end_date:
-            period = _period_label(start_date, end_date)
+            date_label = _period_label(start_date, end_date)
+            period_long = _period_label_long(start_date, end_date)
         else:
             data_start, data_end = _fetch_date_range(where_sql, params)
-            period = _period_label(data_start, data_end) or (f"Name : {lessee_nm}" if lessee_nm else '')
+            date_label = ''
+            period_long = _period_label_long(data_start, data_end)
+        period = f"Name : {lessee_nm}" if lessee_nm else date_label
 
         html = _PRINT_TEMPLATE.format(
-            company=current_app.config.get('COMPANY_NAME', ''),
+            company=get_company_name(),
             today=datetime.now().strftime('%d-%m-%Y'),
             printed_by=session.get('username', ''),
             branch_name=_own_branch_name(),
             period=period,
-            period_plain=period.replace('Period : ', '') or 'All Dates',
+            period_plain=period_long or 'All Dates',
             rows_html=_render_rows_html(rows),
             grand_fin=f"{grand_total['net_finance']:,.0f}",
             grand_units=grand_total['units'],

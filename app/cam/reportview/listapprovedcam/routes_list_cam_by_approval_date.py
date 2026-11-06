@@ -10,6 +10,7 @@ from openpyxl.styles import Alignment, Border, Font, Side
 
 from app import db
 from app.auth.decorators import login_required
+from app.utils.helpers.settings_helpers import company_name as get_company_name
 
 cam_by_app_date_bp = Blueprint('cam_by_app_date', __name__, url_prefix='/CAM/Approved')
 
@@ -76,10 +77,14 @@ def _branch_name(branch_cd: str) -> str:
     rows = _exec_rows("SELECT BRANCH_NAME FROM UMFBRANCH WITH (NOLOCK) WHERE BRANCH_CD = ?", [branch_cd])
     return rows[0]['BRANCH_NAME'] if rows else ''
 
-
 def _period_label(start_date: Optional[date], end_date: Optional[date]) -> str:
     if start_date and end_date:
         return f"Period : {_fmt_ddmmyyyy(start_date)} to {_fmt_ddmmyyyy(end_date)}"
+    return ''
+
+def _range_plain(start_date: Optional[date], end_date: Optional[date]) -> str:
+    if start_date and end_date:
+        return f"{_fmt_ddmmyyyy(start_date)} to {_fmt_ddmmyyyy(end_date)}"
     return ''
 
 def _resolve_scope(requested_branch_cd: str) -> dict:
@@ -385,10 +390,13 @@ def get_list():
         grand_totals = _fetch_grand_totals(where_sql, params)
 
         if start_date and end_date:
-            period = _period_label(start_date, end_date)
+            date_label = _period_label(start_date, end_date)
+            period_plain = _range_plain(start_date, end_date)
         else:
             data_start, data_end = _fetch_date_range(where_sql, params)
-            period = _period_label(data_start, data_end)
+            date_label = ''
+            period_plain = _range_plain(data_start, data_end)
+        period = f"Name : {lessee_nm}" if lessee_nm else date_label
 
         return jsonify({
             'rows': details,
@@ -398,6 +406,10 @@ def get_list():
             'total_pages': total_pages,
             'grand_totals': grand_totals,
             'period_label': period,
+            'grand_total_period': period_plain,
+            'company_name': get_company_name(),
+            'printed_by': session.get('username', ''),
+            'branch_name': _branch_name(scope['branch_cd_search']),
             'disabled': scope['disabled'],
             'search_branch': scope['branch_cd_search'],
         })
@@ -422,14 +434,16 @@ _SEGMENT_LABELS = [
     ('commercial_used', 'Commercial', 'Used'),
 ]
 
-def _build_workbook(period_label: str, branch_cd: str, lessee_nm: str, rows: list[dict], grand_totals: dict) -> Workbook:
+def _build_workbook(period_label: str, period_plain: str, branch_cd: str, lessee_nm: str, rows: list[dict], grand_totals: dict) -> Workbook:
     wb = Workbook()
     ws = wb.active
     ws.title = 'CamByApprovalDate'
 
-    ws['A1'] = current_app.config.get('COMPANY_NAME', '')
-    ws['D1'] = f"Date : {datetime.now().strftime('%d-%m-%Y')}\nPrint By : {session.get('username', '')}"
-    ws['D1'].alignment = Alignment(wrap_text=True)
+    ws['A1'] = get_company_name()
+
+    ws['J1'] = f"Date : {datetime.now().strftime('%d-%m-%Y')}\nPrint By : {session.get('username', '')}"
+    ws['J1'].alignment = Alignment(wrap_text=True, horizontal='left', vertical='top')
+    ws.row_dimensions[1].height = 30
 
     ws.merge_cells('A2:D2')
     ws['A2'] = 'List CAM by Approval Date'
@@ -440,7 +454,7 @@ def _build_workbook(period_label: str, branch_cd: str, lessee_nm: str, rows: lis
     ws['A3'] = f"Branch : {_branch_name(branch_cd) or 'All Branches'}"
 
     ws.merge_cells('A4:D4')
-    ws['A4'] = period_label.replace('Period : ', 'Period : ') or (f"Name : {lessee_nm}" if lessee_nm else '')
+    ws['A4'] = period_label
 
     row_num = 6
     for col_idx, label in enumerate(_LIST_COLUMNS, start=1):
@@ -470,7 +484,7 @@ def _build_workbook(period_label: str, branch_cd: str, lessee_nm: str, rows: lis
 
     row_num += 2
     ws.merge_cells(f'A{row_num}:H{row_num}')
-    ws[f'A{row_num}'] = f"Grand Total* ({period_label.replace('Period : ', '') or 'All Dates'})"
+    ws[f'A{row_num}'] = f"Grand Total* ({period_plain or 'All Dates'})"
     ws[f'A{row_num}'].font = _HEADER_FONT
     row_num += 1
 
@@ -533,6 +547,8 @@ def _build_workbook(period_label: str, branch_cd: str, lessee_nm: str, rows: lis
     for col in 'BCDEFGHIJ':
         ws.column_dimensions[col].width = 16
 
+    ws.column_dimensions['J'].width = 22
+
     return wb
 
 @cam_by_app_date_bp.route('/cam-by-app-date/export')
@@ -554,12 +570,15 @@ def export_excel():
         grand_totals = _fetch_grand_totals(where_sql, params)
 
         if start_date and end_date:
-            period = _period_label(start_date, end_date)
+            date_label = _period_label(start_date, end_date)
+            period_plain = _range_plain(start_date, end_date)
         else:
             data_start, data_end = _fetch_date_range(where_sql, params)
-            period = _period_label(data_start, data_end)
+            date_label = ''
+            period_plain = _range_plain(data_start, data_end)
+        period = f"Name : {lessee_nm}" if lessee_nm else date_label
 
-        wb = _build_workbook(period, scope['branch_cd_search'], lessee_nm, rows, grand_totals)
+        wb = _build_workbook(period, period_plain, scope['branch_cd_search'], lessee_nm, rows, grand_totals)
         buffer = io.BytesIO()
         wb.save(buffer)
         buffer.seek(0)
@@ -709,18 +728,21 @@ def print_view():
         gt = grand_totals['grand_total']
 
         if start_date and end_date:
-            period = _period_label(start_date, end_date)
+            date_label = _period_label(start_date, end_date)
+            period_plain = _range_plain(start_date, end_date)
         else:
             data_start, data_end = _fetch_date_range(where_sql, params)
-            period = _period_label(data_start, data_end) or (f"Name : {lessee_nm}" if lessee_nm else '')
+            date_label = ''
+            period_plain = _range_plain(data_start, data_end)
+        period = f"Name : {lessee_nm}" if lessee_nm else date_label
 
         html = _PRINT_TEMPLATE.format(
-            company = current_app.config.get('COMPANY_NAME', ''),
+            company = get_company_name(),
             today = datetime.now().strftime('%d-%m-%Y'),
             printed_by = session.get('username', ''),
             branch_name = _branch_name(scope['branch_cd_search']) or 'All Branches',
             period = period,
-            period_plain = period.replace('Period : ', '') or 'All Dates',
+            period_plain = period_plain or 'All Dates',
             rows_html = _render_rows_html(rows),
             sl_rows = _render_segment_rows_html('SL', grand_totals['sl']),
             if_rows = _render_segment_rows_html('IF', grand_totals['if']),

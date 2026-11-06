@@ -7,9 +7,11 @@ from flask import Blueprint, jsonify, request, current_app, session, send_file, 
 
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, Side
+from openpyxl.utils import get_column_letter
 
 from app import db
 from app.auth.decorators import login_required
+from app.utils.helpers.settings_helpers import company_name as get_company_name
 
 approved_cam_by_dealer_bp = Blueprint('approved_cam_by_dealer', __name__, url_prefix='/CAM/Approved')
 
@@ -46,7 +48,7 @@ def _fmt_ddmmyyyy(d: Optional[date]) -> str:
     return d.strftime('%d-%m-%Y') if d else ''
 
 def _branch_name(branch_cd: str) -> str:
-    if not branch_cd or branch_cd == '000':
+    if not branch_cd:
         return ''
     rows = _exec_rows("SELECT BRANCH_NAME FROM UMFBRANCH WITH (NOLOCK) WHERE BRANCH_CD = ?", [branch_cd])
     return rows[0]['BRANCH_NAME'] if rows else ''
@@ -261,6 +263,10 @@ def get_list():
             'summary': summary,
             'show_branch_column': branch_cd_search == '000',
             'show_dealer_column': dealer_nickname == '',
+            'company_name': get_company_name(),
+            'printed_by': session.get('username', ''),
+            'branch_name': _branch_name(branch_cd_search),
+            'period_label': _period_label(start_date, end_date),
         })
     except Exception as e:
         current_app.logger.exception("CAM by Dealer list error")
@@ -278,9 +284,12 @@ def _build_workbook(start_date, end_date, branch_cd_search, dealer_nickname, row
     ws = wb.active
     ws.title = 'CamByDealer'
 
-    ws['A1'] = current_app.config.get('COMPANY_NAME', '')
-    ws['D1'] = f"Date : {datetime.now().strftime('%d-%m-%Y')}\nPrint By : {session.get('username', '')}"
-    ws['D1'].alignment = Alignment(wrap_text=True)
+    ws['A1'] = get_company_name()
+
+    last_col = get_column_letter(5 + int(show_dealer) + int(show_branch))
+    ws[f'{last_col}1'] = f"Date : {datetime.now().strftime('%d-%m-%Y')}\nPrint By : {session.get('username', '')}"
+    ws[f'{last_col}1'].alignment = Alignment(wrap_text=True, horizontal='left', vertical='top')
+    ws.row_dimensions[1].height = 30
 
     ws.merge_cells('A2:D2')
     ws['A2'] = 'List Approved by Dealer per Disbursement Date'
@@ -351,6 +360,7 @@ def _build_workbook(start_date, end_date, branch_cd_search, dealer_nickname, row
     ws.column_dimensions['A'].width = 6
     for col in 'BCDEFG':
         ws.column_dimensions[col].width = 20
+    ws.column_dimensions[last_col].width = max(ws.column_dimensions[last_col].width or 0, 20)
 
     return wb
 
@@ -493,7 +503,7 @@ def print_view():
         show_dealer = dealer_nickname == ''
 
         html = _PRINT_TEMPLATE.format(
-            company=current_app.config.get('COMPANY_NAME', ''),
+            company=get_company_name(),
             today=datetime.now().strftime('%d-%m-%Y'),
             printed_by=session.get('username', ''),
             period=_period_label(start_date, end_date),
