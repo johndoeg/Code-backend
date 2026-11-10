@@ -20,6 +20,9 @@ PIN_EXPIRY_MINUTES = 5
 MAX_PIN_ATTEMPTS = 3
 OTP_REQUEST_TYPE = 'CAM'
 
+OTP_CAM_SETTING_KEY = 'otp_cam'
+OTP_ON_VALUES = ('1', 'y', 'yes', 'true', 'on')
+
 TELEGRAM_TIMEOUT = (3.05, 5)
 TELEGRAM_SLOW_WARN_SECONDS = 3.0
 
@@ -67,6 +70,44 @@ def _insert_audit_log(user_id: str, event: str) -> None:
                 db.session.remove()
 
     threading.Thread(target=_write, daemon=True).start()
+
+def _otp_cam_requires_otp() -> bool:
+    """OTP is required only when SettingsEmail [Key] = 'otp_cam' holds 1.
+
+    Any other stored value - 0, blank, or junk - means no OTP. The value is
+    compared as a lowercased string because [Value] is nvarchar(510): the
+    driver returns '0', and bool('0') is True in Python, so the raw value must
+    never be tested for truthiness.
+
+    A missing row or a DB error returns True (fail closed, OTP stays required)
+    rather than silently disabling two-factor login, and is logged at WARNING.
+    """
+    try:
+        row = db.session.execute(db.text("""
+            SELECT TOP 1 [Value]
+            FROM SettingsEmail WITH (NOLOCK)
+            WHERE [Key] = :key
+        """), {"key": OTP_CAM_SETTING_KEY}).fetchone()
+    except Exception:
+        current_app.logger.exception(
+            "otp_cam: SettingsEmail read failed - OTP stays required"
+        )
+        return True
+
+    if row is None:
+        current_app.logger.warning(
+            "otp_cam: no SettingsEmail row for [Key]=%r - OTP stays required",
+            OTP_CAM_SETTING_KEY,
+        )
+        return True
+
+    raw = row[0]
+    text = "" if raw is None else str(raw).strip().strip("\u200b\ufeff\xa0").strip().lower()
+    required = text in OTP_ON_VALUES
+    current_app.logger.warning(
+        "otp_cam: Value=%r -> OTP %s", raw, "required" if required else "bypassed"
+    )
+    return required
 
 def _send_telegram_pin(chat_id: str, pin: str, expires_in_minutes: int) -> bool:
     bot_token = current_app.config.get("TELEGRAM_BOT_TOKEN")
@@ -186,7 +227,7 @@ def login():
                 "message": "Your Access Cam is still empty, please contact helpdesk"
             }), 403
 
-        if not otp_required():
+        if not _otp_cam_requires_otp() or not otp_required():
             for key in [k for k in session.keys() if k.startswith('pending_')]:
                 session.pop(key, None)
             _start_session(db_username, emp_id, accesscam, branchcode, branch_call, full_name, branch_name)
