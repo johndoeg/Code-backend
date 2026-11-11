@@ -1,65 +1,47 @@
 from __future__ import annotations
 
-import io
-from datetime import date, datetime
+from datetime import date
 from typing import Optional
-from flask import Blueprint, jsonify, request, current_app, session, send_file, Response
+from flask import Blueprint, jsonify, request, current_app, Response
 
 from openpyxl import Workbook
-from openpyxl.styles import Alignment, Border, Font, Side
-from openpyxl.utils import get_column_letter
 
-from app import db
 from app.auth.decorators import login_required
+from app.utils.helpers.base_format import (
+    ALL_BORDERS,
+    CENTER,
+    HEADER_FONT,
+    RIGHT,
+    WRAP_TOP_LEFT,
+    _access_level,
+    _branch,
+    _emp_id,
+    _username,
+    branch_name,
+    exec_rows,
+    fetch_branch_list,
+    num,
+    parse_iso_date,
+    period_label,
+    today_ddmmyyyy,
+    workbook_response,
+)
 from app.utils.helpers.settings_helpers import company_name as get_company_name
 
 summary_approved_cam_bp = Blueprint('summary_approved_cam', __name__, url_prefix='/CAM/Approved')
-
-def _exec_rows(sql: str, params: list) -> list[dict]:
-    raw_conn = db.session.connection().connection
-    cursor = raw_conn.cursor()
-    try:
-        cursor.execute(sql, params)
-        if cursor.description is None:
-            return []
-        columns = [col[0] for col in cursor.description]
-        return [dict(zip(columns, row)) for row in cursor.fetchall()]
-    finally:
-        cursor.close()
-
-def _parse_date(raw: str) -> Optional[date]:
-    raw = (raw or '').strip()
-    if not raw:
-        return None
-    try:
-        return datetime.strptime(raw, '%Y-%m-%d').date()
-    except ValueError:
-        return None
-
-def _num(val) -> float:
-    if val is None:
-        return 0.0
-    return float(val)
-
-def _fmt_ddmmyyyy(d: Optional[date]) -> str:
-    return d.strftime('%d-%m-%Y') if d else ''
 
 @summary_approved_cam_bp.route('/summary-approved-cam/branches')
 @login_required
 def list_branches():
     try:
-        rows = _exec_rows(
-            "SELECT BRANCH_CD, BRANCH_NAME FROM UMFBRANCH WITH (NOLOCK) WHERE BRANCH_CD <> '100' ORDER BY BRANCH_CD",
-            [],
-        )
-        return jsonify([{'branch_cd': r.get('BRANCH_CD'), 'branch_name': r.get('BRANCH_NAME')} for r in rows])
+        return jsonify(fetch_branch_list())
     except Exception as e:
         current_app.logger.exception("Branch list error")
         return jsonify({'error': str(e)}), 500
 
 def _resolve_branch(requested_branch_cd: str, cmo_branch_param):
-    access_level = session.get('accesslevel')
-    own_branch_cd = session.get('branchcode')
+    access_level = _access_level()
+    own_branch_cd = _branch()
 
     if access_level in ('CMO', 'CMH', 'BM'):
         return {'search_branch': own_branch_cd, 'disabled': True, 'sp_branch_param': cmo_branch_param}
@@ -81,12 +63,12 @@ def _fetch_rows(start_date: Optional[date], end_date: Optional[date], sp_branch_
     params = [
         start_date.isoformat() if start_date else '',
         end_date.isoformat() if end_date else '',
-        session.get('emp_id'),
-        session.get('branchcode'),
-        session.get('accesslevel'),
+        _emp_id(),
+        _branch(),
+        _access_level(),
         sp_branch_param,
     ]
-    return _exec_rows(sql, params)
+    return exec_rows(sql, params)
 
 def _process_rows(rows: list[dict]) -> list[dict]:
     out: list[dict] = []
@@ -96,12 +78,12 @@ def _process_rows(rows: list[dict]) -> list[dict]:
     temp_fullname = None
 
     for r in rows:
-        baris = _num(r.get('baris'))
+        baris = num(r.get('baris'))
         fullname = r.get('FULLNAME')
-        unit_new = _num(r.get('unit_new'))
-        unit_rev = _num(r.get('unit_rev'))
-        net_new = _num(r.get('net_finance_new'))
-        net_rev = _num(r.get('net_finance_rev'))
+        unit_new = num(r.get('unit_new'))
+        unit_rev = num(r.get('unit_rev'))
+        net_new = num(r.get('net_finance_new'))
+        net_rev = num(r.get('net_finance_rev'))
         total_unit = unit_new + unit_rev
         total_amt = net_new + net_rev
 
@@ -153,22 +135,11 @@ def _process_rows(rows: list[dict]) -> list[dict]:
     })
     return out
 
-def _period_label(start_date: Optional[date], end_date: Optional[date], branch_cd_search: str) -> str:
-    if start_date and end_date:
-        return f"Period : {_fmt_ddmmyyyy(start_date)} to {_fmt_ddmmyyyy(end_date)}"
-    return ''
-
-def _branch_name(branch_cd: str) -> str:
-    if not branch_cd:
-        return ''
-    rows = _exec_rows("SELECT BRANCH_NAME FROM UMFBRANCH WITH (NOLOCK) WHERE BRANCH_CD = ?", [branch_cd])
-    return rows[0]['BRANCH_NAME'] if rows else ''
-
 @summary_approved_cam_bp.route('/summary-approved-cam/list')
 @login_required
 def get_list():
-    start_date = _parse_date(request.args.get('start_date', ''))
-    end_date = _parse_date(request.args.get('end_date', ''))
+    start_date = parse_iso_date(request.args.get('start_date', ''))
+    end_date = parse_iso_date(request.args.get('end_date', ''))
     requested_branch = request.args.get('branch_cd_search', '').strip()
 
     resolved = _resolve_branch(requested_branch, '')
@@ -180,9 +151,9 @@ def get_list():
             'disabled': resolved['disabled'],
             'search_branch': resolved['search_branch'],
             'company_name': get_company_name(),
-            'printed_by': session.get('username', ''),
-            'branch_name': _branch_name(resolved['search_branch']),
-            'period_label': _period_label(start_date, end_date, resolved['search_branch']),
+            'printed_by': _username(),
+            'branch_name': branch_name(resolved['search_branch']),
+            'period_label': period_label(start_date, end_date),
         })
     except Exception as e:
         current_app.logger.exception("Summary Approved CAM list error")
@@ -286,8 +257,8 @@ def _render_rows_html(data: list[dict]) -> str:
 @summary_approved_cam_bp.route('/summary-approved-cam/print')
 @login_required
 def print_view():
-    start_date = _parse_date(request.args.get('start_date', ''))
-    end_date = _parse_date(request.args.get('end_date', ''))
+    start_date = parse_iso_date(request.args.get('start_date', ''))
+    end_date = parse_iso_date(request.args.get('end_date', ''))
     requested_branch = request.args.get('branch_cd_search', '').strip()
 
     resolved = _resolve_branch(requested_branch, None)
@@ -296,22 +267,16 @@ def print_view():
         data = _process_rows(rows)
         html = _PRINT_TEMPLATE.format(
             company=get_company_name(),
-            today=datetime.now().strftime('%d-%m-%Y'),
-            printed_by=session.get('username', ''),
-            branch_name=_branch_name(resolved['search_branch']),
-            period=_period_label(start_date, end_date, resolved['search_branch']),
+            today=today_ddmmyyyy(),
+            printed_by=_username(),
+            branch_name=branch_name(resolved['search_branch']),
+            period=period_label(start_date, end_date),
             rows_html=_render_rows_html(data),
         )
         return Response(html, mimetype='text/html')
     except Exception as e:
         current_app.logger.exception("Summary Approved CAM print error")
         return jsonify({'error': str(e)}), 500
-
-_THIN_SIDE = Side(style='thin', color='FF000000')
-_ALL_BORDERS = Border(top=_THIN_SIDE, bottom=_THIN_SIDE, left=_THIN_SIDE, right=_THIN_SIDE)
-_HEADER_FONT = Font(bold=True)
-_CENTER = Alignment(horizontal='center', vertical='center')
-_RIGHT = Alignment(horizontal='right')
 
 def _build_workbook(start_date: Optional[date], end_date: Optional[date], resolved: dict, data: list[dict]) -> Workbook:
     wb = Workbook()
@@ -320,20 +285,20 @@ def _build_workbook(start_date: Optional[date], end_date: Optional[date], resolv
 
     ws['A1'] = get_company_name()
 
-    ws['H1'] = f"Date : {datetime.now().strftime('%d-%m-%Y')}\nPrint By : {session.get('username', '')}"
-    ws['H1'].alignment = Alignment(wrap_text=True, horizontal='left', vertical='top')
+    ws['H1'] = f"Date : {today_ddmmyyyy()}\nPrint By : {_username()}"
+    ws['H1'].alignment = WRAP_TOP_LEFT
     ws.row_dimensions[1].height = 30
 
     ws.merge_cells('A2:D2')
     ws['A2'] = 'Summary Approved CAM'
-    ws['A2'].font = _HEADER_FONT
-    ws['A2'].alignment = _CENTER
+    ws['A2'].font = HEADER_FONT
+    ws['A2'].alignment = CENTER
 
     ws.merge_cells('A3:D3')
-    ws['A3'] = f"Branch : {_branch_name(resolved['search_branch'])}"
+    ws['A3'] = f"Branch : {branch_name(resolved['search_branch'])}"
 
     ws.merge_cells('A4:D4')
-    ws['A4'] = _period_label(start_date, end_date, resolved['search_branch'])
+    ws['A4'] = period_label(start_date, end_date)
 
     header_row1 = 6
     header_row2 = 7
@@ -358,8 +323,8 @@ def _build_workbook(start_date: Optional[date], end_date: Optional[date], resolv
     for row_num in (header_row1, header_row2):
         for col in 'ABCDEFGH':
             cell = ws[f'{col}{row_num}']
-            cell.border = _ALL_BORDERS
-            cell.alignment = _CENTER
+            cell.border = ALL_BORDERS
+            cell.alignment = CENTER
 
     excel_row = header_row2 + 1
     for row in data:
@@ -381,9 +346,9 @@ def _build_workbook(start_date: Optional[date], end_date: Optional[date], resolv
 
         for col in 'ABCDEFGH':
             cell = ws[f'{col}{excel_row}']
-            cell.border = _ALL_BORDERS
+            cell.border = ALL_BORDERS
             if col not in ('A', 'B'):
-                cell.alignment = _RIGHT
+                cell.alignment = RIGHT
 
         excel_row += 1
 
@@ -398,8 +363,8 @@ def _build_workbook(start_date: Optional[date], end_date: Optional[date], resolv
 @summary_approved_cam_bp.route('/summary-approved-cam/export')
 @login_required
 def export_excel():
-    start_date = _parse_date(request.args.get('start_date', ''))
-    end_date = _parse_date(request.args.get('end_date', ''))
+    start_date = parse_iso_date(request.args.get('start_date', ''))
+    end_date = parse_iso_date(request.args.get('end_date', ''))
     requested_branch = request.args.get('branch_cd_search', '').strip()
 
     resolved = _resolve_branch(requested_branch, None)
@@ -407,16 +372,7 @@ def export_excel():
         rows = _fetch_rows(start_date, end_date, resolved['sp_branch_param'])
         data = _process_rows(rows)
         wb = _build_workbook(start_date, end_date, resolved, data)
-
-        buffer = io.BytesIO()
-        wb.save(buffer)
-        buffer.seek(0)
-        return send_file(
-            buffer,
-            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-            as_attachment=True,
-            download_name='SummaryApprovedCam.xlsx',
-        )
+        return workbook_response(wb, 'SummaryApprovedCam.xlsx')
     except Exception as e:
         current_app.logger.exception("Summary Approved CAM export error")
         return jsonify({'error': str(e)}), 500

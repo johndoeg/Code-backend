@@ -1,64 +1,49 @@
 from __future__ import annotations
 
-import io
-from datetime import date, datetime
+from datetime import date
 from typing import Optional
-from flask import Blueprint, jsonify, request, current_app, session, send_file, Response
+from flask import Blueprint, jsonify, request, current_app, Response
 
 from openpyxl import Workbook
-from openpyxl.styles import Alignment, Border, Font, Side
 
-from app import db
 from app.auth.decorators import login_required
+from app.utils.helpers.base_format import (
+    ALL_BORDERS,
+    CENTER,
+    HEADER_FONT,
+    RED_BOLD_FONT,
+    RIGHT,
+    _access_level,
+    _branch,
+    _emp_id,
+    _username,
+    branch_name,
+    env_int,
+    exec_rows,
+    fetch_subordinate_ids,
+    fmt_long,
+    num,
+    parse_iso_date,
+    period_label,
+    range_plain,
+    today_ddmmyyyy,
+    workbook_response,
+    write_report_header,
+)
 from app.utils.helpers.settings_helpers import company_name as get_company_name
 
 rejected_cam_bp = Blueprint('rejected_cam', __name__, url_prefix='/CAM/Approved')
 
-PAGE_SIZE_DEFAULT = 20
+PAGE_SIZE_DEFAULT = env_int('PAGE_SIZE_DEFAULT', 25)
 
 _PASSENGER_MODELS = ['01', '02', '03']
 _COMMERCIAL_MODELS = ['04', '05', '06', '07', '08', '09', '10']
-
-def _exec_rows(sql: str, params: list) -> list[dict]:
-    raw_conn = db.session.connection().connection
-    cursor = raw_conn.cursor()
-    try:
-        cursor.execute(sql, params)
-        if cursor.description is None:
-            return []
-        columns = [col[0] for col in cursor.description]
-        return [dict(zip(columns, row)) for row in cursor.fetchall()]
-    finally:
-        cursor.close()
-
-def _parse_date(raw: str) -> Optional[date]:
-    raw = (raw or '').strip()
-    if not raw:
-        return None
-    try:
-        return datetime.strptime(raw, '%Y-%m-%d').date()
-    except ValueError:
-        return None
-
-def _num(val) -> float:
-    if val is None:
-        return 0.0
-    return float(val)
-
-def _fmt_ddmmyyyy(d: Optional[date]) -> str:
-    return d.strftime('%d-%m-%Y') if d else ''
-
-def _branch_name(branch_cd: str) -> str:
-    if not branch_cd:
-        return ''
-    rows = _exec_rows("SELECT BRANCH_NAME FROM UMFBRANCH WITH (NOLOCK) WHERE BRANCH_CD = ?", [branch_cd])
-    return rows[0]['BRANCH_NAME'] if rows else ''
 
 @rejected_cam_bp.route('/rejected-cam/branches')
 @login_required
 def list_branches():
     try:
-        rows = _exec_rows(
+        rows = exec_rows(
             "SELECT BRANCH_CD, BRANCH_NAME FROM UMFBRANCH WITH (NOLOCK) WHERE BRANCH_CD NOT IN ('100') ORDER BY BRANCH_CD",
             [],
         )
@@ -76,20 +61,20 @@ def reject_detail_options():
     try:
         if rejected_by in ('CMH', 'BM'):
             if branch_cd == '000':
-                rows = _exec_rows(
+                rows = exec_rows(
                     "SELECT USERNAME, EMPLOYEE_ID FROM APP_USRMST WITH (NOLOCK) "
                     "WHERE RECSTATUS = 'A' AND ACCESSCAM = ?",
                     [rejected_by],
                 )
             else:
-                rows = _exec_rows(
+                rows = exec_rows(
                     "SELECT USERNAME, EMPLOYEE_ID FROM APP_USRMST WITH (NOLOCK) "
                     "WHERE RECSTATUS = 'A' AND ACCESSCAM = ? AND BRANCHCODE = ?",
                     [rejected_by, branch_cd],
                 )
             options = [{'value': r.get('USERNAME'), 'label': r.get('USERNAME')} for r in rows]
         elif rejected_by == 'CRH':
-            rows = _exec_rows(
+            rows = exec_rows(
                 "SELECT USERNAME, EMPLOYEE_ID FROM APP_USRMST WITH (NOLOCK) "
                 "WHERE RECSTATUS = 'A' AND ACCESSCAM = ?",
                 [rejected_by],
@@ -105,9 +90,9 @@ def reject_detail_options():
         return jsonify({'error': str(e)}), 500
 
 def _resolve_scope(requested_branch_cd: str) -> dict:
-    access_level = session.get('accesslevel')
-    emp_id = session.get('emp_id')
-    own_branch_cd = session.get('branchcode')
+    access_level = _access_level()
+    emp_id = _emp_id()
+    own_branch_cd = _branch()
 
     if access_level == 'CMO':
         return {
@@ -117,11 +102,7 @@ def _resolve_scope(requested_branch_cd: str) -> dict:
             'filter_params': [emp_id],
         }
     if access_level == 'CMH':
-        subordinates = _exec_rows(
-            "SELECT EMPLOYEE_ID FROM APP_USRMST WITH (NOLOCK) WHERE EMPLOYEE_ID = ? OR SUPERIOR = ?",
-            [emp_id, emp_id],
-        )
-        ids = [r['EMPLOYEE_ID'] for r in subordinates] or [emp_id]
+        ids = fetch_subordinate_ids(emp_id)
         placeholders = ','.join(['?'] * len(ids))
         return {
             'disabled': True,
@@ -189,19 +170,19 @@ def _fetch_detail_rows(
     params = [reject_detail] + scope['filter_params'] + date_params
 
     count_sql = f"SELECT COUNT(*) AS cnt FROM ({base_sql}) ranked WHERE rn = 1"
-    count_rows = _exec_rows(count_sql, params)
+    count_rows = exec_rows(count_sql, params)
     total_count = count_rows[0]['cnt'] if count_rows else 0
 
     if page is None:
         list_sql = f"SELECT * FROM ({base_sql}) ranked WHERE rn = 1 ORDER BY APPL_NO"
-        rows = _exec_rows(list_sql, params)
+        rows = exec_rows(list_sql, params)
     else:
         offset = max(page - 1, 0) * page_size
         list_sql = (
             f"SELECT * FROM ({base_sql}) ranked WHERE rn = 1 ORDER BY APPL_NO "
             f"OFFSET ? ROWS FETCH NEXT ? ROWS ONLY"
         )
-        rows = _exec_rows(list_sql, params + [offset, page_size])
+        rows = exec_rows(list_sql, params + [offset, page_size])
 
     return rows, total_count
 
@@ -220,7 +201,7 @@ def _row_to_detail(row: dict) -> dict:
         'cons_leas': row.get('Cons_Leas'),
         'rejected_date': appr_date.strftime('%d-%m-%Y') if appr_date else '',
         'customer_name': row.get('LESSEE_NM') or '-',
-        'net_finance': _num(row.get('Net_Finance')),
+        'net_finance': num(row.get('Net_Finance')),
         'rejected_by': row.get('APPR_ID'),
         'edit_link_params': {
             'id1': fin_type, 'id2': ind_cor, 'id3': 1, 'id4': guarantor, 'id5': new_car,
@@ -230,7 +211,7 @@ def _row_to_detail(row: dict) -> dict:
     }
 
 def _fetch_grand_total(start_date: Optional[date], end_date: Optional[date], scope: dict, reject_detail: str) -> dict:
-   
+
     date_sql, date_params = _date_filter_sql(start_date, end_date)
 
     def _bucket(models: list[str], condition: str) -> dict:
@@ -256,9 +237,9 @@ def _fetch_grand_total(start_date: Optional[date], end_date: Optional[date], sco
             ) q
         """
         params = [reject_detail] + scope['filter_params'] + date_params + models + [condition]
-        rows = _exec_rows(sql, params)
+        rows = exec_rows(sql, params)
         r = rows[0] if rows else {'tot_fin': 0, 'tot_unit': 0}
-        return {'net_finance': _num(r.get('tot_fin')), 'units': int(_num(r.get('tot_unit')))}
+        return {'net_finance': num(r.get('tot_fin')), 'units': int(num(r.get('tot_unit')))}
 
     pass_new = _bucket(_PASSENGER_MODELS, 'NEW')
     pass_used = _bucket(_PASSENGER_MODELS, 'USED')
@@ -278,25 +259,20 @@ def _fetch_grand_total(start_date: Optional[date], end_date: Optional[date], sco
         'grand_total': grand,
     }
 
-def _period_label(start_date: Optional[date], end_date: Optional[date], rows: list[dict]) -> str:
-    if start_date and end_date:
-        return f"Period : {_fmt_ddmmyyyy(start_date)} to {_fmt_ddmmyyyy(end_date)}"
-    return ''
-
 def _grand_total_period(start_date: Optional[date], end_date: Optional[date], rows: list[dict]) -> str:
     if start_date and end_date:
-        return f"{_fmt_ddmmyyyy(start_date)} to {_fmt_ddmmyyyy(end_date)}"
+        return range_plain(start_date, end_date)
     if rows:
         first = rows[0].get('APPR_DATE')
         last = rows[-1].get('APPR_DATE')
-        return f"{first.strftime('%d %B %Y') if first else ''} - {last.strftime('%d %B %Y') if last else ''}"
+        return f"{fmt_long(first)} - {fmt_long(last)}"
     return ''
 
 @rejected_cam_bp.route('/rejected-cam/list')
 @login_required
 def get_list():
-    start_date = _parse_date(request.args.get('start_date', ''))
-    end_date = _parse_date(request.args.get('end_date', ''))
+    start_date = parse_iso_date(request.args.get('start_date', ''))
+    end_date = parse_iso_date(request.args.get('end_date', ''))
     requested_branch = request.args.get('branch_cd_search', '').strip()
     reject_detail = request.args.get('reject_detail', '').strip()
     page = int(request.args.get('page', 1) or 1)
@@ -318,59 +294,49 @@ def get_list():
             'disabled': scope['disabled'],
             'search_branch': scope['search_branch'],
             'company_name': get_company_name(),
-            'printed_by': session.get('username', ''),
-            'branch_name': _branch_name(scope['search_branch']),
-            'period_label': _period_label(start_date, end_date, rows),
+            'printed_by': _username(),
+            'branch_name': branch_name(scope['search_branch']),
+            'period_label': period_label(start_date, end_date),
         })
     except Exception as e:
         current_app.logger.exception("Rejected CAM list error")
         return jsonify({'error': str(e)}), 500
 
-_THIN_SIDE = Side(style='thin', color='FF000000')
-_ALL_BORDERS = Border(top=_THIN_SIDE, bottom=_THIN_SIDE, left=_THIN_SIDE, right=_THIN_SIDE)
-_TITLE_FONT = Font(bold=True, size=14)
-_HEADER_FONT = Font(bold=True)
-_CENTER = Alignment(horizontal='center', vertical='center')
-_RIGHT = Alignment(horizontal='right')
+_SEGMENT_LABELS = [
+    ('Passenger', 'passenger_new'), ('Passenger', 'passenger_used'),
+    ('Commercial', 'commercial_new'), ('Commercial', 'commercial_used'),
+]
 
 def _build_workbook(start_date, end_date, scope, reject_detail, rows, grand_total) -> Workbook:
     wb = Workbook()
     ws = wb.active
     ws.title = 'ListRejectedCam'
 
-    ws['A1'] = get_company_name()
-
-    ws['E1'] = f"Date : {datetime.now().strftime('%d-%m-%Y')}\nPrint By : {session.get('username', '')}"
-    ws['E1'].alignment = Alignment(wrap_text=True, horizontal='left', vertical='top')
-    ws.row_dimensions[1].height = 30
+    write_report_header(
+        ws,
+        title='List Rejected CAM',
+        branch_line=f"Branch : {branch_name(scope['search_branch'])}",
+        period_line=period_label(start_date, end_date),
+        stamp_cell='E1',
+        title_size=14,
+    )
     ws.column_dimensions['E'].width = max(ws.column_dimensions['E'].width or 0, 20)
-
-    ws.merge_cells('A2:D2')
-    ws['A2'] = 'List Rejected CAM'
-    ws['A2'].font = _TITLE_FONT
-    ws['A2'].alignment = _CENTER
-
-    ws.merge_cells('A3:D3')
-    ws['A3'] = f"Branch : {_branch_name(scope['search_branch'])}"
-
-    ws.merge_cells('A4:D4')
-    ws['A4'] = _period_label(start_date, end_date, rows)
 
     header_row = 6
     headers = ['Rejected Date', 'CAM No.', 'Customer Name', 'Net Finance', 'Rejected By']
     for col_idx, label in enumerate(headers, start=1):
         cell = ws.cell(row=header_row, column=col_idx, value=label)
-        cell.font = _HEADER_FONT
-        cell.border = _ALL_BORDERS
-        cell.alignment = _CENTER
+        cell.font = HEADER_FONT
+        cell.border = ALL_BORDERS
+        cell.alignment = CENTER
 
     excel_row = header_row + 1
     if not rows:
         ws.merge_cells(f'A{excel_row}:E{excel_row}')
         cell = ws[f'A{excel_row}']
         cell.value = 'Data Not Found'
-        cell.font = Font(color='FFFF0000', bold=True)
-        cell.alignment = _CENTER
+        cell.font = RED_BOLD_FONT
+        cell.alignment = CENTER
         excel_row += 1
     else:
         for r in rows:
@@ -384,39 +350,36 @@ def _build_workbook(start_date, end_date, scope, reject_detail, rows, grand_tota
             ]
             for col_idx, val in enumerate(values, start=1):
                 cell = ws.cell(row=excel_row, column=col_idx, value=val)
-                cell.border = _ALL_BORDERS
+                cell.border = ALL_BORDERS
                 if col_idx == 4:
-                    cell.alignment = _RIGHT
+                    cell.alignment = RIGHT
             excel_row += 1
 
     excel_row += 1
     ws.merge_cells(f'A{excel_row}:D{excel_row}')
     ws[f'A{excel_row}'] = 'Grand Total* (based on latest revised CAM, if any)'
-    ws[f'A{excel_row}'].font = _HEADER_FONT
+    ws[f'A{excel_row}'].font = HEADER_FONT
     excel_row += 1
 
     for col_idx, label in enumerate(['Type', 'Condition', 'Net Finance', 'Units'], start=1):
         cell = ws.cell(row=excel_row, column=col_idx, value=label)
-        cell.font = _HEADER_FONT
+        cell.font = HEADER_FONT
     excel_row += 1
 
-    for type_label, bucket in [
-        ('Passenger', 'passenger_new'), ('Passenger', 'passenger_used'),
-        ('Commercial', 'commercial_new'), ('Commercial', 'commercial_used'),
-    ]:
+    for type_label, bucket in _SEGMENT_LABELS:
         condition_label = 'New' if 'new' in bucket else 'Used'
         b = grand_total[bucket]
         ws.cell(row=excel_row, column=1, value=type_label)
         ws.cell(row=excel_row, column=2, value=condition_label)
-        ws.cell(row=excel_row, column=3, value=b['net_finance']).alignment = _RIGHT
-        ws.cell(row=excel_row, column=4, value=b['units']).alignment = _RIGHT
+        ws.cell(row=excel_row, column=3, value=b['net_finance']).alignment = RIGHT
+        ws.cell(row=excel_row, column=4, value=b['units']).alignment = RIGHT
         excel_row += 1
 
     ws.merge_cells(f'A{excel_row}:B{excel_row}')
     ws[f'A{excel_row}'] = 'Grand Total'
-    ws[f'A{excel_row}'].font = _HEADER_FONT
-    ws.cell(row=excel_row, column=3, value=grand_total['grand_total']['net_finance']).alignment = _RIGHT
-    ws.cell(row=excel_row, column=4, value=grand_total['grand_total']['units']).alignment = _RIGHT
+    ws[f'A{excel_row}'].font = HEADER_FONT
+    ws.cell(row=excel_row, column=3, value=grand_total['grand_total']['net_finance']).alignment = RIGHT
+    ws.cell(row=excel_row, column=4, value=grand_total['grand_total']['units']).alignment = RIGHT
 
     for col, width in zip('ABCDE', [15, 20, 30, 15, 20]):
         ws.column_dimensions[col].width = width
@@ -426,8 +389,8 @@ def _build_workbook(start_date, end_date, scope, reject_detail, rows, grand_tota
 @rejected_cam_bp.route('/rejected-cam/export')
 @login_required
 def export_excel():
-    start_date = _parse_date(request.args.get('start_date', ''))
-    end_date = _parse_date(request.args.get('end_date', ''))
+    start_date = parse_iso_date(request.args.get('start_date', ''))
+    end_date = parse_iso_date(request.args.get('end_date', ''))
     requested_branch = request.args.get('branch_cd_search', '').strip()
     reject_detail = request.args.get('reject_detail', '').strip()
 
@@ -439,16 +402,7 @@ def export_excel():
         rows, _total = _fetch_detail_rows(start_date, end_date, scope, reject_detail)
         grand_total = _fetch_grand_total(start_date, end_date, scope, reject_detail)
         wb = _build_workbook(start_date, end_date, scope, reject_detail, rows, grand_total)
-
-        buffer = io.BytesIO()
-        wb.save(buffer)
-        buffer.seek(0)
-        return send_file(
-            buffer,
-            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-            as_attachment=True,
-            download_name='ListRejectedCam.xlsx',
-        )
+        return workbook_response(wb, 'ListRejectedCam.xlsx')
     except Exception as e:
         current_app.logger.exception("Rejected CAM export error")
         return jsonify({'error': str(e)}), 500
@@ -531,10 +485,7 @@ def _render_detail_rows_html(rows: list[dict]) -> str:
 
 def _render_grand_rows_html(grand_total: dict) -> str:
     parts = []
-    for type_label, bucket in [
-        ('Passenger', 'passenger_new'), ('Passenger', 'passenger_used'),
-        ('Commercial', 'commercial_new'), ('Commercial', 'commercial_used'),
-    ]:
+    for type_label, bucket in _SEGMENT_LABELS:
         condition_label = 'New' if 'new' in bucket else 'Used'
         b = grand_total[bucket]
         parts.append(f"""
@@ -549,8 +500,8 @@ def _render_grand_rows_html(grand_total: dict) -> str:
 @rejected_cam_bp.route('/rejected-cam/print')
 @login_required
 def print_view():
-    start_date = _parse_date(request.args.get('start_date', ''))
-    end_date = _parse_date(request.args.get('end_date', ''))
+    start_date = parse_iso_date(request.args.get('start_date', ''))
+    end_date = parse_iso_date(request.args.get('end_date', ''))
     requested_branch = request.args.get('branch_cd_search', '').strip()
     reject_detail = request.args.get('reject_detail', '').strip()
 
@@ -563,10 +514,10 @@ def print_view():
         grand_total = _fetch_grand_total(start_date, end_date, scope, reject_detail)
         html = _PRINT_TEMPLATE.format(
             company=get_company_name(),
-            today=datetime.now().strftime('%d-%m-%Y'),
-            printed_by=session.get('username', ''),
-            branch_name=_branch_name(scope['search_branch']),
-            period=_period_label(start_date, end_date, rows),
+            today=today_ddmmyyyy(),
+            printed_by=_username(),
+            branch_name=branch_name(scope['search_branch']),
+            period=period_label(start_date, end_date),
             period_plain=_grand_total_period(start_date, end_date, rows) or 'All Dates',
             rows_html=_render_detail_rows_html(rows),
             grand_rows_html=_render_grand_rows_html(grand_total),

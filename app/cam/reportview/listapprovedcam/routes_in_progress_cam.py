@@ -1,15 +1,36 @@
 from __future__ import annotations
 
-import io
-from datetime import date, datetime
+from datetime import date
 from typing import Optional
-from flask import Blueprint, jsonify, request, current_app, session, send_file, Response
+from flask import Blueprint, jsonify, request, current_app, Response
 
 from openpyxl import Workbook
-from openpyxl.styles import Alignment, Border, Font, Side
 
-from app import db
 from app.auth.decorators import login_required
+from app.utils.helpers.base_format import (
+    ALL_BORDERS,
+    CENTER,
+    HEADER_FONT,
+    ITALIC_FONT,
+    RED_BOLD_FONT,
+    RIGHT,
+    _access_level,
+    _branch,
+    _emp_id,
+    _username,
+    branch_name,
+    exec_rows,
+    fetch_branch_list,
+    fetch_revisions,
+    fetch_subordinate_ids,
+    num,
+    parse_iso_date,
+    period_label,
+    period_label_long,
+    today_ddmmyyyy,
+    workbook_response,
+    write_report_header,
+)
 from app.utils.helpers.settings_helpers import company_name as get_company_name
 
 in_progress_cam_bp = Blueprint('in_progress_cam', __name__, url_prefix='/CAM/Approved')
@@ -19,58 +40,10 @@ PAGE_SIZE = 100
 _PASSENGER_MODELS = ['01', '02', '03']
 _COMMERCIAL_MODELS = ['04', '05', '06', '07', '08', '09', '10']
 
-def _exec_rows(sql: str, params: list) -> list[dict]:
-    raw_conn = db.session.connection().connection
-    cursor = raw_conn.cursor()
-    try:
-        cursor.execute(sql, params)
-        if cursor.description is None:
-            return []
-        columns = [col[0] for col in cursor.description]
-        return [dict(zip(columns, row)) for row in cursor.fetchall()]
-    finally:
-        cursor.close()
-
-def _parse_date(raw: str) -> Optional[date]:
-    raw = (raw or '').strip()
-    if not raw:
-        return None
-    try:
-        return datetime.strptime(raw, '%Y-%m-%d').date()
-    except ValueError:
-        return None
-
-def _num(val) -> float:
-    if val is None:
-        return 0.0
-    return float(val)
-
-def _fmt_ddmmyyyy(d: Optional[date]) -> str:
-    return d.strftime('%d-%m-%Y') if d else ''
-
-def _branch_name(branch_cd: str) -> str:
-    if not branch_cd:
-        return ''
-    rows = _exec_rows("SELECT BRANCH_NAME FROM UMFBRANCH WITH (NOLOCK) WHERE BRANCH_CD = ?", [branch_cd])
-    return (rows[0]['BRANCH_NAME'] or '').strip() if rows else ''
-
-def _period_label(start_date: Optional[date], end_date: Optional[date]) -> str:
-    if start_date and end_date:
-        return f"Period : {_fmt_ddmmyyyy(start_date)} to {_fmt_ddmmyyyy(end_date)}"
-    return ''
-
-def _fmt_long(d: Optional[date]) -> str:
-    return d.strftime('%d %B %Y') if d else ''
-
-def _period_label_long(start_date: Optional[date], end_date: Optional[date]) -> str:
-    if start_date and end_date:
-        return f"{_fmt_long(start_date)} - {_fmt_long(end_date)}"
-    return ''
-
 def _resolve_scope(requested_branch: str) -> dict:
-    access_level = session.get('accesslevel')
-    emp_id = session.get('emp_id')
-    own_branch_cd = session.get('branchcode')
+    access_level = _access_level()
+    emp_id = _emp_id()
+    own_branch_cd = _branch()
     is_ho = (own_branch_cd == '100')
 
     branch = (requested_branch or '000') if is_ho else own_branch_cd
@@ -78,11 +51,7 @@ def _resolve_scope(requested_branch: str) -> dict:
     if access_level == 'CMO':
         cmo_filter = [emp_id]
     elif access_level == 'CMH':
-        rows = _exec_rows(
-            "SELECT EMPLOYEE_ID FROM APP_USRMST WITH (NOLOCK) WHERE EMPLOYEE_ID = ? OR SUPERIOR = ?",
-            [emp_id, emp_id],
-        )
-        cmo_filter = [r['EMPLOYEE_ID'] for r in rows] or [emp_id]
+        cmo_filter = fetch_subordinate_ids(emp_id)
     else:
         cmo_filter = None
 
@@ -144,55 +113,37 @@ FROM CAFCONT a WITH (NOLOCK)
 {_OUTS_SUBQUERY}
 """
 
-def _fetch_count(where_sql: str, params: list) -> int:
-    sql = f"""
-    SELECT COUNT(*) AS cnt
+_COUNT_FROM = f"""
     FROM CAFCONT a WITH (NOLOCK)
         LEFT JOIN CAFLESS b WITH (NOLOCK) ON a.APLESS = b.APLESS
         LEFT JOIN CAFEQUIP g WITH (NOLOCK) ON a.APPL_NO = g.APPL_NO
         INNER JOIN V_LastCAMStatusApproval j WITH (NOLOCK) ON a.APPL_NO = j.APPL_NO AND j.APPR_STS = 'P'
         INNER JOIN V_NetFinance v WITH (NOLOCK) ON j.APPL_NO = v.APPL_NO
     {_OUTS_SUBQUERY}
-    WHERE {where_sql}
-    """
-    rows = _exec_rows(sql, params)
+"""
+
+def _fetch_count(where_sql: str, params: list) -> int:
+    rows = exec_rows(f"SELECT COUNT(*) AS cnt {_COUNT_FROM} WHERE {where_sql}", params)
     return int(rows[0]['cnt']) if rows else 0
 
 def _fetch_page(where_sql: str, params: list, page: int, page_size: int) -> list[dict]:
     offset = (page - 1) * page_size
     sql = _LIST_SELECT + f"WHERE {where_sql} ORDER BY a.CREATE_DATE OFFSET ? ROWS FETCH NEXT ? ROWS ONLY"
-    return _exec_rows(sql, params + [offset, page_size])
+    return exec_rows(sql, params + [offset, page_size])
 
 def _fetch_all(where_sql: str, params: list) -> list[dict]:
     sql = _LIST_SELECT + f"WHERE {where_sql} ORDER BY a.CREATE_DATE"
-    return _exec_rows(sql, params)
+    return exec_rows(sql, params)
 
 def _fetch_date_range(where_sql: str, params: list) -> tuple[Optional[date], Optional[date]]:
-    sql = f"""
-    SELECT MIN(a.CREATE_DATE) AS min_dt, MAX(a.CREATE_DATE) AS max_dt
-    FROM CAFCONT a WITH (NOLOCK)
-        LEFT JOIN CAFLESS b WITH (NOLOCK) ON a.APLESS = b.APLESS
-        LEFT JOIN CAFEQUIP g WITH (NOLOCK) ON a.APPL_NO = g.APPL_NO
-        INNER JOIN V_LastCAMStatusApproval j WITH (NOLOCK) ON a.APPL_NO = j.APPL_NO AND j.APPR_STS = 'P'
-        INNER JOIN V_NetFinance v WITH (NOLOCK) ON j.APPL_NO = v.APPL_NO
-    {_OUTS_SUBQUERY}
-    WHERE {where_sql}
-    """
-    rows = _exec_rows(sql, params)
+    rows = exec_rows(
+        f"SELECT MIN(a.CREATE_DATE) AS min_dt, MAX(a.CREATE_DATE) AS max_dt {_COUNT_FROM} WHERE {where_sql}",
+        params,
+    )
     if not rows:
         return None, None
     min_dt, max_dt = rows[0].get('min_dt'), rows[0].get('max_dt')
     return (min_dt.date() if min_dt else None), (max_dt.date() if max_dt else None)
-
-def _fetch_revisions(appl_nos: list[str]) -> dict[str, str]:
-    if not appl_nos:
-        return {}
-    placeholders = ','.join('?' for _ in appl_nos)
-    rows = _exec_rows(
-        f"SELECT NEWAPPL_NO, REVISI FROM MCMORevisi WITH (NOLOCK) WHERE NEWAPPL_NO IN ({placeholders})",
-        appl_nos,
-    )
-    return {r['NEWAPPL_NO']: f"R{r['REVISI']}" for r in rows}
 
 def _edit_link_params(r: dict) -> dict:
     cons_leas = (r.get('Cons_Leas') or '').strip()
@@ -219,10 +170,10 @@ def _row_to_detail(r: dict, no: int, revision: str) -> dict:
         'appl_no': r.get('APPL_NO'),
         'customer_name': r.get('LESSEE_NM') or '-',
         'brand_type': f"{brand} / {type_nm}" if (brand or type_nm) else '-',
-        'net_finance': _num(r.get('Net_Finance')),
-        'total_outstanding': _num(r.get('tot_outs')),
-        'interest': round(_num(r.get('DECLRATE')), 4),
-        'tenor': int(_num(r.get('TENOR'))),
+        'net_finance': num(r.get('Net_Finance')),
+        'total_outstanding': num(r.get('tot_outs')),
+        'interest': round(num(r.get('DECLRATE')), 4),
+        'tenor': int(num(r.get('TENOR'))),
         'create_date': create_date.strftime('%d-%m-%Y') if create_date else '',
         'cmo': r.get('cmo') or '-',
         'status': r.get('approver') or '-',
@@ -245,9 +196,9 @@ WHERE {filter}
 def _fetch_segment_total(where_sql: str, params: list, models: list[str], condition: str) -> dict:
     placeholders = ','.join('?' for _ in models)
     sql = _GRANDTOTAL_BASE.format(filter=where_sql, models=placeholders)
-    rows = _exec_rows(sql, params + list(models) + [condition])
+    rows = exec_rows(sql, params + list(models) + [condition])
     row = rows[0] if rows else {}
-    return {'net_finance': _num(row.get('tot_fin')), 'units': int(_num(row.get('tot_unit')))}
+    return {'net_finance': num(row.get('tot_fin')), 'units': int(num(row.get('tot_unit')))}
 
 def _fetch_grand_totals(where_sql: str, params: list) -> dict:
     breakdown = {
@@ -262,15 +213,21 @@ def _fetch_grand_totals(where_sql: str, params: list) -> dict:
     }
     return {**breakdown, 'grand_total': grand_total}
 
+def _resolve_period(where_sql: str, params: list, start_date, end_date, lessee_nm: str) -> tuple[str, str]:
+    if start_date and end_date:
+        date_label = period_label(start_date, end_date)
+        period_long = period_label_long(start_date, end_date)
+    else:
+        data_start, data_end = _fetch_date_range(where_sql, params)
+        date_label = period_label(data_start, data_end)
+        period_long = period_label_long(data_start, data_end)
+    return (f"Name : {lessee_nm}" if lessee_nm else date_label), period_long
+
 @in_progress_cam_bp.route('/in-progress-cam/branches')
 @login_required
 def list_branches():
     try:
-        rows = _exec_rows(
-            "SELECT BRANCH_CD, BRANCH_NAME FROM UMFBRANCH WITH (NOLOCK) WHERE BRANCH_CD <> '100' ORDER BY BRANCH_CD",
-            [],
-        )
-        return jsonify([{'branch_cd': r.get('BRANCH_CD'), 'branch_name': r.get('BRANCH_NAME')} for r in rows])
+        return jsonify(fetch_branch_list())
     except Exception as e:
         current_app.logger.exception("Branch list error")
         return jsonify({'error': str(e)}), 500
@@ -284,8 +241,8 @@ def get_context():
 @in_progress_cam_bp.route('/in-progress-cam/list')
 @login_required
 def get_list():
-    start_date = _parse_date(request.args.get('start_date', ''))
-    end_date = _parse_date(request.args.get('end_date', ''))
+    start_date = parse_iso_date(request.args.get('start_date', ''))
+    end_date = parse_iso_date(request.args.get('end_date', ''))
     lessee_nm = request.args.get('lessee_nm', '').strip()
     requested_branch = request.args.get('branch', '').strip()
     try:
@@ -303,21 +260,13 @@ def get_list():
 
         raw_rows = _fetch_page(where_sql, params, page, PAGE_SIZE)
         appl_nos = [r['APPL_NO'] for r in raw_rows if r.get('APPL_NO')]
-        revisions = _fetch_revisions(appl_nos)
+        revisions = fetch_revisions(appl_nos)
 
         start_no = (page - 1) * PAGE_SIZE + 1
         details = [_row_to_detail(r, start_no + i, revisions.get(r['APPL_NO'], '')) for i, r in enumerate(raw_rows)]
 
         grand_totals = _fetch_grand_totals(where_sql, params)
-
-        if start_date and end_date:
-            date_label = _period_label(start_date, end_date)
-            period_long = _period_label_long(start_date, end_date)
-        else:
-            data_start, data_end = _fetch_date_range(where_sql, params)
-            date_label = _period_label(data_start, data_end)
-            period_long = _period_label_long(data_start, data_end)
-        period = f"Name : {lessee_nm}" if lessee_nm else date_label
+        period, period_long = _resolve_period(where_sql, params, start_date, end_date, lessee_nm)
 
         return jsonify({
             'rows': details,
@@ -329,21 +278,14 @@ def get_list():
             'period_label': period,
             'grand_total_period': period_long,
             'company_name': get_company_name(),
-            'printed_by': session.get('username', ''),
+            'printed_by': _username(),
             'disabled': scope['disabled'],
             'search_branch': scope['branch'],
-            'branch_name': _branch_name(scope['branch']),
+            'branch_name': branch_name(scope['branch']),
         })
     except Exception as e:
         current_app.logger.exception("In Progress CAM list error")
         return jsonify({'error': str(e)}), 500
-
-_THIN_SIDE = Side(style='thin', color='FF000000')
-_ALL_BORDERS = Border(top=_THIN_SIDE, bottom=_THIN_SIDE, left=_THIN_SIDE, right=_THIN_SIDE)
-_TITLE_FONT = Font(bold=True, size=16)
-_HEADER_FONT = Font(bold=True)
-_CENTER = Alignment(horizontal='center', vertical='center')
-_RIGHT = Alignment(horizontal='right')
 
 _LIST_COLUMNS = ['No.', 'CAM No.', 'Customer Name', 'Brand/Type', 'Net Finance', 'Total Outstanding', 'Interest (%)', 'Tenor (Month)', 'Create Date', 'CMO', 'Status']
 
@@ -354,43 +296,35 @@ _SEGMENT_LABELS = [
     ('commercial_used', 'Commercial', 'Used'),
 ]
 
-def _build_workbook(period_label: str, period_long: str, lessee_nm: str, branch_name: str, rows: list[dict], grand_totals: dict) -> Workbook:
+def _build_workbook(period_text: str, period_long: str, lessee_nm: str, branch_label: str, rows: list[dict], grand_totals: dict) -> Workbook:
     wb = Workbook()
     ws = wb.active
     ws.title = 'InProgressCAM'
 
-    ws['A1'] = get_company_name()
-
-    ws['K1'] = f"Date : {datetime.now().strftime('%d-%m-%Y')}\nPrint By : {session.get('username', '')}"
-    ws['K1'].alignment = Alignment(wrap_text=True, horizontal='left', vertical='top')
-    ws.row_dimensions[1].height = 28
+    write_report_header(
+        ws,
+        title='List In Progress CAM',
+        branch_line=f"Branch : {branch_label or 'Consolidate'}",
+        period_line=period_text,
+        stamp_cell='K1',
+        row_height=28,
+    )
     ws.column_dimensions['K'].width = max(ws.column_dimensions['K'].width or 0, 20)
-
-    ws.merge_cells('A2:D2')
-    ws['A2'] = 'List In Progress CAM'
-    ws['A2'].font = _TITLE_FONT
-    ws['A2'].alignment = _CENTER
-
-    ws.merge_cells('A3:D3')
-    ws['A3'] = f"Branch : {branch_name or 'Consolidate'}"
-
-    ws.merge_cells('A4:D4')
-    ws['A4'] = period_label
 
     row_num = 6
     for col_idx, label in enumerate(_LIST_COLUMNS, start=1):
         cell = ws.cell(row=row_num, column=col_idx, value=label)
-        cell.border = _ALL_BORDERS
-        cell.alignment = _CENTER
-        cell.font = _HEADER_FONT
+        cell.border = ALL_BORDERS
+        cell.alignment = CENTER
+        cell.font = HEADER_FONT
     row_num += 1
 
     if not rows:
         ws.merge_cells(f'A{row_num}:K{row_num}')
         cell = ws[f'A{row_num}']
         cell.value = 'Data Not Found'
-        cell.font = Font(color='FFFF0000', bold=True)
-        cell.alignment = _CENTER
+        cell.font = RED_BOLD_FONT
+        cell.alignment = CENTER
         row_num += 1
     else:
         for d in rows:
@@ -398,22 +332,22 @@ def _build_workbook(period_label: str, period_long: str, lessee_nm: str, branch_
                       d['total_outstanding'], d['interest'], d['tenor'], d['create_date'], d['cmo'], d['status']]
             for col_idx, val in enumerate(values, start=1):
                 cell = ws.cell(row=row_num, column=col_idx, value=val)
-                cell.border = _ALL_BORDERS
+                cell.border = ALL_BORDERS
                 if col_idx in (5, 6, 7):
-                    cell.alignment = _RIGHT
+                    cell.alignment = RIGHT
             row_num += 1
 
     row_num += 2
     ws.merge_cells(f'A{row_num}:D{row_num}')
     ws[f'A{row_num}'] = f"Grand Total* ({period_long or 'All Dates'})"
-    ws[f'A{row_num}'].font = _HEADER_FONT
+    ws[f'A{row_num}'].font = HEADER_FONT
     row_num += 1
 
     gt_headers = ['Type', 'Condition', 'Net Finance', 'Units']
     for col_idx, label in enumerate(gt_headers, start=1):
         cell = ws.cell(row=row_num, column=col_idx, value=label)
-        cell.border = _ALL_BORDERS
-        cell.font = _HEADER_FONT
+        cell.border = ALL_BORDERS
+        cell.font = HEADER_FONT
     row_num += 1
 
     for key, type_label, cond_label in _SEGMENT_LABELS:
@@ -421,25 +355,25 @@ def _build_workbook(period_label: str, period_long: str, lessee_nm: str, branch_
         values = [type_label, cond_label, seg['net_finance'], seg['units']]
         for col_idx, val in enumerate(values, start=1):
             cell = ws.cell(row=row_num, column=col_idx, value=val)
-            cell.border = _ALL_BORDERS
+            cell.border = ALL_BORDERS
             if col_idx >= 3:
-                cell.alignment = _RIGHT
+                cell.alignment = RIGHT
         row_num += 1
 
     total = grand_totals['grand_total']
     ws.merge_cells(f'A{row_num}:B{row_num}')
     gt_label_cell = ws.cell(row=row_num, column=1, value='Grand Total')
-    gt_label_cell.font = _HEADER_FONT
-    gt_label_cell.alignment = _CENTER
+    gt_label_cell.font = HEADER_FONT
+    gt_label_cell.alignment = CENTER
     for col_idx, val in ((3, total['net_finance']), (4, total['units'])):
         cell = ws.cell(row=row_num, column=col_idx, value=val)
-        cell.border = _ALL_BORDERS
-        cell.alignment = _RIGHT
+        cell.border = ALL_BORDERS
+        cell.alignment = RIGHT
     row_num += 2
 
     ws.merge_cells(f'A{row_num}:D{row_num}')
     ws[f'A{row_num}'] = '*Grand Total Net Finance and Unit based on latest revised CAM (if any)'
-    ws[f'A{row_num}'].font = Font(italic=True)
+    ws[f'A{row_num}'].font = ITALIC_FONT
 
     ws.column_dimensions['A'].width = 14
     for col in 'BCDEFGHIJK':
@@ -450,8 +384,8 @@ def _build_workbook(period_label: str, period_long: str, lessee_nm: str, branch_
 @in_progress_cam_bp.route('/in-progress-cam/export')
 @login_required
 def export_excel():
-    start_date = _parse_date(request.args.get('start_date', ''))
-    end_date = _parse_date(request.args.get('end_date', ''))
+    start_date = parse_iso_date(request.args.get('start_date', ''))
+    end_date = parse_iso_date(request.args.get('end_date', ''))
     lessee_nm = request.args.get('lessee_nm', '').strip()
     requested_branch = request.args.get('branch', '').strip()
 
@@ -461,29 +395,13 @@ def export_excel():
     try:
         raw_rows = _fetch_all(where_sql, params)
         appl_nos = [r['APPL_NO'] for r in raw_rows if r.get('APPL_NO')]
-        revisions = _fetch_revisions(appl_nos)
+        revisions = fetch_revisions(appl_nos)
         rows = [_row_to_detail(r, i, revisions.get(r['APPL_NO'], '')) for i, r in enumerate(raw_rows, start=1)]
         grand_totals = _fetch_grand_totals(where_sql, params)
+        period, period_long = _resolve_period(where_sql, params, start_date, end_date, lessee_nm)
 
-        if start_date and end_date:
-            date_label = _period_label(start_date, end_date)
-            period_long = _period_label_long(start_date, end_date)
-        else:
-            data_start, data_end = _fetch_date_range(where_sql, params)
-            date_label = _period_label(data_start, data_end)
-            period_long = _period_label_long(data_start, data_end)
-        period = f"Name : {lessee_nm}" if lessee_nm else date_label
-
-        wb = _build_workbook(period, period_long, lessee_nm, _branch_name(scope['branch']), rows, grand_totals)
-        buffer = io.BytesIO()
-        wb.save(buffer)
-        buffer.seek(0)
-        return send_file(
-            buffer,
-            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-            as_attachment=True,
-            download_name='ListInProgressCAM.xlsx',
-        )
+        wb = _build_workbook(period, period_long, lessee_nm, branch_name(scope['branch']), rows, grand_totals)
+        return workbook_response(wb, 'ListInProgressCAM.xlsx')
     except Exception as e:
         current_app.logger.exception("In Progress CAM export error")
         return jsonify({'error': str(e)}), 500
@@ -586,8 +504,8 @@ def _render_segment_rows_html(grand_totals: dict) -> str:
 @in_progress_cam_bp.route('/in-progress-cam/print')
 @login_required
 def print_view():
-    start_date = _parse_date(request.args.get('start_date', ''))
-    end_date = _parse_date(request.args.get('end_date', ''))
+    start_date = parse_iso_date(request.args.get('start_date', ''))
+    end_date = parse_iso_date(request.args.get('end_date', ''))
     lessee_nm = request.args.get('lessee_nm', '').strip()
     requested_branch = request.args.get('branch', '').strip()
 
@@ -597,25 +515,17 @@ def print_view():
     try:
         raw_rows = _fetch_all(where_sql, params)
         appl_nos = [r['APPL_NO'] for r in raw_rows if r.get('APPL_NO')]
-        revisions = _fetch_revisions(appl_nos)
+        revisions = fetch_revisions(appl_nos)
         rows = [_row_to_detail(r, i, revisions.get(r['APPL_NO'], '')) for i, r in enumerate(raw_rows, start=1)]
         grand_totals = _fetch_grand_totals(where_sql, params)
         gt = grand_totals['grand_total']
-
-        if start_date and end_date:
-            date_label = _period_label(start_date, end_date)
-            period_long = _period_label_long(start_date, end_date)
-        else:
-            data_start, data_end = _fetch_date_range(where_sql, params)
-            date_label = _period_label(data_start, data_end)
-            period_long = _period_label_long(data_start, data_end)
-        period = f"Name : {lessee_nm}" if lessee_nm else date_label
+        period, period_long = _resolve_period(where_sql, params, start_date, end_date, lessee_nm)
 
         html = _PRINT_TEMPLATE.format(
             company=get_company_name(),
-            today=datetime.now().strftime('%d-%m-%Y'),
-            printed_by=session.get('username', ''),
-            branch_name=_branch_name(scope['branch']) or 'Consolidate',
+            today=today_ddmmyyyy(),
+            printed_by=_username(),
+            branch_name=branch_name(scope['branch']) or 'Consolidate',
             period=period,
             period_plain=period_long or 'All Dates',
             rows_html=_render_rows_html(rows),

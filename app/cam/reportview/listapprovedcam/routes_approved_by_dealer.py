@@ -1,70 +1,53 @@
 from __future__ import annotations
 
-import io
 from datetime import date, datetime
 from typing import Optional
-from flask import Blueprint, jsonify, request, current_app, session, send_file, Response
+from flask import Blueprint, jsonify, request, current_app, Response
 
 from openpyxl import Workbook
-from openpyxl.styles import Alignment, Border, Font, Side
+from openpyxl.styles import Font
 from openpyxl.utils import get_column_letter
 
-from app import db
 from app.auth.decorators import login_required
+from app.utils.helpers.base_format import (
+    ALL_BORDERS,
+    CENTER,
+    HEADER_FONT,
+    WRAP_TOP_LEFT,
+    _branch,
+    _username,
+    branch_name,
+    env_int,
+    exec_rows,
+    num,
+    parse_iso_date,
+    period_label,
+    title_font,
+    today_ddmmyyyy,
+    workbook_response,
+)
 from app.utils.helpers.settings_helpers import company_name as get_company_name
 
 approved_cam_by_dealer_bp = Blueprint('approved_cam_by_dealer', __name__, url_prefix='/CAM/Approved')
 
-PAGE_SIZE_DEFAULT = 20
-DEALER_PAGE_SIZE_DEFAULT = 20
+PAGE_SIZE_DEFAULT = env_int('PAGE_SIZE_DEFAULT', 25)
+DEALER_PAGE_SIZE_DEFAULT = env_int('DEALER_PAGE_SIZE_DEFAULT', 25)
 
-def _exec_rows(sql: str, params: list) -> list[dict]:
-    raw_conn = db.session.connection().connection
-    cursor = raw_conn.cursor()
-    try:
-        cursor.execute(sql, params)
-        if cursor.description is None:
-            return []
-        columns = [col[0] for col in cursor.description]
-        return [dict(zip(columns, row)) for row in cursor.fetchall()]
-    finally:
-        cursor.close()
-
-def _parse_date(raw: str) -> Optional[date]:
-    raw = (raw or '').strip()
-    if not raw:
-        return None
-    try:
-        return datetime.strptime(raw, '%Y-%m-%d').date()
-    except ValueError:
-        return None
-
-def _num(val) -> float:
-    if val is None:
-        return 0.0
-    return float(val)
-
-def _fmt_ddmmyyyy(d: Optional[date]) -> str:
-    return d.strftime('%d-%m-%Y') if d else ''
-
-def _branch_name(branch_cd: str) -> str:
-    if not branch_cd:
-        return ''
-    rows = _exec_rows("SELECT BRANCH_NAME FROM UMFBRANCH WITH (NOLOCK) WHERE BRANCH_CD = ?", [branch_cd])
-    return rows[0]['BRANCH_NAME'] if rows else ''
+_EQ_NUMBER_FORMAT = '"= "#,##0'
+_DATE_FORMAT = 'DD MMM YYYY'
 
 @approved_cam_by_dealer_bp.route('/cam-by-dealer/branches')
 @login_required
 def list_branches():
-    own_branch_cd = session.get('branchcode')
+    own_branch_cd = _branch()
     try:
         if own_branch_cd in ('000', '100'):
-            rows = _exec_rows(
+            rows = exec_rows(
                 "SELECT BRANCH_CD, BRANCH_NAME FROM UMFBRANCH WITH (NOLOCK) WHERE BRANCH_CD <> '100' ORDER BY BRANCH_CD",
                 [],
             )
         else:
-            rows = _exec_rows(
+            rows = exec_rows(
                 "SELECT BRANCH_CD, BRANCH_NAME FROM UMFBRANCH WITH (NOLOCK) WHERE BRANCH_CD = ?",
                 [own_branch_cd],
             )
@@ -93,11 +76,11 @@ def list_dealers():
 
     where_sql = ' AND '.join(where)
     try:
-        count_rows = _exec_rows(f"SELECT COUNT(*) AS cnt FROM CLFSUPP WITH (NOLOCK) WHERE {where_sql}", params)
+        count_rows = exec_rows(f"SELECT COUNT(*) AS cnt FROM CLFSUPP WITH (NOLOCK) WHERE {where_sql}", params)
         total_count = count_rows[0]['cnt'] if count_rows else 0
 
         offset = max(page - 1, 0) * page_size
-        rows = _exec_rows(
+        rows = exec_rows(
             f"""
             SELECT SUPP, NAME, NICKNAME, ADDRESS, PHONE, CONTACT
             FROM CLFSUPP WITH (NOLOCK)
@@ -170,19 +153,19 @@ _BASE_CTE = """
 
 def _fetch_detail_rows(where_sql: str, params: list, page: Optional[int], page_size: int) -> tuple[list[dict], int]:
     count_sql = _BASE_CTE.format(where_sql=where_sql) + "SELECT COUNT(*) AS cnt FROM Deduped"
-    count_rows = _exec_rows(count_sql, params)
+    count_rows = exec_rows(count_sql, params)
     total_count = count_rows[0]['cnt'] if count_rows else 0
 
     if page is None:
         list_sql = _BASE_CTE.format(where_sql=where_sql) + "SELECT * FROM Deduped ORDER BY ro_number"
-        rows = _exec_rows(list_sql, params)
+        rows = exec_rows(list_sql, params)
     else:
         offset = max(page - 1, 0) * page_size
         list_sql = (
             _BASE_CTE.format(where_sql=where_sql)
             + "SELECT * FROM Deduped ORDER BY ro_number OFFSET ? ROWS FETCH NEXT ? ROWS ONLY"
         )
-        rows = _exec_rows(list_sql, params + [offset, page_size])
+        rows = exec_rows(list_sql, params + [offset, page_size])
 
     return rows, total_count
 
@@ -197,15 +180,15 @@ def _fetch_summary(where_sql: str, params: list) -> dict:
             SUM(NETFINANCE) AS grand_net
         FROM Deduped
     """
-    rows = _exec_rows(sql, params)
+    rows = exec_rows(sql, params)
     r = rows[0] if rows else {}
     return {
-        'new_cam_count': int(_num(r.get('jlh_cam'))),
-        'new_cam_net_finance': _num(r.get('tot_cam')),
-        'revised_count': int(_num(r.get('jlh_revisi'))),
-        'revised_net_finance': _num(r.get('tot_revisi')),
-        'grand_count': int(_num(r.get('grand_count'))),
-        'grand_net_finance': _num(r.get('grand_net')),
+        'new_cam_count': int(num(r.get('jlh_cam'))),
+        'new_cam_net_finance': num(r.get('tot_cam')),
+        'revised_count': int(num(r.get('jlh_revisi'))),
+        'revised_net_finance': num(r.get('tot_revisi')),
+        'grand_count': int(num(r.get('grand_count'))),
+        'grand_net_finance': num(r.get('grand_net')),
     }
 
 def _row_to_detail(row: dict) -> dict:
@@ -236,16 +219,11 @@ def _row_to_detail(row: dict) -> dict:
         },
     }
 
-def _period_label(start_date: Optional[date], end_date: Optional[date]) -> str:
-    if start_date and end_date:
-        return f"Period : {_fmt_ddmmyyyy(start_date)} to {_fmt_ddmmyyyy(end_date)}"
-    return ''
-
 @approved_cam_by_dealer_bp.route('/cam-by-dealer/list')
 @login_required
 def get_list():
-    start_date = _parse_date(request.args.get('start_date', ''))
-    end_date = _parse_date(request.args.get('end_date', ''))
+    start_date = parse_iso_date(request.args.get('start_date', ''))
+    end_date = parse_iso_date(request.args.get('end_date', ''))
     branch_cd_search = request.args.get('branch_cd_search', '000').strip()
     dealer_nickname = request.args.get('dealer_nickname', '').strip()
     page = int(request.args.get('page', 1) or 1)
@@ -264,20 +242,13 @@ def get_list():
             'show_branch_column': branch_cd_search == '000',
             'show_dealer_column': dealer_nickname == '',
             'company_name': get_company_name(),
-            'printed_by': session.get('username', ''),
-            'branch_name': _branch_name(branch_cd_search),
-            'period_label': _period_label(start_date, end_date),
+            'printed_by': _username(),
+            'branch_name': branch_name(branch_cd_search),
+            'period_label': period_label(start_date, end_date),
         })
     except Exception as e:
         current_app.logger.exception("CAM by Dealer list error")
         return jsonify({'error': str(e)}), 500
-
-_THIN_SIDE = Side(style='thin', color='FF000000')
-_ALL_BORDERS = Border(top=_THIN_SIDE, bottom=_THIN_SIDE, left=_THIN_SIDE, right=_THIN_SIDE)
-_TITLE_FONT = Font(bold=True, size=16)
-_HEADER_FONT = Font(bold=True)
-_CENTER = Alignment(horizontal='center', vertical='center')
-_RIGHT = Alignment(horizontal='right')
 
 def _build_workbook(start_date, end_date, branch_cd_search, dealer_nickname, rows, summary, show_branch, show_dealer) -> Workbook:
     wb = Workbook()
@@ -287,21 +258,21 @@ def _build_workbook(start_date, end_date, branch_cd_search, dealer_nickname, row
     ws['A1'] = get_company_name()
 
     last_col = get_column_letter(5 + int(show_dealer) + int(show_branch))
-    ws[f'{last_col}1'] = f"Date : {datetime.now().strftime('%d-%m-%Y')}\nPrint By : {session.get('username', '')}"
-    ws[f'{last_col}1'].alignment = Alignment(wrap_text=True, horizontal='left', vertical='top')
+    ws[f'{last_col}1'] = f"Date : {today_ddmmyyyy()}\nPrint By : {_username()}"
+    ws[f'{last_col}1'].alignment = WRAP_TOP_LEFT
     ws.row_dimensions[1].height = 30
 
     ws.merge_cells('A2:D2')
     ws['A2'] = 'List Approved by Dealer per Disbursement Date'
-    ws['A2'].font = _TITLE_FONT
-    ws['A2'].alignment = _CENTER
+    ws['A2'].font = title_font(16)
+    ws['A2'].alignment = CENTER
 
     ws.merge_cells('A3:D3')
-    ws['A3'] = _period_label(start_date, end_date)
-    ws['A3'].alignment = _CENTER
+    ws['A3'] = period_label(start_date, end_date)
+    ws['A3'].alignment = CENTER
 
     ws.merge_cells('A4:D4')
-    ws['A4'] = f"Branch : {_branch_name(branch_cd_search)}"
+    ws['A4'] = f"Branch : {branch_name(branch_cd_search)}"
 
     ws.merge_cells('A5:D5')
     ws['A5'] = f"Dealer : {dealer_nickname or 'Consolidate'}"
@@ -313,35 +284,43 @@ def _build_workbook(start_date, end_date, branch_cd_search, dealer_nickname, row
         headers.append('Branch')
     headers += ['Disbursement Date', 'CMO']
 
+    date_col_idx = len(headers) - 1
+
     header_row = 7
     for col_idx, label in enumerate(headers, start=1):
         cell = ws.cell(row=header_row, column=col_idx, value=label)
-        cell.font = _HEADER_FONT
-        cell.border = _ALL_BORDERS
-        cell.alignment = _CENTER
+        cell.font = HEADER_FONT
+        cell.border = ALL_BORDERS
+        cell.alignment = CENTER
 
     excel_row = header_row + 1
     if not rows:
-        ws.merge_cells(f'A{excel_row}:{chr(64 + len(headers))}{excel_row}')
+        ws.merge_cells(f'A{excel_row}:{get_column_letter(len(headers))}{excel_row}')
         cell = ws[f'A{excel_row}']
         cell.value = 'Data Not Found'
         cell.font = Font(color='FFFF0000', bold=True)
-        cell.alignment = _CENTER
+        cell.alignment = CENTER
         excel_row += 1
     else:
         for i, r in enumerate(rows, start=1):
             d = _row_to_detail(r)
+            execution = r.get('EXECUTION')
+            execution_value = execution.date() if isinstance(execution, datetime) else execution
+
             values = [i, f"{d['cons_leas']} - {d['appl_no']}{d['revision_suffix']}", d['customer_name']]
             if show_dealer:
                 values.append(d['dealer_nickname'])
             if show_branch:
                 values.append(d['branch_name'])
-            values += [d['disbursement_date'], d['cmo_name']]
+            values += [execution_value, d['cmo_name']]
+
             for col_idx, val in enumerate(values, start=1):
                 cell = ws.cell(row=excel_row, column=col_idx, value=val)
-                cell.border = _ALL_BORDERS
+                cell.border = ALL_BORDERS
                 if col_idx == 1:
-                    cell.alignment = _CENTER
+                    cell.alignment = CENTER
+                elif col_idx == date_col_idx and val is not None:
+                    cell.number_format = _DATE_FORMAT
             excel_row += 1
 
     excel_row += 1
@@ -352,9 +331,9 @@ def _build_workbook(start_date, end_date, branch_cd_search, dealer_nickname, row
     ]
     for label1, val1, label2, val2 in labels_values:
         ws.cell(row=excel_row, column=1, value=label1)
-        ws.cell(row=excel_row, column=2, value=f"= {val1:,.0f}")
+        ws.cell(row=excel_row, column=2, value=val1).number_format = _EQ_NUMBER_FORMAT
         ws.cell(row=excel_row, column=3, value=label2)
-        ws.cell(row=excel_row, column=4, value=f"= {val2:,.0f}")
+        ws.cell(row=excel_row, column=4, value=val2).number_format = _EQ_NUMBER_FORMAT
         excel_row += 1
 
     ws.column_dimensions['A'].width = 6
@@ -367,8 +346,8 @@ def _build_workbook(start_date, end_date, branch_cd_search, dealer_nickname, row
 @approved_cam_by_dealer_bp.route('/cam-by-dealer/export')
 @login_required
 def export_excel():
-    start_date = _parse_date(request.args.get('start_date', ''))
-    end_date = _parse_date(request.args.get('end_date', ''))
+    start_date = parse_iso_date(request.args.get('start_date', ''))
+    end_date = parse_iso_date(request.args.get('end_date', ''))
     branch_cd_search = request.args.get('branch_cd_search', '000').strip()
     dealer_nickname = request.args.get('dealer_nickname', '').strip()
 
@@ -380,15 +359,7 @@ def export_excel():
             start_date, end_date, branch_cd_search, dealer_nickname, rows, summary,
             branch_cd_search == '000', dealer_nickname == '',
         )
-        buffer = io.BytesIO()
-        wb.save(buffer)
-        buffer.seek(0)
-        return send_file(
-            buffer,
-            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-            as_attachment=True,
-            download_name='CamByDealer.xlsx',
-        )
+        return workbook_response(wb, 'CamByDealer.xlsx')
     except Exception as e:
         current_app.logger.exception("CAM by Dealer export error")
         return jsonify({'error': str(e)}), 500
@@ -476,7 +447,7 @@ def _render_detail_rows_html(rows: list[dict], show_branch: bool, show_dealer: b
         d = _row_to_detail(r)
         cells = [
             f'<td align="center">{i}</td>',
-            f"<td>{d['cons_leas']} - {d['appl_no']} {d['revision_suffix']}</td>",
+            f"<td>{d['cons_leas']} - {d['appl_no']}{d['revision_suffix']}</td>",
             f"<td>{d['customer_name']}</td>",
         ]
         if show_dealer:
@@ -490,8 +461,8 @@ def _render_detail_rows_html(rows: list[dict], show_branch: bool, show_dealer: b
 @approved_cam_by_dealer_bp.route('/cam-by-dealer/print')
 @login_required
 def print_view():
-    start_date = _parse_date(request.args.get('start_date', ''))
-    end_date = _parse_date(request.args.get('end_date', ''))
+    start_date = parse_iso_date(request.args.get('start_date', ''))
+    end_date = parse_iso_date(request.args.get('end_date', ''))
     branch_cd_search = request.args.get('branch_cd_search', '000').strip()
     dealer_nickname = request.args.get('dealer_nickname', '').strip()
 
@@ -504,10 +475,10 @@ def print_view():
 
         html = _PRINT_TEMPLATE.format(
             company=get_company_name(),
-            today=datetime.now().strftime('%d-%m-%Y'),
-            printed_by=session.get('username', ''),
-            period=_period_label(start_date, end_date),
-            branch_name=_branch_name(branch_cd_search),
+            today=today_ddmmyyyy(),
+            printed_by=_username(),
+            period=period_label(start_date, end_date),
+            branch_name=branch_name(branch_cd_search),
             dealer_label=dealer_nickname or 'Consolidate',
             header_html=_render_header_html(show_branch, show_dealer),
             rows_html=_render_detail_rows_html(rows, show_branch, show_dealer),

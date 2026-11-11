@@ -1,90 +1,45 @@
 from __future__ import annotations
 
-import io
-from datetime import date, datetime
+from datetime import date
 from typing import Optional
-from flask import Blueprint, jsonify, request, current_app, session, send_file, Response
+from flask import Blueprint, jsonify, request, current_app, session, Response
 
 from openpyxl import Workbook
-from openpyxl.styles import Alignment, Border, Font, Side
 
-from app import db
 from app.auth.decorators import login_required
+from app.utils.helpers.base_format import (
+    ALL_BORDERS,
+    CENTER,
+    COMMITTEE_ROLE_CODES,
+    HEADER_FONT,
+    ITALIC_FONT,
+    RED_BOLD_FONT,
+    RIGHT,
+    _username,
+    branch_name,
+    build_comments_payload,
+    exec_rows,
+    fetch_branch_list,
+    num,
+    parse_iso_date,
+    period_label,
+    sp_date,
+    today_ddmmyyyy,
+    workbook_response,
+    write_report_header,
+)
 from app.utils.helpers.settings_helpers import company_name as get_company_name
 
 cam_by_approver_bp = Blueprint('cam_by_approver', __name__, url_prefix='/CAM/Approved')
 
-_APPROVER_ROLES = [
-    ('CRH', 'CREDIT REVIEW UNIT HEAD'),
-    ('CRDH', 'CREDIT REVIEW DIVISION HEAD'),
-    ('DR', 'BUSINESS OPERATION DIRECTOR'),
-    ('PD', 'PRESIDENT DIRECTOR'),
-]
-
-_COMMITTEE_ROLE_CODES = ('CRH', 'CRDH', 'DR', 'PD')
-
-_STATUS_LABELS = {
-    'A': 'Approved',
-    'F': 'Approved & Send to Admin',
-    'R': 'Reject',
-    'N': 'Send for Approval',
+_ROLE_LABELS = {
+    'CRH': 'CREDIT REVIEW UNIT HEAD',
+    'ODH': 'BUSINESS OPERATION DIVISION HEAD',
+    'CRDH': 'CREDIT REVIEW DIVISION HEAD',
+    'DR': 'BUSINESS OPERATION DIRECTOR',
+    'PD': 'PRESIDENT DIRECTOR',
 }
-
-def _exec_rows(sql: str, params: list) -> list[dict]:
-    raw_conn = db.session.connection().connection
-    cursor = raw_conn.cursor()
-    try:
-        cursor.execute(sql, params)
-        if cursor.description is None:
-            return []
-        columns = [col[0] for col in cursor.description]
-        return [dict(zip(columns, row)) for row in cursor.fetchall()]
-    finally:
-        cursor.close()
-
-def _exec_multi_resultset(sql: str, params: list) -> list[dict]:
-    raw_conn = db.session.connection().connection
-    cursor = raw_conn.cursor()
-    all_rows: list[dict] = []
-    try:
-        cursor.execute(sql, params)
-        while True:
-            if cursor.description is not None:
-                columns = [col[0] for col in cursor.description]
-                all_rows += [dict(zip(columns, row)) for row in cursor.fetchall()]
-            if not cursor.nextset():
-                break
-        return all_rows
-    finally:
-        cursor.close()
-
-def _parse_date(raw: str) -> Optional[date]:
-    raw = (raw or '').strip()
-    if not raw:
-        return None
-    try:
-        return datetime.strptime(raw, '%Y-%m-%d').date()
-    except ValueError:
-        return None
-
-def _num(val) -> float:
-    if val is None:
-        return 0.0
-    return float(val)
-
-def _fmt_ddmmyyyy(d: Optional[date]) -> str:
-    return d.strftime('%d-%m-%Y') if d else ''
-
-def _branch_name(branch_cd: str) -> str:
-    if not branch_cd:
-        return ''
-    rows = _exec_rows("SELECT BRANCH_NAME FROM UMFBRANCH WITH (NOLOCK) WHERE BRANCH_CD = ?", [branch_cd])
-    return rows[0]['BRANCH_NAME'] if rows else ''
-
-def _period_label(start_date: Optional[date], end_date: Optional[date]) -> str:
-    if start_date and end_date:
-        return f"Period : {_fmt_ddmmyyyy(start_date)} to {_fmt_ddmmyyyy(end_date)}"
-    return ''
+_APPROVER_ROLES = [(code, _ROLE_LABELS[code]) for code in COMMITTEE_ROLE_CODES]
 
 def _resolve_branch(requested_branch_cd: str) -> dict:
     own_branch_cd = session.get('branchcode')
@@ -96,11 +51,7 @@ def _resolve_branch(requested_branch_cd: str) -> dict:
 @login_required
 def list_branches():
     try:
-        rows = _exec_rows(
-            "SELECT BRANCH_CD, BRANCH_NAME FROM UMFBRANCH WITH (NOLOCK) WHERE BRANCH_CD <> '100' ORDER BY BRANCH_CD",
-            [],
-        )
-        return jsonify([{'branch_cd': r.get('BRANCH_CD'), 'branch_name': r.get('BRANCH_NAME')} for r in rows])
+        return jsonify(fetch_branch_list())
     except Exception as e:
         current_app.logger.exception("Branch list error")
         return jsonify({'error': str(e)}), 500
@@ -112,9 +63,9 @@ def get_context():
     return jsonify({'disabled': resolved['disabled'], 'forced_branch_cd': resolved['search_branch']})
 
 def _exec_sp_approver(start_date: Optional[date], end_date: Optional[date], branch_cd: str, mode: str) -> list[dict]:
-    return _exec_rows(
+    return exec_rows(
         "EXEC USP_CAM_By_Approver ?, ?, ?, ?",
-        [start_date.isoformat() if start_date else '', end_date.isoformat() if end_date else '', branch_cd, mode],
+        [sp_date(start_date), sp_date(end_date), branch_cd, mode],
     )
 
 def _edit_link_params(r: dict) -> dict:
@@ -138,7 +89,7 @@ def _fetch_link_extra(appl_nos: list[str]) -> dict[str, dict]:
     for i in range(0, len(unique), 1000):
         chunk = unique[i:i + 1000]
         placeholders = ','.join('?' for _ in chunk)
-        rows = _exec_rows(
+        rows = exec_rows(
             f"""
             SELECT a.APPL_NO, a.APLESS, a.TENOR, a.HAS_GUARANTOR, b.LESSEE_TP, g.SUPP,
                    LTRIM(RTRIM(g.[CONDITION])) AS CONDITION
@@ -168,9 +119,9 @@ def _row_to_detail(r: dict, no: int, link_extra: Optional[dict] = None) -> dict:
         'brand_type': r.get('tipe_mobil'),
         'car_status': r.get('CONDITION'),
         'contract_status': r.get('ContractStatus'),
-        'outstanding_old_cam': _num(r.get('Out_OldCAM')),
-        'net_finance_new_cam': _num(r.get('Out_NewCAM')),
-        'total_outstanding': _num(r.get('TotOut')),
+        'outstanding_old_cam': num(r.get('Out_OldCAM')),
+        'net_finance_new_cam': num(r.get('Out_NewCAM')),
+        'total_outstanding': num(r.get('TotOut')),
         'cmo': r.get('CMO') or '-',
     }
     if link_extra is not None:
@@ -205,16 +156,16 @@ def _fetch_report(start_date: Optional[date], end_date: Optional[date], branch_c
     return {
         'sections': sections,
         'grand_total': {
-            'net_finance': _num(total.get('tot_ntf')),
-            'units': int(_num(total.get('tot_unit'))),
+            'net_finance': num(total.get('tot_ntf')),
+            'units': int(num(total.get('tot_unit'))),
         },
     }
 
 @cam_by_approver_bp.route('/cam-by-approver/list')
 @login_required
 def get_list():
-    start_date = _parse_date(request.args.get('start_date', ''))
-    end_date = _parse_date(request.args.get('end_date', ''))
+    start_date = parse_iso_date(request.args.get('start_date', ''))
+    end_date = parse_iso_date(request.args.get('end_date', ''))
     requested_branch = request.args.get('branch_cd', '').strip()
 
     scope = _resolve_branch(requested_branch)
@@ -225,20 +176,13 @@ def get_list():
             'disabled': scope['disabled'],
             'search_branch': scope['search_branch'],
             'company_name': get_company_name(),
-            'printed_by': session.get('username', ''),
-            'branch_name': _branch_name(scope['search_branch']),
-            'period_label': _period_label(start_date, end_date),
+            'printed_by': _username(),
+            'branch_name': branch_name(scope['search_branch']),
+            'period_label': period_label(start_date, end_date),
         })
     except Exception as e:
         current_app.logger.exception("CAM by Approver list error")
         return jsonify({'error': str(e)}), 500
-
-_THIN_SIDE = Side(style='thin', color='FF000000')
-_ALL_BORDERS = Border(top=_THIN_SIDE, bottom=_THIN_SIDE, left=_THIN_SIDE, right=_THIN_SIDE)
-_TITLE_FONT = Font(bold=True, size=16)
-_HEADER_FONT = Font(bold=True)
-_CENTER = Alignment(horizontal='center', vertical='center')
-_RIGHT = Alignment(horizontal='right')
 
 _COLUMNS = [
     'No.', 'Branch', 'Customer Name', 'CAM No.', 'Approved Date', 'Model', 'Brand/Type',
@@ -250,43 +194,35 @@ def _build_workbook(start_date, end_date, branch_cd, result: dict) -> Workbook:
     ws = wb.active
     ws.title = 'CamByApprover'
 
-    ws['A1'] = get_company_name()
-
-    ws['M1'] = f"Date : {datetime.now().strftime('%d-%m-%Y')}\nPrint By : {session.get('username', '')}"
-    ws['M1'].alignment = Alignment(wrap_text=True, horizontal='left', vertical='top')
-    ws.row_dimensions[1].height = 30
-
-    ws.merge_cells('A2:D2')
-    ws['A2'] = 'List CAM by Approver'
-    ws['A2'].font = _TITLE_FONT
-    ws['A2'].alignment = _CENTER
-
-    ws.merge_cells('A3:D3')
-    ws['A3'] = f"Branch : {_branch_name(branch_cd)}"
-
-    ws.merge_cells('A4:D4')
-    ws['A4'] = _period_label(start_date, end_date)
+    write_report_header(
+        ws,
+        title='List CAM by Approver',
+        branch_line=f"Branch : {branch_name(branch_cd)}",
+        period_line=period_label(start_date, end_date),
+        stamp_cell='M1',
+    )
 
     row_num = 6
     for section in result['sections']:
         ws.merge_cells(f'A{row_num}:M{row_num}')
         ws[f'A{row_num}'] = f"Approved by : {section['role_label']}"
-        ws[f'A{row_num}'].border = _ALL_BORDERS
+        ws[f'A{row_num}'].border = ALL_BORDERS
+        ws[f'A{row_num}'].font = HEADER_FONT
         row_num += 1
 
         for col_idx, label in enumerate(_COLUMNS, start=1):
             cell = ws.cell(row=row_num, column=col_idx, value=label)
-            cell.border = _ALL_BORDERS
-            cell.alignment = _CENTER
-            cell.font = _HEADER_FONT
+            cell.border = ALL_BORDERS
+            cell.alignment = CENTER
+            cell.font = HEADER_FONT
         row_num += 1
 
         if not section['rows']:
             ws.merge_cells(f'A{row_num}:M{row_num}')
             cell = ws[f'A{row_num}']
             cell.value = 'Data Not Found'
-            cell.font = Font(color='FFFF0000', bold=True)
-            cell.alignment = _CENTER
+            cell.font = RED_BOLD_FONT
+            cell.alignment = CENTER
             row_num += 1
         else:
             for d in section['rows']:
@@ -297,25 +233,25 @@ def _build_workbook(start_date, end_date, branch_cd, result: dict) -> Workbook:
                 ]
                 for col_idx, val in enumerate(values, start=1):
                     cell = ws.cell(row=row_num, column=col_idx, value=val)
-                    cell.border = _ALL_BORDERS
+                    cell.border = ALL_BORDERS
                     if col_idx in (10, 11, 12):
-                        cell.alignment = _RIGHT
+                        cell.alignment = RIGHT
                 row_num += 1
 
     row_num += 1
     ws.merge_cells(f'A{row_num}:B{row_num}')
-    ws[f'A{row_num}'] = f"Grand Total* ({_period_label(start_date, end_date).replace('Period : ', '')})"
-    ws[f'A{row_num}'].font = _HEADER_FONT
+    ws[f'A{row_num}'] = f"Grand Total* ({period_label(start_date, end_date).replace('Period : ', '')})"
+    ws[f'A{row_num}'].font = HEADER_FONT
     row_num += 1
     ws.cell(row=row_num, column=1, value='Net Finance')
-    ws.cell(row=row_num, column=2, value=result['grand_total']['net_finance']).alignment = _RIGHT
+    ws.cell(row=row_num, column=2, value=result['grand_total']['net_finance']).alignment = RIGHT
     row_num += 1
     ws.cell(row=row_num, column=1, value='Units')
-    ws.cell(row=row_num, column=2, value=result['grand_total']['units']).alignment = _RIGHT
+    ws.cell(row=row_num, column=2, value=result['grand_total']['units']).alignment = RIGHT
     row_num += 2
     ws.merge_cells(f'A{row_num}:D{row_num}')
     ws[f'A{row_num}'] = '*Grand Total Amount and Unit Exclude CAM Revision'
-    ws[f'A{row_num}'].font = Font(italic=True)
+    ws[f'A{row_num}'].font = ITALIC_FONT
 
     ws.column_dimensions['A'].width = 6
     for col in 'BCDEFGHIJKLM':
@@ -328,23 +264,15 @@ def _build_workbook(start_date, end_date, branch_cd, result: dict) -> Workbook:
 @cam_by_approver_bp.route('/cam-by-approver/export')
 @login_required
 def export_excel():
-    start_date = _parse_date(request.args.get('start_date', ''))
-    end_date = _parse_date(request.args.get('end_date', ''))
+    start_date = parse_iso_date(request.args.get('start_date', ''))
+    end_date = parse_iso_date(request.args.get('end_date', ''))
     requested_branch = request.args.get('branch_cd', '').strip()
 
     scope = _resolve_branch(requested_branch)
     try:
         result = _fetch_report(start_date, end_date, scope['search_branch'])
         wb = _build_workbook(start_date, end_date, scope['search_branch'], result)
-        buffer = io.BytesIO()
-        wb.save(buffer)
-        buffer.seek(0)
-        return send_file(
-            buffer,
-            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-            as_attachment=True,
-            download_name='ListCamByApprover.xlsx',
-        )
+        return workbook_response(wb, 'ListCamByApprover.xlsx')
     except Exception as e:
         current_app.logger.exception("CAM by Approver export error")
         return jsonify({'error': str(e)}), 500
@@ -438,19 +366,19 @@ def _render_section_rows_html(sections: list[dict]) -> str:
 @cam_by_approver_bp.route('/cam-by-approver/print')
 @login_required
 def print_view():
-    start_date = _parse_date(request.args.get('start_date', ''))
-    end_date = _parse_date(request.args.get('end_date', ''))
+    start_date = parse_iso_date(request.args.get('start_date', ''))
+    end_date = parse_iso_date(request.args.get('end_date', ''))
     requested_branch = request.args.get('branch_cd', '').strip()
 
     scope = _resolve_branch(requested_branch)
     try:
         result = _fetch_report(start_date, end_date, scope['search_branch'])
-        period = _period_label(start_date, end_date)
+        period = period_label(start_date, end_date)
         html = _PRINT_TEMPLATE.format(
             company=get_company_name(),
-            today=datetime.now().strftime('%d-%m-%Y'),
-            printed_by=session.get('username', ''),
-            branch_name=_branch_name(scope['search_branch']),
+            today=today_ddmmyyyy(),
+            printed_by=_username(),
+            branch_name=branch_name(scope['search_branch']),
             period=period,
             period_plain=period.replace('Period : ', ''),
             rows_html=_render_section_rows_html(result['sections']),
@@ -462,74 +390,6 @@ def print_view():
         current_app.logger.exception("CAM by Approver print error")
         return jsonify({'error': str(e)}), 500
 
-def _fetch_cam_basic_info(appl_no: str) -> dict:
-    rows = _exec_rows(
-        """
-        SELECT LTRIM(RTRIM(a.CMO)) AS CMO, b.LESSEE_NM, b.apless, c.USERNAME
-        FROM CAFCONT a WITH (NOLOCK)
-            LEFT JOIN CAFLESS b WITH (NOLOCK) ON a.APLESS = b.APLESS
-            LEFT JOIN APP_USRMST c WITH (NOLOCK) ON a.CMO = c.EMPLOYEE_ID
-        WHERE a.APPL_NO = ?
-        """,
-        [appl_no],
-    )
-    return rows[0] if rows else {}
-
-def _fetch_revision_suffix(appl_no: str) -> str:
-    rows = _exec_rows("SELECT REVISI FROM MCMOREVISI WITH (NOLOCK) WHERE NEWAPPL_NO = ?", [appl_no])
-    return f"R{rows[0]['REVISI']}" if rows else ''
-
-def _fetch_approval_history(appl_no: str, require_comment: bool) -> list[dict]:
-    comment_filter = "AND a.comment IS NOT NULL AND a.comment <> ''" if require_comment else ""
-    sql = f"""
-        SELECT * FROM (
-            SELECT a.[No], a.APPR_ID, a.APPR_DATE, a.COMMENT, SUBSTRING(a.APPR_STS, 1, 1) AS APPR_STS
-            FROM MCMOCAMOUTSSTATUS a WITH (NOLOCK)
-            WHERE a.APPL_NO = ? AND (a.APPR_STS IN ('N', 'A', 'F', 'R') OR a.APPR_STS LIKE '%R')
-            
-            UNION
-            
-            SELECT a.[No], a.APPR_ID, a.APPR_DATE, a.COMMENT, SUBSTRING(a.APPR_STS, 1, 1) AS APPR_STS
-            FROM MCMOCAMStatus a WITH (NOLOCK)
-            WHERE a.APPL_NO = ? AND (a.APPR_STS IN ('N', 'A', 'F', 'R') OR a.APPR_STS LIKE '%R')
-        ) a
-        WHERE a.APPR_ID IN (SELECT username FROM app_usrmst WHERE ACCESSCAM IN ('CRH', 'CRDH', 'DR', 'PD'))
-            {comment_filter}
-        ORDER BY a.[No]
-    """
-    rows = _exec_rows(sql, [appl_no, appl_no])
-    history = []
-    for r in rows:
-        appr_date = r.get('APPR_DATE')
-        history.append({
-            'date': appr_date.strftime('%d-%m-%Y %H:%M:%S') if appr_date else '',
-            'approved_by': r.get('APPR_ID'),
-            'status': _STATUS_LABELS.get(r.get('APPR_STS'), ''),
-            'comment': r.get('COMMENT') or '',
-        })
-    return history
-
-def _fetch_related_cams(appl_no: str, apless: Optional[str]) -> list[dict]:
-    related_rows = _exec_multi_resultset("EXEC USP_ListCamCommittee ?, ?", [appl_no, apless])
-    related = []
-    for r in related_rows:
-        related_appl_no = r.get('appl_no')
-        if not related_appl_no:
-            continue
-        existence_check = _fetch_approval_history(related_appl_no, require_comment=True)
-        if not existence_check:
-            continue
-        history = _fetch_approval_history(related_appl_no, require_comment=False)
-        info = _fetch_cam_basic_info(related_appl_no)
-        suffix = _fetch_revision_suffix(related_appl_no)
-        related.append({
-            'appl_no_display': f"{related_appl_no}{suffix}",
-            'customer_name': info.get('LESSEE_NM'),
-            'cmo_name': info.get('USERNAME'),
-            'history': history,
-        })
-    return related
-
 @cam_by_approver_bp.route('/cam-by-approver/comments')
 @login_required
 def get_comments():
@@ -538,19 +398,7 @@ def get_comments():
         return jsonify({'error': 'appl_no is required'}), 400
 
     try:
-        info = _fetch_cam_basic_info(appl_no)
-        suffix = _fetch_revision_suffix(appl_no)
-        history = _fetch_approval_history(appl_no, require_comment=False)
-        related = _fetch_related_cams(appl_no, info.get('apless'))
-        return jsonify({
-            'main': {
-                'appl_no_display': f"{appl_no}{suffix}",
-                'customer_name': info.get('LESSEE_NM'),
-                'cmo_name': info.get('USERNAME'),
-                'history': history,
-            },
-            'related': related,
-        })
+        return jsonify(build_comments_payload(appl_no))
     except Exception as e:
         current_app.logger.exception("Credit committee comments error")
         return jsonify({'error': str(e)}), 500

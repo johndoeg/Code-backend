@@ -1,75 +1,38 @@
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date
 from typing import Optional
-from flask import Blueprint, jsonify, request, current_app, session
+from flask import Blueprint, jsonify, request, current_app
 
-from app import db
 from app.auth.decorators import login_required
+from app.utils.helpers.base_format import (
+    _username,
+    branch_name,
+    exec_rows,
+    fetch_branch_list,
+    fmt_ddmmyyyy,
+    fmt_long,
+    num,
+    parse_iso_date,
+    period_label_long,
+    safe_div,
+    sp_date,
+)
 from app.utils.helpers.settings_helpers import company_name as get_company_name
 
 cam_by_disbursement_date_bp = Blueprint('cam_by_disbursement_date', __name__, url_prefix='/CAM/Report')
 
-def _exec_rows(sql: str, params: list) -> list[dict]:
-    raw_conn = db.session.connection().connection
-    cursor = raw_conn.cursor()
-    try:
-        cursor.execute(sql, params)
-        if cursor.description is None:
-            return []
-        columns = [col[0] for col in cursor.description]
-        return [dict(zip(columns, row)) for row in cursor.fetchall()]
-    finally:
-        cursor.close()
-
-def _parse_date(raw: str) -> Optional[date]:
-    raw = (raw or '').strip()
-    if not raw:
-        return None
-    try:
-        return datetime.strptime(raw, '%Y-%m-%d').date()
-    except ValueError:
-        return None
-
-def _fmt_long(val) -> str:
-    if isinstance(val, (date, datetime)):
-        return val.strftime('%d %B %Y')
-    return ''
-
-def _fmt_short(val) -> str:
-    if isinstance(val, (date, datetime)):
-        return val.strftime('%d-%m-%Y')
-    return ''
-
-def _num(val) -> float:
-    if val is None:
-        return 0.0
-    return float(val)
-
-def _branch_name(branch_cd: str) -> str:
-    if not branch_cd:
-        return ''
-    rows = _exec_rows("SELECT BRANCH_NAME FROM UMFBRANCH WITH (NOLOCK) WHERE BRANCH_CD = ?", [branch_cd])
-    return (rows[0]['BRANCH_NAME'] or '').strip() if rows else ''
-
-def _safe_div(a, b):
-    return (a / b) if b else 0
-
 def _exec_sp(mode: str, branch_cd: str, start_date: Optional[date], end_date: Optional[date], dimension: str, exclude_jf: str) -> list[dict]:
-    return _exec_rows(
+    return exec_rows(
         "EXEC USP_CAM_By_Disbursement ?, ?, ?, ?, ?, ?, ?",
-        [mode, branch_cd, start_date, end_date, dimension, '', exclude_jf],
+        [mode, branch_cd, sp_date(start_date), sp_date(end_date), dimension, '', exclude_jf],
     )
 
 @cam_by_disbursement_date_bp.route('/cam-by-disbursement-date/branches')
 @login_required
 def list_branches():
     try:
-        rows = _exec_rows(
-            "SELECT BRANCH_CD, BRANCH_NAME FROM UMFBRANCH WITH (NOLOCK) WHERE BRANCH_CD <> '100' ORDER BY BRANCH_CD",
-            [],
-        )
-        return jsonify([{'branch_cd': r.get('BRANCH_CD'), 'branch_name': r.get('BRANCH_NAME')} for r in rows])
+        return jsonify(fetch_branch_list())
     except Exception as e:
         current_app.logger.exception("Branch list error")
         return jsonify({'error': str(e)}), 500
@@ -93,7 +56,7 @@ def _fetch_detail(branch_cd: str, start_date: Optional[date], end_date: Optional
     if kept_rows:
         appl_nos = [r.get('APPL_NO') for r in kept_rows]
         placeholders = ','.join(['?'] * len(appl_nos))
-        rev_rows = _exec_rows(
+        rev_rows = exec_rows(
             f"SELECT NewAppl_No, REVISI FROM MCMORevisi WHERE NewAppl_No IN ({placeholders})",
             appl_nos,
         )
@@ -104,8 +67,8 @@ def _fetch_detail(branch_cd: str, start_date: Optional[date], end_date: Optional
     for i, r in enumerate(kept_rows, start=1):
         execution = r.get('EXECUTION')
         if i == 1:
-            start_date_approval = _fmt_long(execution)
-        finish_date_approval = _fmt_long(execution)
+            start_date_approval = fmt_long(execution)
+        finish_date_approval = fmt_long(execution)
 
         has_guarantor = r.get('HAS_GUARANTOR')
         guarantor = 2 if has_guarantor == '1' else 1
@@ -141,12 +104,12 @@ def _fetch_detail(branch_cd: str, start_date: Optional[date], end_date: Optional
             'revision_suffix': revision_suffix,
             'customer_name': r.get('LESSEE_NM') or '-',
             'brand_type': f"{r.get('BRAND_NM') or ''} / {r.get('tipe_mobil') or ''}",
-            'net_finance': _num(r.get('ntf')),
-            'irr': round(_num(r.get('IRR')), 2),
-            'selling_rate': round(_num(r.get('DECLRATE')), 2),
-            'ltv': round(_num(r.get('LTV')), 2),
+            'net_finance': num(r.get('ntf')),
+            'irr': round(num(r.get('IRR')), 2),
+            'selling_rate': round(num(r.get('DECLRATE')), 2),
+            'ltv': round(num(r.get('LTV')), 2),
             'tenor': r.get('TENOR'),
-            'disbursement_date': _fmt_short(execution),
+            'disbursement_date': fmt_ddmmyyyy(execution),
             'cmo': r.get('CMO'),
             'edit_link_params': edit_params,
         })
@@ -156,7 +119,7 @@ def _fetch_detail(branch_cd: str, start_date: Optional[date], end_date: Optional
     return {
         'data': detail,
         'date_range_label': (
-            f"{_fmt_long(start_date)} - {_fmt_long(end_date)}"
+            period_label_long(start_date, end_date)
             if start_date and end_date
             else f"{start_date_approval or ''} - {finish_date_approval or ''}"
         ),
@@ -164,7 +127,7 @@ def _fetch_detail(branch_cd: str, start_date: Optional[date], end_date: Optional
     }
 
 def _build_summary_by_vehicle(branch_cd: str, start_date: Optional[date], end_date: Optional[date], exclude_jf: str) -> list[dict]:
-   
+
     rows = _exec_sp('TOTAL', branch_cd, start_date, end_date, 'Vehicle', exclude_jf)
 
     out = []
@@ -174,21 +137,21 @@ def _build_summary_by_vehicle(branch_cd: str, start_date: Optional[date], end_da
 
     def group_averages(g):
         return {
-            'avg_irr': round(_safe_div(g['income'], g['fin']) * 100, 2),
-            'avg_sell': round(_safe_div(g['sell_income'], g['unit']), 2),
-            'avg_ltv': round(_safe_div(g['ltv'], g['unit']), 2),
-            'avg_tenor': round(_safe_div(g['tenor'], g['unit']), 2),
-            'avg_fin': round(_safe_div(g['fin'], g['unit'])),
+            'avg_irr': round(safe_div(g['income'], g['fin']) * 100, 2),
+            'avg_sell': round(safe_div(g['sell_income'], g['unit']), 2),
+            'avg_ltv': round(safe_div(g['ltv'], g['unit']), 2),
+            'avg_tenor': round(safe_div(g['tenor'], g['unit']), 2),
+            'avg_fin': round(safe_div(g['fin'], g['unit'])),
         }
 
     for r in rows:
         tot = {
-            'fin': _num(r.get('tot_fin')),
-            'unit': _num(r.get('tot_unit')),
-            'tenor': _num(r.get('tot_tenor')),
-            'income': _num(r.get('tot_income')),
-            'ltv': _num(r.get('tot_ltv')),
-            'sell_income': _num(r.get('tot_sell_income')),
+            'fin': num(r.get('tot_fin')),
+            'unit': num(r.get('tot_unit')),
+            'tenor': num(r.get('tot_tenor')),
+            'income': num(r.get('tot_income')),
+            'ltv': num(r.get('tot_ltv')),
+            'sell_income': num(r.get('tot_sell_income')),
         }
         cons_leas = r.get('Cons_Leas')
 
@@ -210,11 +173,11 @@ def _build_summary_by_vehicle(branch_cd: str, start_date: Optional[date], end_da
             grand[k] += tot[k]
 
         row_avgs = {
-            'avg_irr': round(_safe_div(tot['income'], tot['fin']) * 100, 2),
-            'avg_sell': round(_safe_div(tot['sell_income'], tot['unit']), 2),
-            'avg_ltv': round(_safe_div(tot['ltv'], tot['unit']), 2),
-            'avg_tenor': round(_safe_div(tot['tenor'], tot['unit']), 2),
-            'avg_fin': round(_safe_div(tot['fin'], tot['unit'])),
+            'avg_irr': round(safe_div(tot['income'], tot['fin']) * 100, 2),
+            'avg_sell': round(safe_div(tot['sell_income'], tot['unit']), 2),
+            'avg_ltv': round(safe_div(tot['ltv'], tot['unit']), 2),
+            'avg_tenor': round(safe_div(tot['tenor'], tot['unit']), 2),
+            'avg_fin': round(safe_div(tot['fin'], tot['unit'])),
         }
         out.append({
             'type': 'detail',
@@ -248,8 +211,8 @@ def _build_summary_by_vehicle(branch_cd: str, start_date: Optional[date], end_da
 @login_required
 def get_detail():
     branch_cd = request.args.get('branch', '').strip()
-    start_date = _parse_date(request.args.get('start_date', ''))
-    end_date = _parse_date(request.args.get('end_date', ''))
+    start_date = parse_iso_date(request.args.get('start_date', ''))
+    end_date = parse_iso_date(request.args.get('end_date', ''))
     exclude_jf = '1' if request.args.get('exclude_jf', '0') == '1' else '0'
 
     if not branch_cd and not start_date and not end_date:
@@ -258,8 +221,8 @@ def get_detail():
     try:
         detail = _fetch_detail(branch_cd, start_date, end_date, exclude_jf)
         detail['company_name'] = get_company_name()
-        detail['printed_by'] = session.get('username', '')
-        detail['branch_name'] = _branch_name(branch_cd)
+        detail['printed_by'] = _username()
+        detail['branch_name'] = branch_name(branch_cd)
         return jsonify(detail)
     except Exception as e:
         current_app.logger.exception("CAM by disbursement date detail error")
@@ -284,17 +247,17 @@ def _fetch_dimension_summary(dimension_key: str, branch_cd: str, start_date: Opt
     last_fin_all = 0
 
     for r in rows:
-        tot_fin = _num(r.get('tot_fin'))
-        tot_unit = _num(r.get('tot_unit'))
-        tot_tenor = _num(r.get('tot_tenor'))
-        tot_income = _num(r.get('tot_income'))
-        tot_ltv = _num(r.get('tot_ltv'))
-        tot_sell_income = _num(r.get('tot_sell_income'))
+        tot_fin = num(r.get('tot_fin'))
+        tot_unit = num(r.get('tot_unit'))
+        tot_tenor = num(r.get('tot_tenor'))
+        tot_income = num(r.get('tot_income'))
+        tot_ltv = num(r.get('tot_ltv'))
+        tot_sell_income = num(r.get('tot_sell_income'))
 
-        avg_irr = round(_safe_div(tot_income, tot_fin) * 100, 2)
-        avg_sell = round(_safe_div(tot_sell_income, tot_unit), 2)
-        avg_ltv = round(_safe_div(tot_ltv, tot_unit), 2)
-        avg_fin = round(_safe_div(tot_fin, tot_unit))
+        avg_irr = round(safe_div(tot_income, tot_fin) * 100, 2)
+        avg_sell = round(safe_div(tot_sell_income, tot_unit), 2)
+        avg_ltv = round(safe_div(tot_ltv, tot_unit), 2)
+        avg_fin = round(safe_div(tot_fin, tot_unit))
 
         row_out = {
             'label': r.get(config['label_field']),
@@ -307,19 +270,19 @@ def _fetch_dimension_summary(dimension_key: str, branch_cd: str, start_date: Opt
         }
 
         if config['metric'] == 'tenor_and_year':
-            tot_tahun = _num(r.get('tot_tahun'))
-            row_out['avg_tenor'] = round(_safe_div(tot_tenor, tot_unit), 2)
-            row_out['avg_tahun'] = round(_safe_div(tot_tahun, tot_unit))
+            tot_tahun = num(r.get('tot_tahun'))
+            row_out['avg_tenor'] = round(safe_div(tot_tenor, tot_unit), 2)
+            row_out['avg_tahun'] = round(safe_div(tot_tahun, tot_unit))
             grand.setdefault('tahun', 0)
             grand['tahun'] += tot_tahun
         elif config['metric'] == 'tenor':
-            row_out['avg_tenor'] = round(_safe_div(tot_tenor, tot_unit), 2)
+            row_out['avg_tenor'] = round(safe_div(tot_tenor, tot_unit), 2)
         elif config['metric'] == 'proportion_tenor':
-            last_tenor_all = _num(r.get('tot_tenor_all'))
-            row_out['proportion'] = round(_safe_div(tot_tenor, last_tenor_all) * 100, 2)
+            last_tenor_all = num(r.get('tot_tenor_all'))
+            row_out['proportion'] = round(safe_div(tot_tenor, last_tenor_all) * 100, 2)
         elif config['metric'] == 'proportion_fin':
-            last_fin_all = _num(r.get('tot_fin_all'))
-            row_out['proportion'] = round(_safe_div(tot_fin, last_fin_all) * 100, 2)
+            last_fin_all = num(r.get('tot_fin_all'))
+            row_out['proportion'] = round(safe_div(tot_fin, last_fin_all) * 100, 2)
 
         data.append(row_out)
 
@@ -334,20 +297,20 @@ def _fetch_dimension_summary(dimension_key: str, branch_cd: str, start_date: Opt
         'label': 'Grand Total',
         'net_finance': round(grand['fin']),
         'units': int(grand['unit']),
-        'avg_irr': round(_safe_div(grand['income'], grand['fin']) * 100, 2),
-        'avg_sell': round(_safe_div(grand['sell_income'], grand['unit']), 2),
-        'avg_ltv': round(_safe_div(grand['ltv'], grand['unit']), 2),
-        'avg_fin': round(_safe_div(grand['fin'], grand['unit'])),
+        'avg_irr': round(safe_div(grand['income'], grand['fin']) * 100, 2),
+        'avg_sell': round(safe_div(grand['sell_income'], grand['unit']), 2),
+        'avg_ltv': round(safe_div(grand['ltv'], grand['unit']), 2),
+        'avg_fin': round(safe_div(grand['fin'], grand['unit'])),
     }
     if config['metric'] == 'tenor_and_year':
-        grand_out['avg_tenor'] = round(_safe_div(grand['tenor'], grand['unit']), 2)
-        grand_out['avg_tahun'] = round(_safe_div(grand.get('tahun', 0), grand['unit']))
+        grand_out['avg_tenor'] = round(safe_div(grand['tenor'], grand['unit']), 2)
+        grand_out['avg_tahun'] = round(safe_div(grand.get('tahun', 0), grand['unit']))
     elif config['metric'] == 'tenor':
-        grand_out['avg_tenor'] = round(_safe_div(grand['tenor'], grand['unit']), 2)
+        grand_out['avg_tenor'] = round(safe_div(grand['tenor'], grand['unit']), 2)
     elif config['metric'] == 'proportion_tenor':
-        grand_out['proportion'] = round(_safe_div(grand['tenor'], last_tenor_all) * 100, 2)
+        grand_out['proportion'] = round(safe_div(grand['tenor'], last_tenor_all) * 100, 2)
     elif config['metric'] == 'proportion_fin':
-        grand_out['proportion'] = round(_safe_div(grand['fin'], last_fin_all) * 100, 2)
+        grand_out['proportion'] = round(safe_div(grand['fin'], last_fin_all) * 100, 2)
 
     return {'metric': config['metric'], 'data': data, 'grand_total': grand_out}
 
@@ -359,8 +322,8 @@ def get_dimension_summary():
         return jsonify({'error': f"dimension must be one of {list(_DIMENSION_CONFIG)}"}), 400
 
     branch_cd = request.args.get('branch', '').strip()
-    start_date = _parse_date(request.args.get('start_date', ''))
-    end_date = _parse_date(request.args.get('end_date', ''))
+    start_date = parse_iso_date(request.args.get('start_date', ''))
+    end_date = parse_iso_date(request.args.get('end_date', ''))
     exclude_jf = '1' if request.args.get('exclude_jf', '0') == '1' else '0'
 
     try:

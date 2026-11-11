@@ -1,62 +1,39 @@
 from __future__ import annotations
 
-import io
-from datetime import date, datetime
+from datetime import date
 from typing import Optional
-from flask import Blueprint, jsonify, request, current_app, session, send_file, Response
+from flask import Blueprint, jsonify, request, current_app, Response
 
 from openpyxl import Workbook
-from openpyxl.styles import Alignment, Border, Font, Side
 
-from app import db
 from app.auth.decorators import login_required
+from app.utils.helpers.base_format import (
+    ALL_BORDERS,
+    CENTER,
+    HEADER_FONT,
+    RED_BOLD_FONT,
+    RIGHT,
+    _access_level,
+    _branch,
+    _emp_id,
+    _username,
+    branch_name,
+    exec_rows,
+    fetch_branch_list,
+    num,
+    parse_iso_date,
+    period_label,
+    today_ddmmyyyy,
+    workbook_response,
+    write_report_header,
+)
 from app.utils.helpers.settings_helpers import company_name as get_company_name
 
 cam_by_car_condition_bp = Blueprint('cam_by_car_condition', __name__, url_prefix='/CAM/Approved')
 
-def _exec_rows(sql: str, params: list) -> list[dict]:
-    raw_conn = db.session.connection().connection
-    cursor = raw_conn.cursor()
-    try:
-        cursor.execute(sql, params)
-        if cursor.description is None:
-            return []
-        columns = [col[0] for col in cursor.description]
-        return [dict(zip(columns, row)) for row in cursor.fetchall()]
-    finally:
-        cursor.close()
-
-def _parse_date(raw: str) -> Optional[date]:
-    raw = (raw or '').strip()
-    if not raw:
-        return None
-    try:
-        return datetime.strptime(raw, '%Y-%m-%d').date()
-    except ValueError:
-        return None
-
-def _num(val) -> float:
-    if val is None:
-        return 0.0
-    return float(val)
-
-def _fmt_ddmmyyyy(d: Optional[date]) -> str:
-    return d.strftime('%d-%m-%Y') if d else ''
-
-def _branch_name(branch_cd: str) -> str:
-    if not branch_cd:
-        return ''
-    rows = _exec_rows("SELECT BRANCH_NAME FROM UMFBRANCH WITH (NOLOCK) WHERE BRANCH_CD = ?", [branch_cd])
-    return rows[0]['BRANCH_NAME'] if rows else ''
-
-def _period_label(start_date: Optional[date], end_date: Optional[date]) -> str:
-    if start_date and end_date:
-        return f"Period : {_fmt_ddmmyyyy(start_date)} to {_fmt_ddmmyyyy(end_date)}"
-    return ''
-
 def _resolve_scope(requested_branch_cd: str) -> dict:
-    access_level = session.get('accesslevel')
-    own_branch_cd = session.get('branchcode')
+    access_level = _access_level()
+    own_branch_cd = _branch()
 
     if access_level in ('CMO', 'CMH', 'BM'):
         return {'disabled': True, 'search_branch': own_branch_cd, 'sp_branch_param': ''}
@@ -68,11 +45,7 @@ def _resolve_scope(requested_branch_cd: str) -> dict:
 @login_required
 def list_branches():
     try:
-        rows = _exec_rows(
-            "SELECT BRANCH_CD, BRANCH_NAME FROM UMFBRANCH WITH (NOLOCK) WHERE BRANCH_CD <> '100' ORDER BY BRANCH_CD",
-            [],
-        )
-        return jsonify([{'branch_cd': r.get('BRANCH_CD'), 'branch_name': r.get('BRANCH_NAME')} for r in rows])
+        return jsonify(fetch_branch_list())
     except Exception as e:
         current_app.logger.exception("Branch list error")
         return jsonify({'error': str(e)}), 500
@@ -88,12 +61,12 @@ def _fetch_and_process(start_date: Optional[date], end_date: Optional[date], sco
     params = [
         start_date.isoformat() if start_date else '',
         end_date.isoformat() if end_date else '',
-        session.get('emp_id'),
-        session.get('branchcode'),
-        session.get('accesslevel'),
+        _emp_id(),
+        _branch(),
+        _access_level(),
         scope['sp_branch_param'],
     ]
-    rows = _exec_rows(sql, params)
+    rows = exec_rows(sql, params)
 
     detail = []
     totals = {
@@ -108,14 +81,14 @@ def _fetch_and_process(start_date: Optional[date], end_date: Optional[date], sco
         adm_date = r.get('AdmDate')
         date_str = adm_date.strftime('%d-%m-%Y') if adm_date else ''
         vals = {
-            'new_nontruck_unit': _num(r.get('unit_newnontruck')),
-            'new_nontruck_amt': _num(r.get('Net_Finance_newnontruck')),
-            'new_truck_unit': _num(r.get('unit_newtruck')),
-            'new_truck_amt': _num(r.get('Net_Finance_newtruck')),
-            'used_nontruck_unit': _num(r.get('unit_used_non')),
-            'used_nontruck_amt': _num(r.get('Net_Finance_usednon')),
-            'used_truck_unit': _num(r.get('unit_used_truck')),
-            'used_truck_amt': _num(r.get('Net_Finance_usedtruck')),
+            'new_nontruck_unit': num(r.get('unit_newnontruck')),
+            'new_nontruck_amt': num(r.get('Net_Finance_newnontruck')),
+            'new_truck_unit': num(r.get('unit_newtruck')),
+            'new_truck_amt': num(r.get('Net_Finance_newtruck')),
+            'used_nontruck_unit': num(r.get('unit_used_non')),
+            'used_nontruck_amt': num(r.get('Net_Finance_usednon')),
+            'used_truck_unit': num(r.get('unit_used_truck')),
+            'used_truck_amt': num(r.get('Net_Finance_usedtruck')),
         }
         detail.append({
             'approval_date': date_str if date_str != temp_date else '',
@@ -186,8 +159,8 @@ def _derive_summary(totals: dict) -> dict:
 @cam_by_car_condition_bp.route('/cam-by-car-condition/list')
 @login_required
 def get_list():
-    start_date = _parse_date(request.args.get('start_date', ''))
-    end_date = _parse_date(request.args.get('end_date', ''))
+    start_date = parse_iso_date(request.args.get('start_date', ''))
+    end_date = parse_iso_date(request.args.get('end_date', ''))
     requested_branch = request.args.get('branch_cd_search', '').strip()
 
     scope = _resolve_scope(requested_branch)
@@ -200,42 +173,27 @@ def get_list():
             'disabled': scope['disabled'],
             'search_branch': scope['search_branch'],
             'company_name': get_company_name(),
-            'printed_by': session.get('username', ''),
-            'branch_name': _branch_name(scope['search_branch']),
-            'period_label': _period_label(start_date, end_date),
+            'printed_by': _username(),
+            'branch_name': branch_name(scope['search_branch']),
+            'period_label': period_label(start_date, end_date),
         })
     except Exception as e:
         current_app.logger.exception("CAM by Car Condition list error")
         return jsonify({'error': str(e)}), 500
-
-_THIN_SIDE = Side(style='thin', color='FF000000')
-_ALL_BORDERS = Border(top=_THIN_SIDE, bottom=_THIN_SIDE, left=_THIN_SIDE, right=_THIN_SIDE)
-_TITLE_FONT = Font(bold=True, size=14)
-_HEADER_FONT = Font(bold=True)
-_CENTER = Alignment(horizontal='center', vertical='center')
-_RIGHT = Alignment(horizontal='right')
 
 def _build_workbook(start_date, end_date, scope, result: dict) -> Workbook:
     wb = Workbook()
     ws = wb.active
     ws.title = 'CamByCarCondition'
 
-    ws['A1'] = get_company_name()
-
-    ws['I1'] = f"Date : {datetime.now().strftime('%d-%m-%Y')}\nPrint By : {session.get('username', '')}"
-    ws['I1'].alignment = Alignment(wrap_text=True, horizontal='left', vertical='top')
-    ws.row_dimensions[1].height = 30
-
-    ws.merge_cells('A2:D2')
-    ws['A2'] = "List Approved Cam By Car's Condition"
-    ws['A2'].font = _TITLE_FONT
-    ws['A2'].alignment = _CENTER
-
-    ws.merge_cells('A3:D3')
-    ws['A3'] = f"Branch : {_branch_name(scope['search_branch'])}"
-
-    ws.merge_cells('A4:D4')
-    ws['A4'] = _period_label(start_date, end_date)
+    write_report_header(
+        ws,
+        title="List Approved Cam By Car's Condition",
+        branch_line=f"Branch : {branch_name(scope['search_branch'])}",
+        period_line=period_label(start_date, end_date),
+        stamp_cell='I1',
+        title_size=14,
+    )
 
     header_row1 = 6
     header_row2 = 7
@@ -263,9 +221,9 @@ def _build_workbook(start_date, end_date, scope, result: dict) -> Workbook:
     for row_num in (header_row1, header_row2, header_row3):
         for col in 'ABCDEFGHI':
             cell = ws[f'{col}{row_num}']
-            cell.border = _ALL_BORDERS
-            cell.alignment = _CENTER
-            cell.font = _HEADER_FONT
+            cell.border = ALL_BORDERS
+            cell.alignment = CENTER
+            cell.font = HEADER_FONT
 
     excel_row = header_row3 + 1
     detail = result['detail']
@@ -273,12 +231,12 @@ def _build_workbook(start_date, end_date, scope, result: dict) -> Workbook:
         ws.merge_cells(f'A{excel_row}:I{excel_row}')
         cell = ws[f'A{excel_row}']
         cell.value = 'Data Not Found'
-        cell.font = Font(color='FFFF0000', bold=True)
-        cell.alignment = _CENTER
+        cell.font = RED_BOLD_FONT
+        cell.alignment = CENTER
         excel_row += 1
     else:
         for row in detail:
-            ws.cell(row=excel_row, column=1, value=row['approval_date']).border = _ALL_BORDERS
+            ws.cell(row=excel_row, column=1, value=row['approval_date']).border = ALL_BORDERS
             values = [
                 row['new_nontruck_unit'], row['new_nontruck_amt'],
                 row['new_truck_unit'], row['new_truck_amt'],
@@ -287,8 +245,8 @@ def _build_workbook(start_date, end_date, scope, result: dict) -> Workbook:
             ]
             for i, val in enumerate(values, start=2):
                 cell = ws.cell(row=excel_row, column=i, value=val)
-                cell.border = _ALL_BORDERS
-                cell.alignment = _RIGHT
+                cell.border = ALL_BORDERS
+                cell.alignment = RIGHT
             excel_row += 1
 
         tr = result['summary']['totals_row']
@@ -296,12 +254,12 @@ def _build_workbook(start_date, end_date, scope, result: dict) -> Workbook:
             tr['new_nontruck_unit'], tr['new_nontruck_amt'], tr['new_truck_unit'], tr['new_truck_amt'],
             tr['used_nontruck_unit'], tr['used_nontruck_amt'], tr['used_truck_unit'], tr['used_truck_amt'],
         ]
-        ws.cell(row=excel_row, column=1).border = _ALL_BORDERS
+        ws.cell(row=excel_row, column=1).border = ALL_BORDERS
         for i, val in enumerate(totals_values, start=2):
             cell = ws.cell(row=excel_row, column=i, value=val)
-            cell.border = _ALL_BORDERS
-            cell.alignment = _RIGHT
-            cell.font = _HEADER_FONT
+            cell.border = ALL_BORDERS
+            cell.alignment = RIGHT
+            cell.font = HEADER_FONT
         excel_row += 2
 
     by_cond = result['summary']['by_condition']
@@ -311,15 +269,15 @@ def _build_workbook(start_date, end_date, scope, result: dict) -> Workbook:
         headers = ['', 'Unit', '%', 'Net Finance', '%']
         for col_idx, label in enumerate(headers, start=1):
             cell = ws.cell(row=start_row, column=col_idx, value=label)
-            cell.font = _HEADER_FONT
-            cell.alignment = _CENTER
+            cell.font = HEADER_FONT
+            cell.alignment = CENTER
         r = start_row + 1
         for label, bucket in rows_spec:
             ws.cell(row=r, column=1, value=label)
-            ws.cell(row=r, column=2, value=bucket['units']).alignment = _RIGHT
-            ws.cell(row=r, column=3, value=f"{bucket['pct_units']}%").alignment = _RIGHT
-            ws.cell(row=r, column=4, value=bucket['net_finance']).alignment = _RIGHT
-            ws.cell(row=r, column=5, value=f"{bucket['pct_net_finance']}%").alignment = _RIGHT
+            ws.cell(row=r, column=2, value=bucket['units']).alignment = RIGHT
+            ws.cell(row=r, column=3, value=f"{bucket['pct_units']}%").alignment = RIGHT
+            ws.cell(row=r, column=4, value=bucket['net_finance']).alignment = RIGHT
+            ws.cell(row=r, column=5, value=f"{bucket['pct_net_finance']}%").alignment = RIGHT
             r += 1
         return r + 1
 
@@ -341,23 +299,15 @@ def _build_workbook(start_date, end_date, scope, result: dict) -> Workbook:
 @cam_by_car_condition_bp.route('/cam-by-car-condition/export')
 @login_required
 def export_excel():
-    start_date = _parse_date(request.args.get('start_date', ''))
-    end_date = _parse_date(request.args.get('end_date', ''))
+    start_date = parse_iso_date(request.args.get('start_date', ''))
+    end_date = parse_iso_date(request.args.get('end_date', ''))
     requested_branch = request.args.get('branch_cd_search', '').strip()
 
     scope = _resolve_scope(requested_branch)
     try:
         result = _fetch_and_process(start_date, end_date, scope)
         wb = _build_workbook(start_date, end_date, scope, result)
-        buffer = io.BytesIO()
-        wb.save(buffer)
-        buffer.seek(0)
-        return send_file(
-            buffer,
-            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-            as_attachment=True,
-            download_name='ApprovedCamByCarCond.xlsx',
-        )
+        return workbook_response(wb, 'ApprovedCamByCarCond.xlsx')
     except Exception as e:
         current_app.logger.exception("CAM by Car Condition export error")
         return jsonify({'error': str(e)}), 500
@@ -455,8 +405,8 @@ def _render_detail_rows_html(detail: list[dict], totals_row: dict) -> str:
 @cam_by_car_condition_bp.route('/cam-by-car-condition/print')
 @login_required
 def print_view():
-    start_date = _parse_date(request.args.get('start_date', ''))
-    end_date = _parse_date(request.args.get('end_date', ''))
+    start_date = parse_iso_date(request.args.get('start_date', ''))
+    end_date = parse_iso_date(request.args.get('end_date', ''))
     requested_branch = request.args.get('branch_cd_search', '').strip()
 
     scope = _resolve_scope(requested_branch)
@@ -467,10 +417,10 @@ def print_view():
 
         html = _PRINT_TEMPLATE.format(
             company=get_company_name(),
-            today=datetime.now().strftime('%d-%m-%Y'),
-            printed_by=session.get('username', ''),
-            branch_name=_branch_name(scope['search_branch']),
-            period=_period_label(start_date, end_date),
+            today=today_ddmmyyyy(),
+            printed_by=_username(),
+            branch_name=branch_name(scope['search_branch']),
+            period=period_label(start_date, end_date),
             rows_html=_render_detail_rows_html(result['detail'], result['summary']['totals_row']),
             new_units=f"{by_cond['new']['units']:,}", new_pct_units=by_cond['new']['pct_units'],
             new_fin=f"{by_cond['new']['net_finance']:,.0f}", new_pct_fin=by_cond['new']['pct_net_finance'],
