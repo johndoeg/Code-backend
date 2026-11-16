@@ -30,17 +30,25 @@ def _parse_date(raw: str) -> Optional[date]:
     except ValueError:
         return None
 
+CONSOLIDATE_BRANCH = {'branch_cd': '000', 'branch_name': 'Consolidate'}
+
 def _fetch_branches(user_branch_cd: str) -> list[dict]:
-   
-    if user_branch_cd != '100':
+    if user_branch_cd == '000':
+        return [dict(CONSOLIDATE_BRANCH)]
+
+    if user_branch_cd == '100':
+        sql = "SELECT BRANCH_CD, BRANCH_NAME FROM UMFBRANCH WHERE BRANCH_CD NOT IN ('100', '000')"
+        params: list = []
+        prefix = [dict(CONSOLIDATE_BRANCH)]
+    else:
         sql = "SELECT BRANCH_CD, BRANCH_NAME FROM UMFBRANCH WHERE BRANCH_CD = ?"
         params = [user_branch_cd]
-    else:
-        sql = "SELECT BRANCH_CD, BRANCH_NAME FROM UMFBRANCH WHERE BRANCH_CD NOT IN ('100', '000')"
-        params = []
+        prefix = []
 
     rows = _exec_rows(sql, params)
-    return [{'branch_cd': r.get('BRANCH_CD'), 'branch_name': r.get('BRANCH_NAME')} for r in rows]
+    return prefix + [
+        {'branch_cd': r.get('BRANCH_CD'), 'branch_name': r.get('BRANCH_NAME')} for r in rows
+    ]
 
 @cmo_daily_productivity_by_cmo_bp.route('/daily-productivity-by-cmo/branches')
 @login_required
@@ -52,8 +60,12 @@ def list_branches():
         return jsonify({'error': str(e)}), 500
 
 def _fetch_summary(start_date: date, end_date: date, branch_cd: str) -> dict:
-    
-    sql = """
+    branch_consolidated = branch_cd == '000' or not branch_cd
+    branch_filter = "" if branch_consolidated else "AND aa.branchcode = ?"
+    order_by = ("ORDER BY br.BRANCH_NAME, aa.fullname ASC" if branch_consolidated
+                else "ORDER BY aa.fullname ASC")
+
+    sql = f"""
         WITH CamCreated AS (
             SELECT
                 a.APPL_NO,
@@ -119,6 +131,8 @@ def _fetch_summary(start_date: date, end_date: date, branch_cd: str) -> dict:
         SELECT
             aa.Employee_id,
             aa.fullname,
+            aa.branchcode,
+            br.BRANCH_NAME,
             ISNULL(bb.total_created, 0) AS total_created,
             ISNULL(cc.total_reject, 0) AS total_reject,
             ISNULL(ee.total_defect1, 0) AS total_defect1,
@@ -130,11 +144,16 @@ def _fetch_summary(start_date: date, end_date: date, branch_cd: str) -> dict:
             LEFT JOIN Defect1ByCmo ee ON aa.Employee_id = ee.CMO
             LEFT JOIN Defect2ByCmo ff ON aa.Employee_id = ff.CMO
             LEFT JOIN Defect3ByCmo gg ON aa.Employee_id = gg.CMO
+            LEFT JOIN UMFBRANCH br WITH (NOLOCK) ON aa.branchcode = br.BRANCH_CD
         WHERE aa.ACCESSCAM = 'CMO'
-            AND aa.branchcode = ?
-        ORDER BY aa.fullname ASC
+            {branch_filter}
+        {order_by}
     """
-    rows = _exec_rows(sql, [start_date, end_date, start_date, end_date, branch_cd])
+    params: list = [start_date, end_date, start_date, end_date]
+    if not branch_consolidated:
+        params.append(branch_cd)
+
+    rows = _exec_rows(sql, params)
 
     data = []
     totals = {
@@ -164,6 +183,8 @@ def _fetch_summary(start_date: date, end_date: date, branch_cd: str) -> dict:
         data.append({
             'no': i,
             'employee_id': r.get('Employee_id'),
+            'branch_cd': str(r.get('branchcode') or '').strip(),
+            'branch_name': (r.get('BRANCH_NAME') or '').strip(),
             'cmo_name': r.get('fullname') or '-',
             'total_created': total_created,
             'total_reject': total_reject,
@@ -173,7 +194,7 @@ def _fetch_summary(start_date: date, end_date: date, branch_cd: str) -> dict:
             'sub_total': sub_total,
         })
 
-    return {'data': data, 'totals': totals}
+    return {'data': data, 'totals': totals, 'branch_consolidated': branch_consolidated}
 
 @cmo_daily_productivity_by_cmo_bp.route('/daily-productivity-by-cmo/summary')
 @login_required

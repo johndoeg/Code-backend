@@ -40,7 +40,7 @@ def list_branches():
     try:
         rows = _exec_rows(
             "SELECT BRANCH_CD, BRANCH_NAME FROM UMFBRANCH WITH (NOLOCK) "
-            "WHERE BRANCH_CD <> '100' ORDER BY BRANCH_NAME",
+            "WHERE BRANCH_CD <> '100' ORDER BY BRANCH_CD",
             [],
         )
         return jsonify([{'branch_cd': r['BRANCH_CD'], 'branch_name': r['BRANCH_NAME']} for r in rows])
@@ -84,7 +84,7 @@ def search_dealers():
 
     where = []
     params: list = []
-    if branch_cd:
+    if branch_cd and branch_cd not in _HO_BRANCH_CODES:
         where.append("BRANCH_CD = ?")
         params.append(branch_cd)
     if search_name:
@@ -95,7 +95,7 @@ def search_dealers():
     try:
         rows = _exec_rows(
             f"""
-            SELECT TOP 100 SUPP, NAME, NICKNAME, ADDRESS, PHONE, CONTACT
+            SELECT SUPP, NAME, NICKNAME, ADDRESS, PHONE, CONTACT
             FROM CLFSUPP WITH (NOLOCK) {where_sql}
             ORDER BY NAME
             """,
@@ -116,6 +116,12 @@ def search_dealers():
         current_app.logger.exception("Dealer search error")
         return jsonify({'error': str(e)}), 500
 
+MODE_SUMMARY = 'summary'
+_KOMIS_FILTER = {
+    MODE_SUMMARY: "INCENTIVE = '1'",
+    'detail': "PaidBy = 'I'",
+}
+
 _MONTHLY_QUERY = """
     SELECT
         MONTH(a.EXECUTION) AS MonthNum,
@@ -129,7 +135,7 @@ _MONTHLY_QUERY = """
         LEFT JOIN (
             SELECT APPL_NO, SUM(GrossAmount) AS gross, SUM(PPNAmount) AS ppn_amount
             FROM CAFKOMIS WITH (NOLOCK)
-            WHERE PaidBy = 'I'
+            WHERE {komis_filter}
             GROUP BY APPL_NO
         ) k ON a.APPL_NO = k.APPL_NO
         LEFT JOIN COMM_PARTY n WITH (NOLOCK) ON a.APPL_NO = n.APPL_NO
@@ -144,7 +150,7 @@ def _build_monthly_where(branch_cd: str, supplier: str, cmo: str,
     where = []
     params: list = []
 
-    if branch_cd:
+    if branch_cd and branch_cd not in _HO_BRANCH_CODES:
         where.append("a.BRANCH_CD = ?")
         params.append(branch_cd)
     if supplier:
@@ -162,10 +168,10 @@ def _build_monthly_where(branch_cd: str, supplier: str, cmo: str,
     return where_extra, params
 
 def _fetch_monthly(year: int, branch_cd: str, supplier: str, cmo: str,
-                   accesslevel: str, employee_id: str) -> list[dict]:
-    
+                   accesslevel: str, employee_id: str, mode: str = 'detail') -> list[dict]:
     where_extra, params = _build_monthly_where(branch_cd, supplier, cmo, accesslevel, employee_id)
-    sql = _MONTHLY_QUERY.format(where_extra=where_extra)
+    komis_filter = _KOMIS_FILTER.get(mode, _KOMIS_FILTER['detail'])
+    sql = _MONTHLY_QUERY.format(where_extra=where_extra, komis_filter=komis_filter)
     rows = _exec_rows(sql, [year] + params)
 
     result = []
@@ -210,12 +216,14 @@ def monthly_report():
     supplier = request.args.get('supplier', '').strip()
     cmo = request.args.get('cmo', '').strip()
 
+    mode = request.args.get('mode', 'detail').strip() or 'detail'
+
     accesslevel = session.get('accesslevel', '')
     employee_id = session.get('emp_id', '')
 
     try:
-        data = _fetch_monthly(year, branch_cd, supplier, cmo, accesslevel, employee_id)
-        return jsonify({'data': data, 'year': year})
+        data = _fetch_monthly(year, branch_cd, supplier, cmo, accesslevel, employee_id, mode)
+        return jsonify({'data': data, 'year': year, 'mode': mode})
     except Exception as e:
         current_app.logger.exception("Incentive monthly report error")
         return jsonify({'error': str(e)}), 500

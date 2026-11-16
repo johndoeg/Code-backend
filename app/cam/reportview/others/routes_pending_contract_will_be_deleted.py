@@ -8,7 +8,6 @@ from datetime import date, datetime
 
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-from openpyxl.utils import get_column_letter
 
 pending_contract_delete_bp = Blueprint("pending_contract_delete", __name__, url_prefix="/CAM/Others")
 

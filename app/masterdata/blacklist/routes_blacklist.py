@@ -99,21 +99,16 @@ def _member_image(files, index: int, blacklist_name: str, member_name: str, aple
     suffix = f"-blacklist_{blacklist_name}_{member_name}".replace(".", "_")
     return save_blacklist_image(file, suffix, apless, current_app.config['UPLOAD_FOLDER_BLACKLIST'])
 
-def _save_members(blacklist_name, npwp, customer_type, members, files, apless,
-                  old_name=None, old_npwp=None):
-    
+def _save_members(blacklist_no: int, customer_type: str, members: list) -> None:
     if customer_type != 'PT':
-        return []
+        return
 
-    errors = []
+    db.session.execute(
+        text("DELETE FROM CAFORGSTRUCT_Blacklist WHERE McmoWatchlistID = :no"),
+        {"no": blacklist_no}
+    )
 
-    if old_name is not None:
-        db.session.execute(
-            text("DELETE FROM CAFORGSTRUCT_Blacklist WHERE NPWP = :npwp AND Blacklist_NM = :name"),
-            {"npwp": old_npwp, "name": old_name}
-        )
-
-    for i, entry in enumerate(members):
+    for entry in members:
         member_name = (entry.get('name') or '').strip()
         if not member_name:
             continue
@@ -123,38 +118,31 @@ def _save_members(blacklist_name, npwp, customer_type, members, files, apless,
         other = (entry.get('other') or '').strip()
 
         if bod_pos:
-            os_code = BOD_OS_CODE
-            position = other if bod_pos == BOD_OTHER_VALUE else bod_pos
+            os_code, position = BOD_OS_CODE, bod_pos
+            position_other = other if bod_pos == BOD_OTHER_VALUE else None
         elif boc_pos:
-            os_code = BOC_OS_CODE
-            position = other if boc_pos == BOC_OTHER_VALUE else boc_pos
+            os_code, position = BOC_OS_CODE, boc_pos
+            position_other = other if boc_pos == BOC_OTHER_VALUE else None
         else:
             continue
-
-        uploaded = _member_image(files, i, blacklist_name, member_name, apless, errors)
-        image = uploaded if uploaded else (entry.get('image') or None)
 
         db.session.execute(
             text("""
                 INSERT INTO CAFORGSTRUCT_Blacklist
-                    (Blacklist_NM, MANAGEMENT_NM, POSITION, OS_CODE, NPWP, ADDRESS, CITY, ID_CARD, IMAGES)
+                    (McmoWatchlistID, MANAGEMENT_NM, POSITION, Position_Other,
+                     OS_CODE, ADDRESS, CITY, ID_CARD)
                 VALUES
-                    (:bn, :mn, :pos, :os_code, :npwp, :addr, :city, :idc, :img)
+                    (:no, :mn, :pos, :pos_other, :os_code, :addr, :city, :idc)
             """),
             {
-                "bn": blacklist_name,
-                "mn": member_name,
-                "pos": position,
+                "no": blacklist_no, "mn": member_name,
+                "pos": position, "pos_other": position_other or None,
                 "os_code": os_code,
-                "npwp": npwp,
                 "addr": (entry.get('address') or '').strip() or None,
                 "city": (entry.get('city') or '').strip() or None,
                 "idc": (entry.get('id_card') or '').strip() or None,
-                "img": image,
             }
         )
-
-    return errors
 
 @blacklist_bp.route('/blacklist/options')
 @login_required
@@ -336,44 +324,29 @@ def get_blacklist(no):
 
         members = []
         if not is_pr:
-            known_positions = {
-                (r.OS_CODE, r.ID_OS_POSITION)
-                for r in db.session.execute(
-                    text("SELECT OS_CODE, ID_OS_POSITION FROM MSTOS_POSITION WITH(NOLOCK) WHERE OS_CODE IN (:bod, :boc)"),
-                    {"bod": BOD_OS_CODE, "boc": BOC_OS_CODE}
-                ).fetchall()
-            }
-
             member_rows = db.session.execute(
                 text("""
-                    SELECT ID_Blacklist, MANAGEMENT_NM, POSITION, OS_CODE, ADDRESS, CITY, ID_CARD, IMAGES
+                    SELECT ID_Blacklist, MANAGEMENT_NM, POSITION, Position_Other,
+                           OS_CODE, ADDRESS, CITY, ID_CARD
                     FROM CAFORGSTRUCT_Blacklist WITH(NOLOCK)
-                    WHERE Blacklist_NM = :name AND NPWP = :npwp
+                    WHERE McmoWatchlistID = :no
                     ORDER BY OS_CODE, ID_Blacklist
                 """),
-                {"name": row.Name, "npwp": npwp}
+                {"no": row.No}
             ).fetchall()
 
             for r in member_rows:
-                is_known = (r.OS_CODE, r.POSITION) in known_positions
-                bod_position = boc_position = other = ""
-                if r.OS_CODE == BOD_OS_CODE:
-                    bod_position = r.POSITION if is_known else BOD_OTHER_VALUE
-                    other = "" if is_known else (r.POSITION or "")
-                else:
-                    boc_position = r.POSITION if is_known else BOC_OTHER_VALUE
-                    other = "" if is_known else (r.POSITION or "")
-
+                os_code = (r.OS_CODE or "").strip()
+                position = (r.POSITION or "").strip()
                 members.append({
                     "id_blacklist": r.ID_Blacklist,
                     "name": r.MANAGEMENT_NM or "",
-                    "bod_position": bod_position or "",
-                    "boc_position": boc_position or "",
-                    "other": other,
+                    "bod_position": position if os_code == BOD_OS_CODE else "",
+                    "boc_position": position if os_code == BOC_OS_CODE else "",
+                    "other": (r.Position_Other or "").strip(),
                     "id_card": r.ID_CARD or "",
                     "address": r.ADDRESS or "",
                     "city": r.CITY or "",
-                    "image": r.IMAGES or "",
                 })
 
         return jsonify({
@@ -525,11 +498,7 @@ def create_blacklist():
         if customer_type == 'PR' and alias_name:
             _insert_alias(new_no, alias_name)
 
-        apless = _lookup_apless(name, address)
-        file_errors = _save_members(name, npwp, customer_type, members, request.files, apless)
-        if file_errors:
-            db.session.rollback()
-            return jsonify({"error": " ".join(file_errors)}), 400
+        _save_members(new_no, customer_type, members)
 
         db.session.commit()
         return jsonify({"message": "success", "no": new_no})
@@ -571,8 +540,6 @@ def update_blacklist(no):
             return jsonify({"error": "Record not found"}), 404
 
         customer_type = current.Customer_Type
-        old_name = current.Name
-        old_npwp = current.NPWP or ""
 
         name = (data.get('name') or '').strip()
         address = (data.get('address') or '').strip()
@@ -643,14 +610,7 @@ def update_blacklist(no):
                  "reason_other": (data.get('reason_other') or '').strip(), "npwp": npwp, "no": no}
             )
 
-        apless = current.apless or _lookup_apless(name, address)
-        file_errors = _save_members(
-            name, npwp, customer_type, members, request.files, apless,
-            old_name=old_name, old_npwp=old_npwp
-        )
-        if file_errors:
-            db.session.rollback()
-            return jsonify({"error": " ".join(file_errors)}), 400
+        _save_members(no, customer_type, members)
 
         db.session.commit()
         return jsonify({"message": "success"})

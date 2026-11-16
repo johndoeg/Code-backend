@@ -1,13 +1,21 @@
-from flask import Blueprint, jsonify, request, current_app, make_response
+from flask import Blueprint, jsonify, request, current_app
 from app import db
 from app.auth.decorators import login_required
 from sqlalchemy import text
-import io
 from datetime import datetime
 
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
+
+from app.utils.helpers.base_format import (
+    WRAP_TOP_LEFT,
+    _username,
+    title_font,
+    today_ddmmyyyy,
+    workbook_response,
+)
+from app.utils.helpers.settings_helpers import company_name as get_company_name
 
 undisburse_contract_bp = Blueprint("undisburse_contract", __name__, url_prefix="/CAM/Others")
 
@@ -16,18 +24,21 @@ _BORDER = Border(left=_THIN, right=_THIN, top=_THIN, bottom=_THIN)
 _CENTER = Alignment(horizontal="center", vertical="center")
 _RIGHT  = Alignment(horizontal="right",  vertical="center")
 _LEFT   = Alignment(horizontal="left",   vertical="center")
-_FONT_TITLE  = Font(name="Tahoma", size=14, bold=True)
 _FONT_HEADER = Font(name="Tahoma", size=10, bold=True)
 _FONT_DATA   = Font(name="Tahoma", size=10)
 _FILL_HEADER = PatternFill("solid", fgColor="D9E1F2")
+_NUM_FMT = "#,##0"
+_SPAN    = Alignment(horizontal="centerContinuous", vertical="center")
+_N_COLS  = 8
 
 MAX_PAGE_SIZE = 200
 
-def _apply(cell, font=None, alignment=None, border=None, fill=None):
-    if font:      cell.font      = font
-    if alignment: cell.alignment = alignment
-    if border:    cell.border    = border
-    if fill:      cell.fill      = fill
+def _apply(cell, font=None, alignment=None, border=None, fill=None, number_format=None):
+    if font:          cell.font          = font
+    if alignment:     cell.alignment     = alignment
+    if border:        cell.border        = border
+    if fill:          cell.fill          = fill
+    if number_format: cell.number_format = number_format
 
 _BASE_SELECT = """
     SELECT
@@ -120,24 +131,27 @@ def _serialize_rows(rows) -> list[dict]:
         })
     return result
 
-def _build_excel(rows: list[dict], branch_name: str) -> bytes:
-    now = datetime.now().strftime("%d-%m-%Y")
-
+def _build_excel(rows: list[dict], branch_name: str) -> Workbook:
     wb = Workbook()
     ws = wb.active
     ws.title = "UndisburseContract"
 
-    ws.merge_cells("A1:H1")
-    ws["A1"].value = "List of Undisburse Contract"
-    _apply(ws["A1"], font=_FONT_TITLE, alignment=_CENTER)
-    ws.row_dimensions[1].height = 24
+    last = get_column_letter(_N_COLS)
 
-    ws.merge_cells("A2:H2")
-    ws["A2"].value = f"Branch : {branch_name}"
-    _apply(ws["A2"], font=_FONT_DATA, alignment=_LEFT)
+    ws["A1"].value = get_company_name()
+    _apply(ws["A1"], font=_FONT_DATA, alignment=_LEFT)
 
-    ws.merge_cells("A3:H3")
-    ws["A3"].value = f"Date   : {now}"
+    ws[f"{last}1"].value = f"Date : {today_ddmmyyyy()}\nPrint By : {_username()}"
+    _apply(ws[f"{last}1"], font=_FONT_DATA, alignment=WRAP_TOP_LEFT)
+    ws.row_dimensions[1].height = 30
+
+    ws.merge_cells(f"A2:{last}2")
+    ws["A2"].value = "List of Undisburse Contract"
+    _apply(ws["A2"], font=title_font(16), alignment=_CENTER)
+    ws.row_dimensions[2].height = 24
+
+    ws.merge_cells(f"A3:{last}3")
+    ws["A3"].value = f"Branch : {branch_name}"
     _apply(ws["A3"], font=_FONT_DATA, alignment=_LEFT)
 
     headers = [
@@ -155,10 +169,10 @@ def _build_excel(rows: list[dict], branch_name: str) -> bytes:
         adm_display = (
             datetime.strptime(adm, "%Y-%m-%d").strftime("%d %B %Y") if adm else ""
         )
-        nf         = r["net_finance"] or 0.0
-        tot       += nf
+        nf         = r["net_finance"]
+        tot       += nf or 0.0
         collateral = f"{r['brand']} {r['type_nm']}".strip()
-        cmo_branch = f"{r['emp_name']} ({r['branch']})"
+        cmo_branch = f"{r['emp_name']} ({r['branch']})" if r["branch"] else r["emp_name"]
 
         row_vals = [
             idx + 1, r["appl_no"], r["cust_name"], collateral,
@@ -166,39 +180,38 @@ def _build_excel(rows: list[dict], branch_name: str) -> bytes:
         ]
         alignments = [
             _CENTER, _LEFT, _LEFT, _LEFT,
-            _RIGHT,  _LEFT, _LEFT, _LEFT,
+            _RIGHT,  _LEFT, _LEFT, _CENTER,
         ]
         for col, (val, aln) in enumerate(zip(row_vals, alignments), 1):
             c = ws.cell(row=r_num, column=col, value=val)
-            _apply(c, font=_FONT_DATA, border=_BORDER, alignment=aln)
+            _apply(c, font=_FONT_DATA, border=_BORDER, alignment=aln,
+                   number_format=_NUM_FMT if col == 5 else None)
 
     total_row = len(rows) + 6
-    ws.merge_cells(f"A{total_row}:D{total_row}")
-    c = ws[f"A{total_row}"]
-    c.value = "TOTAL"
-    _apply(c, font=_FONT_HEADER, border=_BORDER, alignment=_RIGHT)
+    for col in range(1, 5):
+        _apply(ws.cell(row=total_row, column=col),
+               font=_FONT_HEADER, border=_BORDER, alignment=_SPAN)
+    ws.cell(row=total_row, column=1).value = "TOTAL"
 
     c = ws[f"E{total_row}"]
     c.value = tot
-    _apply(c, font=_FONT_HEADER, border=_BORDER, alignment=_RIGHT)
+    _apply(c, font=_FONT_HEADER, border=_BORDER, alignment=_RIGHT, number_format=_NUM_FMT)
 
-    for col in range(6, 9):
+    for col in range(6, _N_COLS + 1):
         _apply(ws.cell(row=total_row, column=col), border=_BORDER)
 
     ws.column_dimensions["A"].width = 5
     ws.column_dimensions["B"].width = 16
     ws.column_dimensions["C"].width = 28
     ws.column_dimensions["D"].width = 22
-    ws.column_dimensions["E"].width = 18
+    ws.column_dimensions["E"].width = 20
     ws.column_dimensions["F"].width = 30
     ws.column_dimensions["G"].width = 16
     ws.column_dimensions["H"].width = 20
 
-    buf = io.BytesIO()
-    wb.save(buf)
-    buf.seek(0)
+    ws.freeze_panes = "A6"
 
-    return buf.read()
+    return wb
 
 @undisburse_contract_bp.route("/UndisbursedContract/branches")
 @login_required
@@ -206,7 +219,7 @@ def get_branches():
 
     try:
         rows = db.session.execute(
-            text("SELECT BRANCH_CD, BRANCH_NAME FROM umfbranch WITH(NOLOCK) ORDER BY BRANCH_NAME")
+            text("SELECT BRANCH_CD, BRANCH_NAME FROM umfbranch WITH(NOLOCK) ORDER BY BRANCH_CD")
         ).mappings().all()
         return jsonify([
             {"branch_cd": r["BRANCH_CD"], "branch_name": r["BRANCH_NAME"]}
@@ -228,7 +241,23 @@ def get_data():
     limit = request.args.get("limit", 25, type=int) or 25
     limit = min(max(limit, 1), MAX_PAGE_SIZE)
 
+    want_all = request.args.get("all", "").strip().lower() in ("1", "true", "yes")
+
     try:
+        if want_all:
+            serialized = _serialize_rows(
+                db.session.execute(_ALL_QUERY, {"branch_cd": branch_cd}).mappings().all()
+            )
+            return jsonify({
+                "rows":              serialized,
+                "total":             len(serialized),
+                "total_net_finance": sum(r["net_finance"] or 0.0 for r in serialized),
+                "page":              1,
+                "limit":             len(serialized),
+                "company_name":      get_company_name(),
+                "printed_by":        _username(),
+            })
+
         rows = db.session.execute(
             _PAGE_QUERY,
             {"branch_cd": branch_cd, "offset": (page - 1) * limit, "limit": limit},
@@ -243,6 +272,8 @@ def get_data():
             "total_net_finance": total_nf,
             "page":              page,
             "limit":             limit,
+            "company_name":      get_company_name(),
+            "printed_by":        _username(),
         })
     except Exception:
         current_app.logger.exception("Undisburse Contract data fetch error")
@@ -264,16 +295,9 @@ def export_excel():
         branch_name = branch_row["BRANCH_NAME"] if branch_row else branch_cd
 
         rows = db.session.execute(_ALL_QUERY, {"branch_cd": branch_cd}).mappings().all()
-        xlsx_bytes = _build_excel(_serialize_rows(rows), branch_name)
+        wb = _build_excel(_serialize_rows(rows), branch_name)
 
-        resp = make_response(xlsx_bytes)
-        resp.headers["Content-Type"] = (
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
-        resp.headers["Content-Disposition"] = (
-            'attachment; filename="UndisburseContract.xlsx"'
-        )
-        return resp
+        return workbook_response(wb, "UndisburseContract.xlsx")
 
     except Exception:
         current_app.logger.exception("Undisburse Contract Excel export error")

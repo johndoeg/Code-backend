@@ -6,7 +6,7 @@ import io
 from datetime import datetime
 
 from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.styles import Font, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
 nett_booking_appi_bp = Blueprint("nett_booking_appi", __name__, url_prefix="/CAM/Others")
@@ -17,9 +17,8 @@ _CENTER = Alignment(horizontal="center", vertical="center")
 _RIGHT  = Alignment(horizontal="right",  vertical="center")
 _LEFT   = Alignment(horizontal="left",   vertical="center")
 _FONT_TITLE  = Font(name="Tahoma", size=12, bold=True)
-_FONT_HEADER = Font(name="Tahoma", size=10, bold=True)
+_FONT_HEADER = Font(name="Tahoma", size=11)
 _FONT_DATA   = Font(name="Tahoma", size=10)
-_FILL_HEADER = PatternFill("solid", fgColor="D9E1F2")
 
 def _apply(cell, font=None, alignment=None, border=None, fill=None):
     if font:      cell.font      = font
@@ -29,7 +28,7 @@ def _apply(cell, font=None, alignment=None, border=None, fill=None):
 
 def _build_excel(row: dict, date_from: str) -> bytes:
     d     = datetime.strptime(date_from, "%Y-%m-%d")
-    month = d.strftime("%B %Y")
+    month = d.strftime("%B")
 
     wb = Workbook()
     ws = wb.active
@@ -53,11 +52,11 @@ def _build_excel(row: dict, date_from: str) -> bytes:
             col_letter = get_column_letter(col_idx)
             c = ws[f"{col_letter}{row_num}"]
             c.value = val
-            _apply(c, font=_FONT_HEADER, border=_BORDER, fill=_FILL_HEADER, alignment=_CENTER)
+            _apply(c, font=_FONT_HEADER, border=_BORDER, alignment=_CENTER)
 
     for ref in ("D14", "D18"):
         ws[ref].value = " KONTRAK "
-        _apply(ws[ref], font=_FONT_HEADER, border=_BORDER, fill=_FILL_HEADER, alignment=_CENTER)
+        _apply(ws[ref], font=_FONT_HEADER, border=_BORDER, alignment=_CENTER)
 
     data_rows = [
         (3,  "1A", "Total Nett Booking Bulanan MOBIL BENSIN BARU KONVENSIONAL (tanpa bunga)",    row.get("tot_fin1a")),
@@ -72,9 +71,9 @@ def _build_excel(row: dict, date_from: str) -> bytes:
     
     for r_num, code, label, val in data_rows:
         ws[f"A{r_num}"].value = code
-        _apply(ws[f"A{r_num}"], font=_FONT_DATA, border=_BORDER, alignment=_CENTER)
+        _apply(ws[f"A{r_num}"], font=_FONT_DATA, border=_BORDER)
         ws[f"B{r_num}"].value = label
-        _apply(ws[f"B{r_num}"], font=_FONT_DATA, border=_BORDER, alignment=_LEFT)
+        _apply(ws[f"B{r_num}"], font=_FONT_DATA, border=_BORDER)
         ws[f"C{r_num}"].value = val
         _apply(ws[f"C{r_num}"], font=_FONT_DATA, border=_BORDER, alignment=_RIGHT)
 
@@ -86,7 +85,7 @@ def _build_excel(row: dict, date_from: str) -> bytes:
     ]
     
     for r_num, label, unit, nominal, kontrak in kblbb_rows:
-        ws[f"A{r_num}"].value = label;   _apply(ws[f"A{r_num}"], font=_FONT_DATA, border=_BORDER, alignment=_LEFT)
+        ws[f"A{r_num}"].value = label;   _apply(ws[f"A{r_num}"], font=_FONT_DATA, border=_BORDER)
         ws[f"B{r_num}"].value = unit;    _apply(ws[f"B{r_num}"], font=_FONT_DATA, border=_BORDER, alignment=_RIGHT)
         ws[f"C{r_num}"].value = nominal; _apply(ws[f"C{r_num}"], font=_FONT_DATA, border=_BORDER, alignment=_RIGHT)
         ws[f"D{r_num}"].value = kontrak; _apply(ws[f"D{r_num}"], font=_FONT_DATA, border=_BORDER, alignment=_RIGHT)

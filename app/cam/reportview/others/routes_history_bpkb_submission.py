@@ -3,11 +3,18 @@ from app import db
 from app.auth.decorators import login_required
 from sqlalchemy import text
 import io, calendar
-from datetime import datetime
 
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
+
+from app.utils.helpers.base_format import (
+    WRAP_TOP_LEFT,
+    _username,
+    title_font,
+    today_ddmmyyyy,
+)
+from app.utils.helpers.settings_helpers import company_name as get_company_name
 
 history_bpkb_submission_bp = Blueprint("history_bpkb_submission", __name__, url_prefix="/CAM/Others")
 
@@ -15,7 +22,6 @@ _THIN   = Side(style="thin", color="000000")
 _BORDER = Border(left=_THIN, right=_THIN, top=_THIN, bottom=_THIN)
 _CENTER = Alignment(horizontal="center", vertical="center", wrap_text=True)
 _LEFT   = Alignment(horizontal="left",   vertical="center", wrap_text=True)
-_FONT_TITLE  = Font(name="Tahoma", size=14, bold=True)
 _FONT_HEADER = Font(name="Tahoma", size=10, bold=True)
 _FONT_DATA   = Font(name="Tahoma", size=10)
 _FILL_HEADER = PatternFill("solid", fgColor="D9E1F2")
@@ -146,7 +152,6 @@ def _filter_params(print_by: str, branch_cd: str, supp: str, from1: str, to1: st
 def _build_excel(rows: list[dict], mode: str, period: str, subjudul: str) -> bytes:
     headers = _HEADERS[mode]
     center  = _CENTER_COLS[mode]
-    now_str = datetime.now().strftime("%d-%m-%Y")
 
     wb = Workbook()
     ws = wb.active
@@ -155,21 +160,24 @@ def _build_excel(rows: list[dict], mode: str, period: str, subjudul: str) -> byt
     n_cols = len(headers)
     last_col = get_column_letter(n_cols)
 
-    ws.merge_cells(f"A1:{last_col}1")
-    ws["A1"].value = "HISTORY OF BPKB SUBMISSION BY DEALER/ SHOWROOM"
-    _apply(ws["A1"], font=_FONT_TITLE, alignment=_CENTER)
-    ws.row_dimensions[1].height = 24
+    ws["A1"].value = get_company_name()
+    _apply(ws["A1"], font=_FONT_DATA)
+
+    ws[f"{last_col}1"].value = f"Date : {today_ddmmyyyy()}\nPrint By : {_username()}"
+    _apply(ws[f"{last_col}1"], font=_FONT_DATA, alignment=WRAP_TOP_LEFT)
+    ws.row_dimensions[1].height = 30
 
     ws.merge_cells(f"A2:{last_col}2")
-    ws["A2"].value = f"Period Received Date (by CA) : {period}"
-    _apply(ws["A2"], font=_FONT_DATA, alignment=_CENTER)
+    ws["A2"].value = "HISTORY OF BPKB SUBMISSION BY DEALER/ SHOWROOM"
+    _apply(ws["A2"], font=title_font(16), alignment=_CENTER)
+    ws.row_dimensions[2].height = 24
 
     ws.merge_cells(f"A3:{last_col}3")
-    ws["A3"].value = f"Print by : {subjudul}"
-    _apply(ws["A3"], font=_FONT_DATA, alignment=Alignment(horizontal="left", vertical="center"))
+    ws["A3"].value = f"Period Received Date (by CA) : {period}"
+    _apply(ws["A3"], font=_FONT_DATA, alignment=_CENTER)
 
     ws.merge_cells(f"A4:{last_col}4")
-    ws["A4"].value = f"Date : {now_str}"
+    ws["A4"].value = f"Print by : {subjudul}"
     _apply(ws["A4"], font=_FONT_DATA, alignment=Alignment(horizontal="left", vertical="center"))
 
     for col, h in enumerate(headers, 1):
@@ -262,8 +270,11 @@ def get_data():
     limit = request.args.get("limit", 25, type=int) or 25
     limit = min(max(limit, 1), MAX_PAGE_SIZE)
 
-    from1, to1 = _date_range(bulan_awal, tahun_awal, bulan_akhir, tahun_akhir)
-    params = _filter_params(print_by, branch_cd, supp, from1, to1)
+    try:
+        from1, to1 = _date_range(bulan_awal, tahun_awal, bulan_akhir, tahun_akhir)
+        params = _filter_params(print_by, branch_cd, supp, from1, to1)
+    except (ValueError, IndexError, KeyError):
+        return jsonify({"error": "Invalid period params"}), 400
 
     try:
         if want_all:
@@ -276,6 +287,8 @@ def get_data():
                 "due":     sum(1 for r in data if r["status"] == "Due"),
                 "page":    1,
                 "limit":   len(data),
+                "company_name": get_company_name(),
+                "printed_by":   _username(),
             })
 
         params = {**params, "offset": (page - 1) * limit, "limit": limit}
@@ -292,6 +305,8 @@ def get_data():
             "due":     due,
             "page":    page,
             "limit":   limit,
+            "company_name": get_company_name(),
+            "printed_by":   _username(),
         })
 
     except Exception:
@@ -312,15 +327,21 @@ def export_excel():
     branch_nm   = request.args.get("branch_nm",   "").strip()
     dealer_nm   = request.args.get("dealer_nm",   "").strip()
 
-    from1, to1 = _date_range(bulan_awal, tahun_awal, bulan_akhir, tahun_akhir)
-    params = _filter_params(print_by, branch_cd, supp, from1, to1)
+    if not all([bulan_awal, tahun_awal, bulan_akhir, tahun_akhir]):
+        return jsonify({"error": "Period params required"}), 400
 
-    period = f"{_MONTHS_ID[int(bulan_awal)]} {tahun_awal} - {_MONTHS_ID[int(bulan_akhir)]} {tahun_akhir}"
-    subjudul = (
-        "Consolidate"                if print_by == "0" else
-        f"Branch - {branch_nm}"      if print_by == "1" else
-        f"Dealer - {dealer_nm}"
-    )
+    try:
+        from1, to1 = _date_range(bulan_awal, tahun_awal, bulan_akhir, tahun_akhir)
+        params = _filter_params(print_by, branch_cd, supp, from1, to1)
+
+        period = f"{_MONTHS_ID[int(bulan_awal)]} {tahun_awal} - {_MONTHS_ID[int(bulan_akhir)]} {tahun_akhir}"
+        subjudul = (
+            "Consolidate"                if print_by == "0" else
+            f"Branch - {branch_nm}"      if print_by == "1" else
+            f"Dealer - {dealer_nm}"
+        )
+    except (ValueError, IndexError, KeyError):
+        return jsonify({"error": "Invalid period params"}), 400
 
     try:
         rows = db.session.execute(text(_all_sql(print_by)), params).mappings().all()

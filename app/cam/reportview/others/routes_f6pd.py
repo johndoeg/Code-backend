@@ -1,14 +1,22 @@
-from flask import Blueprint, jsonify, request, current_app, make_response
+from flask import Blueprint, jsonify, request, current_app
 from app import db
 from app.auth.decorators import login_required
 
 from sqlalchemy import text
-from datetime import datetime
-import calendar, io
+import calendar
 
 from openpyxl import Workbook
-from openpyxl.styles import Font, Alignment, Border, Side, PatternFill, numbers
+from openpyxl.styles import Font, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
+
+from app.utils.helpers.base_format import (
+    WRAP_TOP_LEFT,
+    _username,
+    title_font,
+    today_ddmmyyyy,
+    workbook_response,
+)
+from app.utils.helpers.settings_helpers import company_name as get_company_name
 
 f6pd_bp = Blueprint("f6pd", __name__, url_prefix="/CAM/Others")
 
@@ -23,6 +31,8 @@ _FONT_DATA     = Font(name="Tahoma", size=7)
 _FONT_CMH      = Font(name="Tahoma", size=7, bold=True)
 
 _NUM_FMT = '#,##0'
+_PCT_FMT = '0.00"%"'
+_SPAN    = Alignment(horizontal="centerContinuous", vertical="bottom")
 
 def _apply(cell, font=None, alignment=None, border=None, fill=None, number_format=None):
     if font:          cell.font          = font
@@ -31,14 +41,35 @@ def _apply(cell, font=None, alignment=None, border=None, fill=None, number_forma
     if fill:          cell.fill          = fill
     if number_format: cell.number_format = number_format
 
-def _subtitle(ws, ref: str, value, merge_to: str | None = None):
+def _subtitle(ws, ref: str, value):
     cell = ws[ref]
     cell.value = value
     _apply(cell, font=_FONT_SUBTITLE, alignment=_CENTER, border=_BORDER)
-    if merge_to:
-        ws.merge_cells(f"{ref}:{merge_to}")
+
+def _span(ws, row: int, col_from: int, col_to: int, value):
+    for col in range(col_from, col_to + 1):
+        _apply(ws.cell(row=row, column=col), font=_FONT_SUBTITLE,
+               alignment=_SPAN, border=_BORDER)
+    ws.cell(row=row, column=col_from).value = value
+
+def _sheet_header(ws, n_cols: int, title: str) -> None:
+    last = get_column_letter(n_cols)
+    ws["A1"].value = get_company_name()
+    _apply(ws["A1"], font=_FONT_DATA, alignment=_LEFT)
+    ws[f"{last}1"].value = f"Date : {today_ddmmyyyy()}\nPrint By : {_username()}"
+    _apply(ws[f"{last}1"], font=_FONT_DATA, alignment=WRAP_TOP_LEFT)
+    ws.row_dimensions[1].height = 30
+
+    ws.merge_cells(f"A2:{last}2")
+    ws["A2"].value = title
+    _apply(ws["A2"], font=title_font(16),
+           alignment=Alignment(horizontal="center", vertical="center"))
+    ws.row_dimensions[2].height = 24
 
 def _period(bulan: str, tahun: str) -> tuple[str, str]:
+    bulan, tahun = str(bulan).strip(), str(tahun).strip()
+    if not (1 <= int(bulan) <= 12):
+        raise ValueError("bulan out of range")
     last = calendar.monthrange(int(tahun), int(bulan))[1]
     p1   = f"{tahun}-{bulan.zfill(2)}-{last:02d}"
     fmt  = f"{last:02d}-{bulan.zfill(2)}-{tahun}"
@@ -71,12 +102,24 @@ def _fetch_all(bulan: str, tahun: str) -> dict:
     period1, formatted_date = _period(bulan, tahun)
 
     cmh_rows = db.session.execute(text("""
-        SELECT DISTINCT a.SUPERIOR AS employee_id,
+        SELECT DISTINCT ISNULL(a.SUPERIOR, '') AS employee_id,
                ISNULL(b.FULLNAME, 'No CMH') AS fullname
         FROM app_usrmst a WITH(NOLOCK)
             LEFT JOIN APP_USRMST b WITH(NOLOCK) ON a.SUPERIOR = b.EMPLOYEE_ID
         WHERE a.ACCESSCAM = 'CMO' AND a.RECSTATUS = 'A'
+        ORDER BY fullname
     """)).mappings().all()
+
+    cmo_all = db.session.execute(text("""
+        SELECT EMPLOYEE_ID, FULLNAME, ISNULL(SUPERIOR, '') AS SUPERIOR
+        FROM app_usrmst WITH(NOLOCK)
+        WHERE ACCESSCAM = 'CMO' AND RECSTATUS = 'A'
+        ORDER BY FULLNAME
+    """)).mappings().all()
+
+    cmo_by_superior: dict[str, list] = {}
+    for row in cmo_all:
+        cmo_by_superior.setdefault(row["SUPERIOR"], []).append(row)
 
     summary_cmo = []
     for cmh in cmh_rows:
@@ -87,13 +130,7 @@ def _fetch_all(bulan: str, tahun: str) -> dict:
             row = _build_summary_row(r)
             summary_cmo.append({"fullname": cmh_name, "is_cmh": True, **row})
 
-        cmo_rows = db.session.execute(text("""
-            SELECT EMPLOYEE_ID, FULLNAME
-            FROM app_usrmst WITH(NOLOCK)
-            WHERE ACCESSCAM = 'CMO' AND SUPERIOR = :sup AND RECSTATUS = 'A'
-        """), {"sup": cmh_id}).mappings().all()
-
-        for cmo in cmo_rows:
+        for cmo in cmo_by_superior.get(cmh_id, []):
             r = _exec_f6pd(cmo["EMPLOYEE_ID"], period1, "CMO")
             if r:
                 row = _build_summary_row(r)
@@ -122,20 +159,18 @@ def _fetch_all(bulan: str, tahun: str) -> dict:
                 summary_cmo=summary_cmo, summary_monthly=summary_monthly,
                 raw_data=raw_data)
 
-def _build_excel(d: dict, company: str = "") -> bytes:
+def _build_excel(d: dict) -> Workbook:
     wb = Workbook()
 
     ws1 = wb.active
     ws1.title = "Summary"
 
-    ws1["A1"].value = company
-    _apply(ws1["A1"], font=_FONT_TITLE, alignment=_LEFT)
-    ws1["A2"].value = f"F6PD REPORT AS OF {d['formatted_date']}"
-    _apply(ws1["A2"], font=_FONT_TITLE, alignment=_LEFT)
+    _sheet_header(ws1, 9, f"F6PD REPORT AS OF {d['formatted_date']}")
 
-    ws1.merge_cells("A4:A5"); _subtitle(ws1, "A4", "CMO")
-    ws1.merge_cells("B4:E4"); _subtitle(ws1, "B4", "By Unit")
-    ws1.merge_cells("F4:I4"); _subtitle(ws1, "F4", "By Amount")
+    _subtitle(ws1, "A4", "CMO")
+    _subtitle(ws1, "A5", None)
+    _span(ws1, 4, 2, 5, "By Unit")
+    _span(ws1, 4, 6, 9, "By Amount")
     for ref, val in [("B5","<= 30 DAYS"),("C5","> 30 DAYS"),("D5","GRAND TOTAL"),("E5","F6PD"),
                      ("F5","<= 30 DAYS"),("G5","> 30 DAYS"),("H5","GRAND TOTAL"),("I5","F6PD")]:
         _subtitle(ws1, ref, val)
@@ -151,21 +186,23 @@ def _build_excel(d: dict, company: str = "") -> bytes:
         _apply(ws1[f"A{row_i}"], font=font, border=_BORDER)
         for col, key in [("B","unit1"),("C","unit2"),("D","tot_unit"),("E","pd_unit")]:
             c = ws1[f"{col}{row_i}"]
-            c.value = emp[key];  _apply(c, font=font, border=_BORDER, alignment=_CENTER)
+            c.value = emp[key]
+            _apply(c, font=font, border=_BORDER, alignment=_CENTER,
+                   number_format=_PCT_FMT if key == "pd_unit" else None)
         for col, key in [("F","op1"),("G","op2"),("H","tot_op")]:
             c = ws1[f"{col}{row_i}"]
             c.value = emp[key];  _apply(c, font=font, border=_BORDER,
                                         alignment=_CENTER, number_format=_NUM_FMT)
         c = ws1[f"I{row_i}"]
-        c.value = emp["pd_op"]; _apply(c, font=font, border=_BORDER, alignment=_CENTER)
+        c.value = emp["pd_op"]
+        _apply(c, font=font, border=_BORDER, alignment=_CENTER, number_format=_PCT_FMT)
         row_i += 1
 
-    ws1.getattr = getattr
-    
     j, k = row_i + 1, row_i + 2
-    ws1.merge_cells(f"A{j}:A{k}"); _subtitle(ws1, f"A{j}", "MONTH-YEAR")
-    ws1.merge_cells(f"B{j}:E{j}"); _subtitle(ws1, f"B{j}", "By Unit")
-    ws1.merge_cells(f"F{j}:I{j}"); _subtitle(ws1, f"F{j}", "By Amount")
+    _subtitle(ws1, f"A{j}", "MONTH-YEAR")
+    _subtitle(ws1, f"A{k}", None)
+    _span(ws1, j, 2, 5, "By Unit")
+    _span(ws1, j, 6, 9, "By Amount")
     for ref, val in [(f"B{k}","<= 30 DAYS"),(f"C{k}","> 30 DAYS"),(f"D{k}","GRAND TOTAL"),(f"E{k}","F6PD"),
                      (f"F{k}","<= 30 DAYS"),(f"G{k}","> 30 DAYS"),(f"H{k}","GRAND TOTAL"),(f"I{k}","F6PD")]:
         _subtitle(ws1, ref, val)
@@ -176,21 +213,21 @@ def _build_excel(d: dict, company: str = "") -> bytes:
         _apply(ws1[f"A{row_l}"], font=_FONT_DATA, border=_BORDER)
         for col, key in [("B","unit1"),("C","unit2"),("D","tot_unit"),("E","pd_unit")]:
             c = ws1[f"{col}{row_l}"]
-            c.value = m[key]; _apply(c, font=_FONT_DATA, border=_BORDER, alignment=_CENTER)
+            c.value = m[key]
+            _apply(c, font=_FONT_DATA, border=_BORDER, alignment=_CENTER,
+                   number_format=_PCT_FMT if key == "pd_unit" else None)
         for col, key in [("F","op1"),("G","op2"),("H","tot_op")]:
             c = ws1[f"{col}{row_l}"]
             c.value = m[key]; _apply(c, font=_FONT_DATA, border=_BORDER,
                                      alignment=_CENTER, number_format=_NUM_FMT)
         c = ws1[f"I{row_l}"]
-        c.value = m["pd_op"]; _apply(c, font=_FONT_DATA, border=_BORDER, alignment=_CENTER)
+        c.value = m["pd_op"]
+        _apply(c, font=_FONT_DATA, border=_BORDER, alignment=_CENTER, number_format=_PCT_FMT)
         row_l += 1
 
     ws2 = wb.create_sheet("Raw Data")
 
-    ws2["A1"].value = company
-    _apply(ws2["A1"], font=_FONT_TITLE, alignment=_LEFT)
-    ws2["A2"].value = f"F6PD REPORT AS OF {d['formatted_date']}"
-    _apply(ws2["A2"], font=_FONT_TITLE, alignment=_LEFT)
+    _sheet_header(ws2, 5, f"F6PD REPORT AS OF {d['formatted_date']}")
 
     for ref, val in [("A4","Contract No."),("B4","Customer Name"),
                      ("C4","OD Days"),("D4","Outstanding Principal"),("E4","CMO")]:
@@ -214,11 +251,10 @@ def _build_excel(d: dict, company: str = "") -> bytes:
         _apply(ws2[f"E{row_m}"], font=_FONT_DATA, border=_BORDER)
         row_m += 1
 
-    buf = io.BytesIO()
-    wb.save(buf)
-    buf.seek(0)
-    
-    return buf.read()
+    ws1.freeze_panes = "A6"
+    ws2.freeze_panes = "A5"
+
+    return wb
 
 @f6pd_bp.route("/F6PD/data")
 @login_required
@@ -227,6 +263,10 @@ def get_data():
     tahun = request.args.get("tahun_awal", "").strip()
     if not bulan or not tahun:
         return jsonify({"error": "bulan_awal and tahun_awal required"}), 400
+    try:
+        _period(bulan, tahun)
+    except (ValueError, TypeError, calendar.IllegalMonthError):
+        return jsonify({"error": "Invalid bulan_awal or tahun_awal"}), 400
     try:
         return jsonify(_fetch_all(bulan, tahun))
     except Exception:
@@ -241,13 +281,12 @@ def export_excel():
     if not bulan or not tahun:
         return jsonify({"error": "bulan_awal and tahun_awal required"}), 400
     try:
+        _period(bulan, tahun)
+    except (ValueError, TypeError, calendar.IllegalMonthError):
+        return jsonify({"error": "Invalid bulan_awal or tahun_awal"}), 400
+    try:
         d = _fetch_all(bulan, tahun)
-        xlsx = _build_excel(d)
-        resp = make_response(xlsx)
-        resp.headers["Content-Type"] = \
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        resp.headers["Content-Disposition"] = 'attachment; filename="F6PDAging.xlsx"'
-        return resp
+        return workbook_response(_build_excel(d), "F6PDAging.xlsx")
     except Exception:
         current_app.logger.exception("F6PD Excel error")
         return jsonify({"error": "Failed to generate Excel"}), 500

@@ -47,6 +47,13 @@ def _fmt_value(val):
         return val.strftime('%d-%m-%Y')
     return val
 
+def _branch_names() -> dict:
+    rows = _exec_rows("SELECT BRANCH_CD, BRANCH_NAME FROM UMFBRANCH WITH (NOLOCK)", [])
+    return {
+        str(r.get('BRANCH_CD') or '').strip(): (r.get('BRANCH_NAME') or '').strip()
+        for r in rows
+    }
+
 def _fetch_context() -> dict:
     branch_cd = session.get('branchcode')
     access_level = session.get('accesslevel')
@@ -57,7 +64,7 @@ def _fetch_context() -> dict:
         branch_rows = _exec_rows(
             "SELECT BRANCH_CD, BRANCH_NAME FROM UMFBRANCH WHERE BRANCH_CD NOT IN ('100', '000')", []
         )
-        branches = [{'branch_cd': '000', 'branch_name': 'Select'}] + [
+        branches = [{'branch_cd': '000', 'branch_name': 'Consolidate'}] + [
             {'branch_cd': r.get('BRANCH_CD'), 'branch_name': r.get('BRANCH_NAME')} for r in branch_rows
         ]
         return {
@@ -150,9 +157,12 @@ def get_reject_statuses():
 
 def _fetch_detail(start_date: date, end_date: date, branch_cd: str, cmo: str, access_level: str) -> dict:
     consolidated = cmo == '000' or not cmo
+    branch_consolidated = branch_cd == '000' or not branch_cd
 
     cmo_filter_sue = "" if consolidated else "AND a.CMO = ?"
     cmo_filter_reject = "" if consolidated else "AND cr.Create_By = ?"
+    branch_filter_sue = "" if branch_consolidated else "AND a.BRANCH_CD = ?"
+    branch_filter_reject = "" if branch_consolidated else "AND usr.branchcode = ?"
 
     sql = f"""
         WITH Sue AS (
@@ -188,7 +198,7 @@ def _fetch_detail(start_date: date, end_date: date, branch_cd: str, cmo: str, ac
                 AND a.CMO IS NOT NULL
                 {cmo_filter_sue}
                 AND CONVERT(date, a.CREATE_DATE) BETWEEN ? AND ?
-                AND a.BRANCH_CD = ?
+                {branch_filter_sue}
         ),
         Combined AS (
             SELECT
@@ -215,19 +225,20 @@ def _fetch_detail(start_date: date, end_date: date, branch_cd: str, cmo: str, ac
             AND cr.Create_By IS NOT NULL
             {cmo_filter_reject}
             AND CONVERT(date, cr.Create_Date) BETWEEN ? AND ?
-            AND usr.branchcode = ?
+            {branch_filter_reject}
         ORDER BY tgl_buat
     """
     
     params: list = []
-    if not consolidated:
-        params.append(cmo)
-    params += [start_date, end_date, branch_cd]
-    if not consolidated:
-        params.append(cmo)
-    params += [start_date, end_date, branch_cd]
+    for _ in range(2):
+        if not consolidated:
+            params.append(cmo)
+        params += [start_date, end_date]
+        if not branch_consolidated:
+            params.append(branch_cd)
 
     rows = _exec_rows(sql, params)
+    branch_names = _branch_names() if branch_consolidated else {}
 
     show_actions = (not consolidated) and access_level == 'CMO'
 
@@ -261,9 +272,12 @@ def _fetch_detail(start_date: date, end_date: date, branch_cd: str, cmo: str, ac
         totals['total'] += 1
 
         reject_status = r.get('Reject_Status') or ''
+        row_branch = str(r.get('BRANCH_CD') or '').strip()
 
         data.append({
             'no': i,
+            'branch_cd': row_branch,
+            'branch_name': branch_names.get(row_branch, row_branch) if branch_consolidated else '',
             'appl_no': r.get('APPL_NO') or '',
             'id_reject': r.get('ID_Reject') or '',
             'customer_name': r.get('cust_name') or '-',
@@ -274,7 +288,8 @@ def _fetch_detail(start_date: date, end_date: date, branch_cd: str, cmo: str, ac
             'editable': show_actions and bool(reject_status),
         })
 
-    return {'data': data, 'totals': totals, 'show_actions': show_actions, 'consolidated': consolidated}
+    return {'data': data, 'totals': totals, 'show_actions': show_actions,
+            'consolidated': consolidated, 'branch_consolidated': branch_consolidated}
 
 @cmo_daily_productivity_bp.route('/daily-productivity-detail/list')
 @login_required

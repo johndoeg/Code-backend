@@ -98,6 +98,7 @@ BLUEPRINT_REGISTRY: List[BlueprintEntry] = [
     BlueprintEntry("app.cam.reportview.others.routes_customer_outstanding",                             "customer_outstanding_bp",               "/CAM/Others"),
     BlueprintEntry("app.cam.reportview.others.routes_summary_rundown_osp",                              "summary_rundown_osp_bp",                "/CAM/Others"),
     BlueprintEntry("app.cam.reportview.others.routes_history_mrp",                                      "history_mrp_bp",                        "/CAM/Others"),
+    BlueprintEntry("app.cam.reportview.others.routes_in_progress_e_contract",                           "in_progress_e_contract_bp",             "/CAM/Others"),
 
     # ── Master Data
     BlueprintEntry("app.masterdata.sales.routes_sales",                                                 "sales_bp",                              "/MasterData"),
