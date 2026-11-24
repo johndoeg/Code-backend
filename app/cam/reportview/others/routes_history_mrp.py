@@ -1,9 +1,14 @@
-from flask import Blueprint, jsonify, request, current_app
+from flask import Blueprint, jsonify, request, current_app, session
 from app import db
 from app.auth.decorators import login_required
 from sqlalchemy import text
 
 history_mrp_bp = Blueprint("history_mrp", __name__, url_prefix="/CAM/Others")
+
+RESTRICTED_ROLES = ("CMO", "CMH", "BM")
+
+def _show_appl_no() -> bool:
+    return (session.get("accesslevel") or "").strip() not in RESTRICTED_ROLES
 
 @history_mrp_bp.route("/HistoryMRP/brands")
 @login_required
@@ -54,7 +59,7 @@ def get_types():
 @history_mrp_bp.route("/HistoryMRP/data")
 @login_required
 def get_data():
-   
+
     brand = request.args.get("brand", "").strip()
     model = request.args.get("model", "").strip()
     type_ = request.args.get("type",  "").strip()
@@ -70,7 +75,18 @@ def get_data():
             uk.KAROSERI_DESC,
             ce.TAHUN,
             vdk.L_AMOUNT,
-            vdk.EXECUTION
+            vdk.ntf,
+            vdk.EXECUTION,
+            ubc.BRANCH_NAME,
+            ce.APPL_NO,
+            a.APLESS,
+            a.Cons_Leas                                                                        AS fin_type,
+            (CASE WHEN b.LESSEE_TP = 'PR' THEN '1' ELSE '2' END)                               AS ind_cor,
+            (CASE WHEN a.HAS_GUARANTOR = '0' OR a.HAS_GUARANTOR IS NULL THEN '1' ELSE '2' END) AS guarantor,
+            (CASE WHEN LTRIM(RTRIM(c.[CONDITION])) = 'NEW' THEN '2' ELSE '1' END)              AS new_car,
+            (CASE WHEN c.SUPP = '999999' THEN '1' ELSE '0' END)                                AS c2c,
+            a.PURPOFFINC,
+            a.Cont_type
         FROM CLFEQUIP ce WITH(NOLOCK)
             LEFT JOIN UMFBRAND  ub  WITH(NOLOCK) ON ce.BRAND  = ub.BRAND
             LEFT JOIN UMFMODEL  um  WITH(NOLOCK) ON ce.MODEL  = um.MODEL
@@ -82,7 +98,16 @@ def get_data():
                 FROM UMFKAROSERI WITH(NOLOCK)
                 WHERE KAROSERI = ce.KAROSERI
             ) uk
-            LEFT JOIN V_DataKredit vdk WITH(NOLOCK) ON vdk.LEASE_NO = ce.LEASE_NO
+            LEFT JOIN V_DataKredit vdk WITH(NOLOCK) ON vdk.LEASE_NO  = ce.LEASE_NO
+            INNER JOIN UMFBRANCH   ubc WITH(NOLOCK) ON ubc.BRANCH_CD = ce.BRANCH_CD
+            LEFT JOIN CAFCONT      a   WITH(NOLOCK) ON a.APPL_NO     = ce.APPL_NO
+            LEFT JOIN CAFLESS      b   WITH(NOLOCK) ON a.APLESS      = b.APLESS
+            OUTER APPLY (
+                SELECT TOP 1 [CONDITION], SUPP
+                FROM CAFEQUIP WITH(NOLOCK)
+                WHERE APPL_NO = a.APPL_NO
+                ORDER BY CAFEQUIP_ID DESC
+            ) c
         WHERE ce.BRAND  = :brand
             AND ce.MODEL  = :model
             AND vdk.EXECUTION IS NOT NULL
@@ -99,21 +124,42 @@ def get_data():
 
     sql += " ORDER BY vdk.EXECUTION ASC"
 
+    show_appl_no = _show_appl_no()
+
     try:
         rows = db.session.execute(text(sql), params).mappings().all()
         result = []
         for r in rows:
             ex = r["EXECUTION"]
-            result.append({
-                "brand_nm":    r["BRAND_NM"]     or "",
-                "model_nm":    r["MODEL_NM"]     or "",
-                "type_nm":     r["TYPE_NM"]      or "",
+            appl_no = r["APPL_NO"] or ""
+            item = {
+                "brand_nm":    r["BRAND_NM"]      or "",
+                "model_nm":    r["MODEL_NM"]      or "",
+                "type_nm":     r["TYPE_NM"]       or "",
                 "karoseri":    r["KAROSERI_DESC"] or "",
-                "tahun":       r["TAHUN"]         or "",
+                "tahun":       "" if r["TAHUN"] is None else str(r["TAHUN"]),
                 "l_amount":    float(r["L_AMOUNT"] or 0),
+                "net_finance": float(r["ntf"] or 0),
                 "execution":   ex.strftime("%d-%b-%Y") if ex and hasattr(ex, "strftime") else (str(ex) if ex else ""),
-            })
-        return jsonify(result)
+                "branch_name": r["BRANCH_NAME"]   or "",
+            }
+            if show_appl_no:
+                item["appl_no"] = appl_no
+                item["cam_params"] = {
+                    "id1":    r["fin_type"]   or "",
+                    "id2":    r["ind_cor"]    or "",
+                    "id3":    "1",
+                    "id4":    r["guarantor"]  or "",
+                    "id5":    r["new_car"]    or "",
+                    "id6":    "Edit",
+                    "id7":    r["PURPOFFINC"] or "",
+                    "id8":    r["c2c"]        or "",
+                    "id9":    r["Cont_type"]  or "",
+                    "apless": r["APLESS"]     or "",
+                    "applno": appl_no,
+                }
+            result.append(item)
+        return jsonify({"rows": result, "show_appl_no": show_appl_no})
     except Exception:
         current_app.logger.exception("History MRP data error")
         return jsonify({"error": "Failed to load data"}), 500

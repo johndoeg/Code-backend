@@ -1,84 +1,86 @@
-from flask import Blueprint, request, send_file, jsonify, current_app
+import io
+from datetime import date, datetime
+
+import xlsxwriter
+from dateutil.relativedelta import relativedelta
+from flask import Blueprint, current_app, jsonify, request, send_file
+from sqlalchemy import text
+
 from app import db
 from app.auth.decorators import login_required
-from sqlalchemy import text
-from datetime import datetime
-from dateutil.relativedelta import relativedelta
-import xlsxwriter
-import io
 
 sipesat_bp = Blueprint('sipesat', __name__, url_prefix='/SIPESAT')
 
-def _parse_period(period_str: str) -> datetime | None:
-    try:
-        dt = datetime.strptime(period_str, '%m-%Y')
-        return dt + relativedelta(months=1, day=1, days=-1)
-    except (ValueError, TypeError):
-        return None
+_PERIOD_FORMATS = ('%m-%Y', '%b-%Y', '%B-%Y')
 
-def _build_excel(data_rows: list[dict]) -> io.BytesIO:
+_COLUMNS = [
+    (' IDPJK ', 'idpjk', 5, 'center', False),
+    (' Kode Nasabah ', 'KodeNasabah', 14, 'center', False),
+    (' Nama Nasabah ', 'LESSEE_NM', 14, 'center', False),
+    (' Tempat Lahir ', 'tmptLahir', 14, 'center', False),
+    (' Tanggal Lahir ', 'tglLahir', 15, 'center', False),
+    (' Alamat ', 'alamat', 100, 'wrap', False),
+    (' KTP ', 'KTP', 5, 'left', True),
+    (' Identitas Lain ', 'identitaslain', 16, 'left', False),
+    (' CIF/Kepersertaan ', 'NoCIFDebitur', 18, 'left', True),
+    (' NPWP ', 'NPWP', 6, 'left', True),
+]
+
+_BASE_FONT = {'font_name': 'Tahoma', 'font_size': 10}
+_BASE_BORDER = {'border': 1, 'border_color': '#000000'}
+
+def _parse_period(period_str):
+    period_str = (period_str or '').strip()
+    if not period_str:
+        return None
+    for fmt in _PERIOD_FORMATS:
+        try:
+            parsed = datetime.strptime(period_str, fmt)
+        except ValueError:
+            continue
+        return (parsed + relativedelta(months=1, day=1, days=-1)).date()
+    return None
+
+def _cell_value(value):
+    if value is None:
+        return ''
+    if isinstance(value, datetime):
+        return value.strftime('%Y-%m-%d')
+    if isinstance(value, date):
+        return value.strftime('%Y-%m-%d')
+    return value
+
+def _build_excel(data_rows):
     output = io.BytesIO()
-    
+
     with xlsxwriter.Workbook(output, {'in_memory': True}) as workbook:
         worksheet = workbook.add_worksheet('SIPESAT')
-        
-        columns = [
-            (' IDPJK ', 'idpjk', 5, False),
-            (' Kode Nasabah ', 'KodeNasabah', None, False),
-            (' Nama Nasabah ', 'LESSEE_NM', None, False),
-            (' Tempat Lahir ', 'tmptLahir', None, False),
-            (' Tanggal Lahir ', 'tglLahir', None, False),
-            (' Alamat ', 'alamat', 100, False),
-            (' KTP ', 'KTP', None, True),
-            (' Identitas Lain ', 'identitaslain', None, False),
-            (' CIF/Kepersertaan ', 'NoCIFDebitur', None, True),
-            (' NPWP ', 'NPWP', None, True),
-        ]
-        
+
         header_fmt = workbook.add_format({
-            'align': 'center', 'valign': 'vcenter',
-            'font_name': 'Tahoma', 'font_size': 10,
-            'bg_color': '#FFFF00', 'border': 1, 'border_color': 'black',
+            **_BASE_FONT,
+            **_BASE_BORDER,
+            'align': 'center',
+            'valign': 'vcenter',
+            'bg_color': '#FFFF00',
         })
-        
-        data_fmt = workbook.add_format({
-            'font_name': 'Tahoma', 'font_size': 10,
-            'border': 1, 'border_color': 'black',
-        })
-        center_fmt = workbook.add_format({**data_fmt.__dict__, 'align': 'center', 'valign': 'vcenter'})
-        left_fmt = workbook.add_format({**data_fmt.__dict__, 'align': 'left', 'valign': 'vcenter'})
-        wrap_fmt = workbook.add_format({**data_fmt.__dict__, 'text_wrap': True})
-        center_wrap_fmt = workbook.add_format({**data_fmt.__dict__, 'align': 'center', 'valign': 'vcenter', 'text_wrap': True})
-        
-        for col_idx, (header, _, width, _) in enumerate(columns):
-            worksheet.write(0, col_idx, header, header_fmt)
-            if width:
-                worksheet.set_column(col_idx, col_idx, width)
-            else:
-                worksheet.set_column(col_idx, col_idx, max(len(header.strip()) + 2, 10))
-        
+        center_fmt = workbook.add_format({**_BASE_FONT, **_BASE_BORDER, 'align': 'center'})
+        left_fmt = workbook.add_format({**_BASE_FONT, **_BASE_BORDER, 'align': 'left'})
+        wrap_fmt = workbook.add_format({**_BASE_FONT, **_BASE_BORDER, 'text_wrap': True})
+        body_fmt = {'center': center_fmt, 'left': left_fmt, 'wrap': wrap_fmt}
+
+        for col_idx, (header, _field, width, _align, _as_string) in enumerate(_COLUMNS):
+            worksheet.write_string(0, col_idx, header, header_fmt)
+            worksheet.set_column(col_idx, col_idx, width)
+
         for row_idx, row in enumerate(data_rows, start=1):
-            for col_idx, (_, field, _, is_string) in enumerate(columns):
-                value = row.get(field, '')
-                if value is None:
-                    value = ''
-                if isinstance(value, datetime):
-                    value = value.strftime('%Y-%m-%d')
-                
-                if col_idx == 5:
-                    fmt = center_wrap_fmt if col_idx <= 4 else wrap_fmt
-                elif col_idx <= 4:
-                    fmt = center_fmt
-                elif col_idx >= 6:
-                    fmt = left_fmt
+            for col_idx, (_header, field, _width, align, as_string) in enumerate(_COLUMNS):
+                value = _cell_value(row.get(field))
+                cell_fmt = body_fmt[align]
+                if as_string:
+                    worksheet.write_string(row_idx, col_idx, str(value), cell_fmt)
                 else:
-                    fmt = data_fmt
-                
-                if is_string and str(value).strip():
-                    worksheet.write_string(row_idx, col_idx, str(value), fmt)
-                else:
-                    worksheet.write(row_idx, col_idx, str(value), fmt)
-    
+                    worksheet.write(row_idx, col_idx, value, cell_fmt)
+
     output.seek(0)
     return output
 
@@ -86,95 +88,27 @@ def _build_excel(data_rows: list[dict]) -> io.BytesIO:
 @login_required
 def export_sipesat_excel():
     period = request.args.get('period')
-    
-    if not period:
-        return jsonify({'error': 'period parameter required (format: MM-YYYY)'}), 400
-    
     selected_date = _parse_period(period)
     if not selected_date:
-        return jsonify({'error': 'Invalid period format. Use MM-YYYY (e.g., 11-2025)'}), 400
-    
-    sql_date = selected_date.strftime('%Y-%m-%d')
-    
+        return jsonify({'error': 'Invalid period. Use MM-YYYY (e.g. 11-2025).'}), 400
+
     try:
         result = db.session.execute(
             text("EXEC USP_OJK_SIPESAT :selected_date"),
-            {"selected_date": sql_date}
+            {"selected_date": selected_date.strftime('%Y-%m-%d')},
         )
-        
-        columns = result.keys()
-        rows = [dict(zip(columns, row)) for row in result]
-        
+        rows = result.mappings().all()
+
         excel_file = _build_excel(rows)
-        
         filename = f"PELAPORAN SIPESAT {selected_date.strftime('%B %Y').upper()}.xlsx"
-        
-        current_app.logger.info(f"Generated SIPESAT export: {filename} for period {period}")
-        
+
         return send_file(
             excel_file,
             mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
             as_attachment=True,
             download_name=filename,
-            max_age=0
+            max_age=0,
         )
-        
-    except Exception as e:
+    except Exception:
         current_app.logger.exception("SIPESAT export error")
         return jsonify({'error': 'Failed to generate report'}), 500
-
-@sipesat_bp.route('/check-data')
-@login_required
-def check_sipesat_data():
-    period = request.args.get('period')
-    
-    if not period:
-        return jsonify({'error': 'period required'}), 400
-    
-    selected_date = _parse_period(period)
-    if not selected_date:
-        return jsonify({'error': 'Invalid period format'}), 400
-    
-    sql_date = selected_date.strftime('%Y-%m-%d')
-    
-    try:
-        result = db.session.execute(
-            text("EXEC USP_OJK_SIPESAT :selected_date"),
-            {"selected_date": sql_date}
-        )
-        has_data = result.first() is not None
-        
-        return jsonify({'data': has_data, 'period': period})
-        
-    except Exception as e:
-        current_app.logger.exception("SIPESAT check-data error")
-        return jsonify({'error': 'Failed to check data'}), 500
-
-@sipesat_bp.route('/reprocess')
-@login_required
-def reprocess_sipesat():
-    period = request.args.get('period')
-    
-    if not period:
-        return jsonify({'error': 'period required'}), 400
-    
-    selected_date = _parse_period(period)
-    if not selected_date:
-        return jsonify({'error': 'Invalid period format'}), 400
-    
-    sql_date = selected_date.strftime('%Y-%m-%d')
-    
-    try:
-        db.session.execute(
-            text("EXEC USP_OJK_SIPESAT :selected_date"),
-            {"selected_date": sql_date}
-        )
-        db.session.commit()
-        
-        current_app.logger.info(f"Reprocessed SIPESAT data for period {period}")
-        return jsonify({'success': True, 'period': period})
-        
-    except Exception as e:
-        db.session.rollback()
-        current_app.logger.exception("SIPESAT reprocess error")
-        return jsonify({'error': 'Reprocess failed'}), 500

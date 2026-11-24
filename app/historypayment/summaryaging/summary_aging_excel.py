@@ -3,11 +3,18 @@ from datetime import datetime
 
 from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment, Border, Side
-from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.properties import PageSetupProperties
 
 _THIN   = Side(style='thin', color='000000')
 _BORDER = Border(left=_THIN, right=_THIN, top=_THIN, bottom=_THIN)
 _NUM    = '#,##0'
+_PCT    = 'General'
+_PCT_DEC = 4
+
+def _round_pct(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return value
+    return round(value, _PCT_DEC)
 
 def _ft(bold=False, size=7, name='Tahoma', color='000000'):
     return Font(bold=bold, size=size, name=name, color=color)
@@ -27,21 +34,38 @@ def _sub(cell, value=None):
     cell.alignment = _al('center', 'center', wrap=True)
     cell.border    = _BORDER
 
-def _data(cell, value=None, num=False):
+def _data(cell, value=None, num=False, pct=False):
     if value is not None:
-        cell.value = value
+        cell.value = _round_pct(value) if pct else value
     cell.font      = _ft()
     cell.border    = _BORDER
-    if num:
+    if pct:
+        cell.number_format = _PCT
+    elif num:
         cell.number_format = _NUM
 
-def _bold_data(cell, value=None, num=False):
+def _bold_data(cell, value=None, num=False, pct=False):
     if value is not None:
-        cell.value = value
+        cell.value = _round_pct(value) if pct else value
     cell.font      = _ft(bold=True, size=7)
     cell.border    = _BORDER
-    if num:
+    if pct:
+        cell.number_format = _PCT
+    elif num:
         cell.number_format = _NUM
+
+def _merge_sub(ws, row_start, col_start, row_end, col_end, value=None):
+    _sub(ws.cell(row=row_start, column=col_start), value)
+    ws.merge_cells(start_row=row_start, start_column=col_start,
+                   end_row=row_end, end_column=col_end)
+
+def _page_setup(ws, title_rows=None):
+    ws.page_setup.orientation  = 'landscape'
+    ws.page_setup.fitToWidth   = 1
+    ws.page_setup.fitToHeight  = 0
+    ws.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
+    if title_rows:
+        ws.print_title_rows = title_rows
 
 def _fmt_date(d: str) -> str:
 
@@ -50,7 +74,7 @@ def _fmt_date(d: str) -> str:
     except ValueError:
         return d
 
-def _safe_pct(num, denom, dec=2):
+def _safe_pct(num, denom, dec=4):
    
     try:
         return round((num or 0) / denom * 100, dec)
@@ -87,11 +111,7 @@ def _period_header_4col(ws, row_merge, row_sub, col_start, periods, dim_col=None
    
     c = col_start
     for period in periods:
-        ws.merge_cells(
-            start_row=row_merge, start_column=c,
-            end_row=row_merge, end_column=c + 3
-        )
-        _sub(ws.cell(row=row_merge, column=c), period)
+        _merge_sub(ws, row_merge, c, row_merge, c + 3, period)
         for lbl in _LABELS_4:
             _sub(ws.cell(row=row_sub, column=c), lbl)
             c += 1
@@ -100,11 +120,7 @@ def _period_header_2col(ws, row_merge, row_sub, col_start, periods):
    
     c = col_start
     for period in periods:
-        ws.merge_cells(
-            start_row=row_merge, start_column=c,
-            end_row=row_merge, end_column=c + 1
-        )
-        _sub(ws.cell(row=row_merge, column=c), period)
+        _merge_sub(ws, row_merge, c, row_merge, c + 1, period)
         for lbl in _LABELS_2:
             _sub(ws.cell(row=row_sub, column=c), lbl)
             c += 1
@@ -158,7 +174,7 @@ def build_excel_branch(rows: list[dict], asof: str, company: str) -> bytes:
 
     ROW_H1A = 5;  ROW_H1B = 6;  ROW_D1 = 7
 
-    ws1.merge_cells(f'A{ROW_H1A}:A{ROW_H1B}');  _sub(ws1[f'A{ROW_H1A}'], 'Branch')
+    _merge_sub(ws1, ROW_H1A, 1, ROW_H1B, 1, 'Branch')
     _period_header_4col(ws1, ROW_H1A, ROW_H1B, 2, _PERIODS_T1)
 
     tots_t1 = {f: 0 for k in _KEYS_T1 for f in [f'acc_{k}',f'amt_{k}',f'op_{k}',f'ar_{k}']}
@@ -179,7 +195,7 @@ def build_excel_branch(rows: list[dict], asof: str, company: str) -> bytes:
 
     ROW_H2A = TOT1 + 2;  ROW_H2B = ROW_H2A + 1;  ROW_D2 = ROW_H2B + 1
 
-    ws1.merge_cells(f'A{ROW_H2A}:A{ROW_H2B}');  _sub(ws1[f'A{ROW_H2A}'], 'Branch')
+    _merge_sub(ws1, ROW_H2A, 1, ROW_H2B, 1, 'Branch')
     _period_header_4col(ws1, ROW_H2A, ROW_H2B, 2, _PERIODS_T2)
 
     tots_t2 = {f: 0 for k in _KEYS_T2 for f in [f'acc_{k}',f'amt_{k}',f'op_{k}',f'ar_{k}']}
@@ -207,8 +223,8 @@ def build_excel_branch(rows: list[dict], asof: str, company: str) -> bytes:
     ws1.merge_cells(f'A{ROW_OUT_TITLE}:G{ROW_OUT_TITLE}')
 
     ROW_H3A = ROW_OUT_TITLE + 2;  ROW_H3B = ROW_H3A + 1;  ROW_D3 = ROW_H3B + 1
-    ws1.merge_cells(f'A{ROW_H3A}:A{ROW_H3B}');  _sub(ws1[f'A{ROW_H3A}'], 'Branch')
-    ws1.merge_cells(f'B{ROW_H3A}:I{ROW_H3A}');  _sub(ws1[f'B{ROW_H3A}'], 'OUTSTANDING')
+    _merge_sub(ws1, ROW_H3A, 1, ROW_H3B, 1, 'Branch')
+    _merge_sub(ws1, ROW_H3A, 2, ROW_H3A, 9, 'OUTSTANDING')
     for ci, lbl in enumerate(['Acc','%','Amount','%','Outstanding Principal','%','AR Principal','%'], start=2):
         _sub(ws1.cell(row=ROW_H3B, column=ci), lbl)
 
@@ -216,61 +232,60 @@ def build_excel_branch(rows: list[dict], asof: str, company: str) -> bytes:
         row = ROW_D3 + ri
         _data(ws1.cell(row=row, column=1), r.get('BRANCH_NAME', ''))
         for ci, v in enumerate(_row_outstanding(r), start=2):
-            c = ws1.cell(row=row, column=ci)
-            _data(c, v)
-            if ci in (3, 5, 7):
-                c.number_format = _NUM
+            _data(ws1.cell(row=row, column=ci), v,
+                  num=ci % 2 == 0, pct=ci % 2 == 1)
 
     TOT3 = ROW_D3 + n
     _bold_data(ws1.cell(row=TOT3, column=1), 'Total')
     for ci, v in enumerate([tot_out['acc'],100, tot_out['amt'],100,
                              tot_out['op'],100, tot_out['ar'],100], start=2):
-        c = ws1.cell(row=TOT3, column=ci)
-        _bold_data(c, v)
-        if ci in (3, 5, 7):
-            c.number_format = _NUM
+        _bold_data(ws1.cell(row=TOT3, column=ci), v,
+                   num=ci % 2 == 0, pct=ci % 2 == 1)
 
     ws2['A5'] = 'COMPARISON TO TOTAL OUTSTANDING'
     ws2['A5'].font = _ft(bold=True, size=10)
     ws2.merge_cells('A5:E5')
 
     ROW_C1A = 7;  ROW_C1B = 8;  ROW_CD1 = 9
-    ws2.merge_cells(f'A{ROW_C1A}:A{ROW_C1B}');  _sub(ws2[f'A{ROW_C1A}'], 'Branch')
+    _merge_sub(ws2, ROW_C1A, 1, ROW_C1B, 1, 'Branch')
     _period_header_4col(ws2, ROW_C1A, ROW_C1B, 2, _PERIODS_T1)
 
     for ri, r in enumerate(rows):
         row = ROW_CD1 + ri
         _data(ws2.cell(row=row, column=1), r.get('BRANCH_NAME', ''))
         for ci, v in enumerate(_row_comp(r, _KEYS_T1), start=2):
-            _data(ws2.cell(row=row, column=ci), v)
+            _data(ws2.cell(row=row, column=ci), v, pct=True)
 
     CTOT1 = ROW_CD1 + n
     _bold_data(ws2.cell(row=CTOT1, column=1), 'Total')
     for ci, k in enumerate(_KEYS_T1, start=0):
         base = 2 + ci * 4
-        _bold_data(ws2.cell(row=CTOT1, column=base),   _safe_pct(tots_t1[f'acc_{k}'], tot_out['acc']))
-        _bold_data(ws2.cell(row=CTOT1, column=base+1), _safe_pct(tots_t1[f'amt_{k}'], tot_out['amt']))
-        _bold_data(ws2.cell(row=CTOT1, column=base+2), _safe_pct(tots_t1[f'op_{k}'],  tot_out['op']))
-        _bold_data(ws2.cell(row=CTOT1, column=base+3), _safe_pct(tots_t1[f'ar_{k}'],  tot_out['ar']))
+        _bold_data(ws2.cell(row=CTOT1, column=base),   _safe_pct(tots_t1[f'acc_{k}'], tot_out['acc']), pct=True)
+        _bold_data(ws2.cell(row=CTOT1, column=base+1), _safe_pct(tots_t1[f'amt_{k}'], tot_out['amt']), pct=True)
+        _bold_data(ws2.cell(row=CTOT1, column=base+2), _safe_pct(tots_t1[f'op_{k}'],  tot_out['op']), pct=True)
+        _bold_data(ws2.cell(row=CTOT1, column=base+3), _safe_pct(tots_t1[f'ar_{k}'],  tot_out['ar']), pct=True)
 
     ROW_C2A = CTOT1 + 2;  ROW_C2B = ROW_C2A + 1;  ROW_CD2 = ROW_C2B + 1
-    ws2.merge_cells(f'A{ROW_C2A}:A{ROW_C2B}');  _sub(ws2[f'A{ROW_C2A}'], 'Branch')
+    _merge_sub(ws2, ROW_C2A, 1, ROW_C2B, 1, 'Branch')
     _period_header_4col(ws2, ROW_C2A, ROW_C2B, 2, _PERIODS_T2)
 
     for ri, r in enumerate(rows):
         row = ROW_CD2 + ri
         _data(ws2.cell(row=row, column=1), r.get('BRANCH_NAME', ''))
         for ci, v in enumerate(_row_comp(r, _KEYS_T2), start=2):
-            _data(ws2.cell(row=row, column=ci), v)
+            _data(ws2.cell(row=row, column=ci), v, pct=True)
 
     CTOT2 = ROW_CD2 + n
     _bold_data(ws2.cell(row=CTOT2, column=1), 'Total')
     for ci, k in enumerate(_KEYS_T2, start=0):
         base = 2 + ci * 4
-        _bold_data(ws2.cell(row=CTOT2, column=base),   _safe_pct(tots_t2[f'acc_{k}'], tot_out['acc']))
-        _bold_data(ws2.cell(row=CTOT2, column=base+1), _safe_pct(tots_t2[f'amt_{k}'], tot_out['amt']))
-        _bold_data(ws2.cell(row=CTOT2, column=base+2), _safe_pct(tots_t2[f'op_{k}'],  tot_out['op']))
-        _bold_data(ws2.cell(row=CTOT2, column=base+3), _safe_pct(tots_t2[f'ar_{k}'],  tot_out['ar']))
+        _bold_data(ws2.cell(row=CTOT2, column=base),   _safe_pct(tots_t2[f'acc_{k}'], tot_out['acc']), pct=True)
+        _bold_data(ws2.cell(row=CTOT2, column=base+1), _safe_pct(tots_t2[f'amt_{k}'], tot_out['amt']), pct=True)
+        _bold_data(ws2.cell(row=CTOT2, column=base+2), _safe_pct(tots_t2[f'op_{k}'],  tot_out['op']), pct=True)
+        _bold_data(ws2.cell(row=CTOT2, column=base+3), _safe_pct(tots_t2[f'ar_{k}'],  tot_out['ar']), pct=True)
+
+    for _ws in wb.worksheets:
+        _page_setup(_ws)
 
     buf = io.BytesIO(); wb.save(buf); buf.seek(0)
     return buf.read()
@@ -308,13 +323,13 @@ def build_excel_by_person(rows: list[dict], rows_out: list[dict],
     _write_title_block(ws1, company, subtitle, fmt)
     _write_title_block(ws2, company, subtitle, fmt)
 
-    ws1.merge_cells('A5:A6');  _sub(ws1['A5'], row_label)
+    _merge_sub(ws1, 5, 1, 6, 1, row_label)
     _period_header_4col(ws1, 5, 6, 2, _PERIODS_CMO)
 
     ws2['A5'] = 'COMPARISON TO TOTAL OUTSTANDING'
     ws2['A5'].font = _ft(bold=True, size=10)
     ws2.merge_cells('A5:E5')
-    ws2.merge_cells('A7:A8');  _sub(ws2['A7'], row_label)
+    _merge_sub(ws2, 7, 1, 8, 1, row_label)
     _period_header_4col(ws2, 7, 8, 2, _PERIODS_CMO)
 
     tots = {f: 0 for k in _KEYS_CMO
@@ -340,7 +355,7 @@ def build_excel_by_person(rows: list[dict], rows_out: list[dict],
         col2 = 2
         for k in _KEYS_CMO:
             for fld in ['acc','amt','op','ar']:
-                _data(ws2.cell(row=ws2_row, column=col2), r.get(f'{fld}_{k}_tot', 0))
+                _data(ws2.cell(row=ws2_row, column=col2), r.get(f'{fld}_{k}_tot', 0), pct=True)
                 col2 += 1
 
     n = len(rows)
@@ -359,8 +374,8 @@ def build_excel_by_person(rows: list[dict], rows_out: list[dict],
     ws1.merge_cells(f'A{ROW_OUT_TITLE}:I{ROW_OUT_TITLE}')
 
     ROW_OH1 = ROW_OUT_TITLE + 2;  ROW_OH2 = ROW_OH1 + 1;  ROW_OD = ROW_OH2 + 1
-    ws1.merge_cells(f'A{ROW_OH1}:A{ROW_OH2}');  _sub(ws1[f'A{ROW_OH1}'], row_label)
-    ws1.merge_cells(f'B{ROW_OH1}:I{ROW_OH1}');  _sub(ws1[f'B{ROW_OH1}'], 'OUTSTANDING')
+    _merge_sub(ws1, ROW_OH1, 1, ROW_OH2, 1, row_label)
+    _merge_sub(ws1, ROW_OH1, 2, ROW_OH1, 9, 'OUTSTANDING')
     for ci, lbl in enumerate(['Acc','%','Amount','%','Outstanding Principal','%','AR Principal','%'], start=2):
         _sub(ws1.cell(row=ROW_OH2, column=ci), lbl)
 
@@ -371,10 +386,8 @@ def build_excel_by_person(rows: list[dict], rows_out: list[dict],
                                  r.get('tot_amt',0), r.get('amt_persen',0),
                                  r.get('tot_op',0),  r.get('op_persen',0),
                                  r.get('tot_ar',0),  r.get('ar_persen',0)], start=2):
-            c = ws1.cell(row=row, column=ci)
-            _data(c, v)
-            if ci in (3, 5, 7):
-                c.number_format = _NUM
+            _data(ws1.cell(row=row, column=ci), v,
+                  num=ci % 2 == 0, pct=ci % 2 == 1)
 
     OTOT = ROW_OD + len(rows_out)
     _bold_data(ws1.cell(row=OTOT, column=1), 'Total')
@@ -382,20 +395,21 @@ def build_excel_by_person(rows: list[dict], rows_out: list[dict],
                              tot_out.get('amt',0),100,
                              tot_out.get('op',0),100,
                              tot_out.get('ar',0),100], start=2):
-        c = ws1.cell(row=OTOT, column=ci)
-        _bold_data(c, v)
-        if ci in (3, 5, 7):
-            c.number_format = _NUM
+        _bold_data(ws1.cell(row=OTOT, column=ci), v,
+                   num=ci % 2 == 0, pct=ci % 2 == 1)
 
     ws2_tot = 9 + n
     _bold_data(ws2.cell(row=ws2_tot, column=1), 'Total')
     col2 = 2
     for k in _KEYS_CMO:
-        _bold_data(ws2.cell(row=ws2_tot, column=col2),   _safe_pct(tots[f'acc_{k}'], tot_out.get('acc')))
-        _bold_data(ws2.cell(row=ws2_tot, column=col2+1), _safe_pct(tots[f'amt_{k}'], tot_out.get('amt')))
-        _bold_data(ws2.cell(row=ws2_tot, column=col2+2), _safe_pct(tots[f'op_{k}'],  tot_out.get('op')))
-        _bold_data(ws2.cell(row=ws2_tot, column=col2+3), _safe_pct(tots[f'ar_{k}'],  tot_out.get('ar')))
+        _bold_data(ws2.cell(row=ws2_tot, column=col2),   _safe_pct(tots[f'acc_{k}'], tot_out.get('acc')), pct=True)
+        _bold_data(ws2.cell(row=ws2_tot, column=col2+1), _safe_pct(tots[f'amt_{k}'], tot_out.get('amt')), pct=True)
+        _bold_data(ws2.cell(row=ws2_tot, column=col2+2), _safe_pct(tots[f'op_{k}'],  tot_out.get('op')), pct=True)
+        _bold_data(ws2.cell(row=ws2_tot, column=col2+3), _safe_pct(tots[f'ar_{k}'],  tot_out.get('ar')), pct=True)
         col2 += 4
+
+    for _ws in wb.worksheets:
+        _page_setup(_ws)
 
     buf = io.BytesIO(); wb.save(buf); buf.seek(0)
     return buf.read()
@@ -417,13 +431,11 @@ def _write_other_section(ws, row_title_merge, row_data_start,
   
     R1 = row_title_merge;  R2 = R1 + 1
 
-    ws.merge_cells(start_row=R1, start_column=1, end_row=R2, end_column=1)
-    _sub(ws.cell(row=R1, column=1), section_label)
+    _merge_sub(ws, R1, 1, R2, 1, section_label)
 
     col = 2
     for period in _PERIODS_OTHER:
-        ws.merge_cells(start_row=R1, start_column=col, end_row=R1, end_column=col+1)
-        _sub(ws.cell(row=R1, column=col), period)
+        _merge_sub(ws, R1, col, R1, col + 1, period)
         _sub(ws.cell(row=R2, column=col),   'Acc')
         _sub(ws.cell(row=R2, column=col+1), '%')
         col += 2
@@ -434,7 +446,7 @@ def _write_other_section(ws, row_title_merge, row_data_start,
         col = 2
         for k in _KEYS_OTHER:
             _data(ws.cell(row=row, column=col),   r.get(f'acc_{k}', 0), num=True)
-            _data(ws.cell(row=row, column=col+1), r.get(f'acc_{k}_tot', 0))
+            _data(ws.cell(row=row, column=col+1), r.get(f'acc_{k}_tot', 0), pct=True)
             col += 2
 
     end_row = row_data_start + len(rows) - 1
@@ -468,6 +480,9 @@ def build_excel_other(rows_karoseri, rows_tenor, rows_ltv,
     nl_start = nt + 2
     _write_other_section(ws1, nl_start, nl_start + 2, 'LTV', rows_ltv, 'LTV')
 
+    for _ws in wb.worksheets:
+        _page_setup(_ws)
+
     buf = io.BytesIO(); wb.save(buf); buf.seek(0)
     return buf.read()
 
@@ -495,6 +510,9 @@ def build_excel_dealer(rows_tot_acc, rows_tot_od, rows_tot_od90,
     n3_start = max(n2 + 2, 53)
     _write_other_section(ws1, n3_start, n3_start + 2,
                           'Dealer (By Total Overdue > 90 Days)', rows_tot_od90, 'Dealer')
+
+    for _ws in wb.worksheets:
+        _page_setup(_ws)
 
     buf = io.BytesIO(); wb.save(buf); buf.seek(0)
     return buf.read()

@@ -1,13 +1,14 @@
-from flask import Blueprint, request, send_file, current_app, jsonify
+from flask import Blueprint, request, send_file, current_app, jsonify, session
 from app import db
 from app.auth.decorators import login_required
+from app.utils.helpers.settings_helpers import company_name as get_company_name
 from sqlalchemy import text
 
 import io
 import re
 import openpyxl
 from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
-from datetime import date
+from datetime import date, datetime
 
 insurance_report_bp = Blueprint('insurance_report', __name__, url_prefix='/InsuranceReport')
 
@@ -19,6 +20,12 @@ _FONT_TITLE   = Font(name='Tahoma', size=12, bold=True)
 _FONT_DATA    = Font(name='Tahoma', size=7)
 _ALIGN_CENTER = Alignment(horizontal='center', vertical='center', wrap_text=True)
 _ALIGN_LEFT   = Alignment(horizontal='left',   vertical='center')
+_ALIGN_STAMP  = Alignment(horizontal='left',   vertical='top', wrap_text=True)
+_FONT_COMPANY = Font(name='Tahoma', size=9, bold=True)
+
+_DATE_FMT      = '%d-%m-%Y'
+_DATE_PATTERNS = ('%Y-%m-%d %H:%M:%S.%f', '%Y-%m-%d %H:%M:%S', '%Y-%m-%dT%H:%M:%S',
+                  '%Y-%m-%d', '%d-%m-%Y', '%d/%m/%Y')
 
 COLUMNS = [
     ('A', 'No.',               None),
@@ -32,6 +39,23 @@ COLUMNS = [
 ]
 
 FILTER_LABELS = {'1': 'Contract No. ', '2': 'Disbursement Date '}
+
+def _fmt_date(value) -> str:
+    if value in (None, ''):
+        return ''
+    if isinstance(value, datetime):
+        return value.strftime(_DATE_FMT)
+    if isinstance(value, date):
+        return value.strftime(_DATE_FMT)
+    raw = str(value).strip()
+    if not raw:
+        return ''
+    for fmt in _DATE_PATTERNS:
+        try:
+            return datetime.strptime(raw, fmt).strftime(_DATE_FMT)
+        except ValueError:
+            continue
+    return raw
 
 def _clean_message(raw: str) -> str:
     if not raw:
@@ -87,7 +111,7 @@ def get_list():
                 "policy_no":  row.PolicyNo          or "",
                 "status":     row.ResponseStatus    or "",
                 "message":    _clean_message(row.ResponseMessage),
-                "success_dt": str(row.success_dt)   if row.success_dt else "",
+                "success_dt": _fmt_date(row.success_dt),
             }
             for row in result
         ]
@@ -125,7 +149,7 @@ def get_excel():
             output,
             mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
             as_attachment=True,
-            download_name=f'InsuranceReport_{date.today().isoformat()}.xlsx',
+            download_name=f'InsuranceReport_{date.today().strftime(_DATE_FMT)}.xlsx',
         )
 
     except Exception:
@@ -137,18 +161,15 @@ def _build_workbook(rows, search_by, search_val, search_val1, search_val2):
     ws = wb.active
     ws.title = 'InsuranceReport'
 
-    today_str = date.today().strftime('%d %b %Y')
-
     ws.merge_cells('A1:G1')
-    ws['H1'] = f'Date : {today_str}'
-    ws['H1'].font = _FONT_DATA
-    ws['H1'].alignment = _ALIGN_LEFT
+    ws['A1']           = get_company_name()
+    ws['A1'].font      = _FONT_COMPANY
+    ws['A1'].alignment = _ALIGN_LEFT
 
-    ws.merge_cells('A2:G2')
-    ws['A2'].font      = _FONT_DATA
-    ws['A2'].alignment = _ALIGN_LEFT
-    ws['H2'].font      = _FONT_DATA
-    ws['H2'].alignment = _ALIGN_LEFT
+    ws['H1']           = f"Date : {date.today().strftime(_DATE_FMT)}\nPrint By : {session.get('username', '')}"
+    ws['H1'].font      = _FONT_DATA
+    ws['H1'].alignment = _ALIGN_STAMP
+    ws.row_dimensions[1].height = 30
 
     ws.merge_cells('A3:H3')
     ws['A3']           = 'INSURANCE REPORT'
@@ -158,9 +179,10 @@ def _build_workbook(rows, search_by, search_val, search_val1, search_val2):
     ws.merge_cells('A4:H4')
     filter_label = FILTER_LABELS.get(search_by, '')
     if search_by == '1':
-        ws['A4'] = filter_label + search_val
+        ws['A4'] = f"{filter_label}{search_val}"
     elif search_by == '2':
-        ws['A4'] = f"{filter_label}{search_val1} - {search_val2}"
+        ws['A4'] = f"{filter_label}{_fmt_date(search_val1)} - {_fmt_date(search_val2)}"
+    ws['A4'].font      = _FONT_DATA
     ws['A4'].alignment = _ALIGN_CENTER
 
     for col_letter, header, _ in COLUMNS:
@@ -184,7 +206,7 @@ def _build_workbook(rows, search_by, search_val, search_val1, search_val2):
             'PolicyNo':        row.PolicyNo         or '',
             'ResponseStatus':  row.ResponseStatus   or '',
             'ResponseMessage': _clean_message(row.ResponseMessage),
-            'success_dt':      str(row.success_dt)  if row.success_dt else '',
+            'success_dt':      _fmt_date(row.success_dt),
         }
         for col_letter, _, db_key in COLUMNS:
             cell           = ws[f'{col_letter}{r}']

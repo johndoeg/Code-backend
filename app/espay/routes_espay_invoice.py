@@ -4,16 +4,18 @@ from datetime import datetime
 
 import openpyxl
 import requests
+from openpyxl.styles import Alignment, Border, Font, Side
 from openpyxl.utils import get_column_letter
 from flask import Blueprint, current_app, jsonify, request, send_file, session
 from sqlalchemy import text
 
 from app import db
 from app.auth.decorators import login_required
+from app.utils.helpers.settings_helpers import company_name as get_company_name
 
 espay_bp = Blueprint('espay', __name__, url_prefix='/Espay')
 
-ESPAY_BASE_URL = "https://ifc.sfintech.id:28888"
+ESPAY_BASE_URL = "http://10.31.1.139:9000"
 ESPAY_TIMEOUT = 30
 ESPAY_OK_CODE = "0000"
 
@@ -67,7 +69,8 @@ SQL_OVERDUE = f"""
     WHERE a.lease_no = :lease_no {_ELIGIBLE}
 """
 
-SQL_ET = f"""
+def _sql_et(trans_type, status):
+    return f"""
     SELECT b.LESSEE_NM, '' AS period,
            FORMAT(c.ET_DT, 'dd-MM-yyyy') AS GIRODT,
            CAST(c.ET_PAY AS DECIMAL(20,0)) AS overdue,
@@ -79,11 +82,15 @@ SQL_ET = f"""
         LEFT JOIN (
             SELECT SUM(ISNULL(total_amount, 0)) AS et_paid, lease_no
             FROM ESPAY_Invoice WITH(NOLOCK)
-            WHERE trans_type = 'ET' AND flagdel = '0'
+            WHERE trans_type = '{trans_type}' AND flagdel = '0'
+                AND payment_date IS NOT NULL
             GROUP BY lease_no
         ) d ON a.LEASE_NO = d.lease_no
-    WHERE a.lease_no = :lease_no {_ELIGIBLE}
+    WHERE a.lease_no = :lease_no AND c.STATUS = '{status}' {_ELIGIBLE}
 """
+
+SQL_ET = _sql_et('ET', 'T')
+SQL_FC = _sql_et('FC', 'F')
 
 SQL_OTHERS = f"""
     SELECT b.LESSEE_NM, '' AS period, '' AS nominal, '' AS GIRODT, '' AS overdue
@@ -98,6 +105,7 @@ CONTRACT_SQL = {
     'PENALTY': SQL_PENALTY,
     'OVERDUE': SQL_OVERDUE,
     'ET': SQL_ET,
+    'FC': SQL_FC,
 }
 
 def _col(row, name, default=''):
@@ -171,7 +179,7 @@ def _fetch_invoices(search_by, search_val, search_val_to):
         for row in result
     ]
 
-def _combo_options(cat_value, exclude=None):
+def _combo_options(cat_value, exclude=None, order_by_label=False):
     exclude = exclude or []
     query = "SELECT VALUE, DESC_VALUE FROM MSTCOMBO WITH (NOLOCK) WHERE CAT_VALUE = :cat_value"
     params = {"cat_value": cat_value}
@@ -180,9 +188,45 @@ def _combo_options(cat_value, exclude=None):
         query += f" AND VALUE NOT IN ({placeholders})"
         for i, val in enumerate(exclude):
             params[f"ex{i}"] = val
+    if order_by_label:
+        query += " ORDER BY DESC_VALUE"
 
     result = db.session.execute(text(query), params)
     return [{"value": (row.VALUE or '').strip(), "label": row.DESC_VALUE} for row in result]
+
+def _combo_label(cat_value, value):
+    value = (value or '').strip()
+    if not value:
+        return ''
+    row = db.session.execute(
+        text("SELECT DESC_VALUE FROM MSTCOMBO WITH (NOLOCK) WHERE CAT_VALUE = :cat_value AND VALUE = :value"),
+        {"cat_value": cat_value, "value": value},
+    ).first()
+    return (row.DESC_VALUE or '').strip() if row else value
+
+def _display_date(value):
+    value = (value or '').strip()
+    if not value:
+        return '-'
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").strftime("%d-%m-%Y")
+    except ValueError:
+        return value
+
+def _criteria_label(search_by, search_val, search_val_to):
+    search_by = (search_by or 'All').strip()
+    if search_by == 'All':
+        return "Search By : TOP 100"
+    label = _combo_label("SEARCH_INVOICE", search_by) or "Search By"
+    if search_by == '3':
+        return f"{label} : {_display_date(search_val)} s/d {_display_date(search_val_to)}"
+    if search_by == '4':
+        return f"{label} : {_combo_label('PAYMENT_FOR', search_val) or '-'}"
+    if search_by == '5':
+        return f"{label} : {_combo_label('INVOICE_STATUS', search_val) or '-'}"
+    if search_by == '6':
+        return f"{label} : {_display_date(search_val)}"
+    return f"{label} : {(search_val or '').strip() or '-'}"
 
 @espay_bp.route('/search-options')
 @login_required
@@ -190,7 +234,7 @@ def get_search_options():
     try:
         return jsonify({
             "search_by": _combo_options("SEARCH_INVOICE", exclude=["4", "5"]),
-            "payment_for": _combo_options("PAYMENT_FOR"),
+            "payment_for": _combo_options("PAYMENT_FOR", order_by_label=True),
             "invoice_status": _combo_options("INVOICE_STATUS"),
         })
     except Exception:
@@ -205,10 +249,19 @@ def search_invoices():
     search_val_to = request.args.get('search_val_to') or None
 
     try:
-        return jsonify({"data": _fetch_invoices(search_by, search_val, search_val_to)})
+        return jsonify({
+            "data": _fetch_invoices(search_by, search_val, search_val_to),
+            "company_name": get_company_name(),
+            "printed_by": session.get('username', ''),
+        })
     except Exception:
         current_app.logger.exception("Espay invoice search error")
-        return jsonify({"data": [], "message": "Failed to load invoice data."}), 500
+        return jsonify({
+            "data": [],
+            "company_name": "",
+            "printed_by": "",
+            "message": "Failed to load invoice data.",
+        }), 500
 
 @espay_bp.route('/invoice/contract')
 @login_required
@@ -323,7 +376,7 @@ def create_invoice():
     if not lease_no or not payment_for:
         return jsonify({"message": "Contract No. and Payment For are required."}), 400
 
-    od_period = '' if payment_for == 'ET' else (data.get('od_period') or '')
+    od_period = '' if payment_for in ('ET', 'FC') else (data.get('od_period') or '')
 
     payload = {
         "lease_no": lease_no,
@@ -376,6 +429,17 @@ def create_multiple_invoices():
     ok, message = _espay_post("/SendInvoiceForm", payload)
     return jsonify({"message": message}), (200 if ok else 502)
 
+_THIN_SIDE = Side(style='thin', color='FF000000')
+_ALL_BORDERS = Border(top=_THIN_SIDE, bottom=_THIN_SIDE, left=_THIN_SIDE, right=_THIN_SIDE)
+_TITLE_FONT = Font(bold=True, size=16)
+_HEADER_FONT = Font(bold=True)
+_CENTER = Alignment(horizontal='center', vertical='center')
+_RIGHT = Alignment(horizontal='right')
+_NUM_FMT = '#,##0'
+
+_EXPORT_COLUMNS = ["No.", "Invoice/ Due/ ET Date", "Contract No.", "Customer Name",
+                   "Amount", "Expired Date", "Payment Type", "Period", "Status", "Payment Date"]
+
 @espay_bp.route('/invoice/export')
 @login_required
 def export_invoices():
@@ -389,24 +453,62 @@ def export_invoices():
         wb = openpyxl.Workbook()
         ws = wb.active
         ws.title = "ESPAY Invoice"
-        headers = ["No.", "Invoice/Due/ET Date", "Contract No.", "Customer Name",
-                   "Amount", "Expired Date", "Payment Type", "Period", "Status", "Payment Date"]
-        ws.append(headers)
 
-        for i, row in enumerate(rows, start=1):
-            amount = row["tot_amt"]
-            try:
-                amount = float(amount)
-            except (TypeError, ValueError):
-                pass
-            ws.append([
-                i, row["invoice_date"], row["contract_no"], row["customer_name"],
-                amount, row["expired_date"], row["payment_type"],
-                row["period"], row["invoice_status"], row["payment_date"],
-            ])
+        last_col = get_column_letter(len(_EXPORT_COLUMNS))
 
-        for col_idx in range(1, len(headers) + 1):
+        ws['A1'] = get_company_name()
+        ws[f'{last_col}1'] = f"Date : {datetime.now().strftime('%d-%m-%Y')}\nPrint By : {session.get('username', '')}"
+        ws[f'{last_col}1'].alignment = Alignment(wrap_text=True, horizontal='left', vertical='top')
+        ws.row_dimensions[1].height = 30
+
+        ws.merge_cells('A2:D2')
+        ws['A2'] = 'ESPAY Invoice'
+        ws['A2'].font = _TITLE_FONT
+        ws['A2'].alignment = _CENTER
+
+        ws.merge_cells('A3:D3')
+        ws['A3'] = _criteria_label(search_by, search_val, search_val_to)
+
+        row_num = 5
+        for col_idx, label in enumerate(_EXPORT_COLUMNS, start=1):
+            cell = ws.cell(row=row_num, column=col_idx, value=label)
+            cell.border = _ALL_BORDERS
+            cell.alignment = _CENTER
+            cell.font = _HEADER_FONT
+        row_num += 1
+
+        if not rows:
+            ws.merge_cells(f'A{row_num}:{last_col}{row_num}')
+            cell = ws[f'A{row_num}']
+            cell.value = 'Data Not Found'
+            cell.font = Font(color='FFFF0000', bold=True)
+            cell.alignment = _CENTER
+        else:
+            for i, row in enumerate(rows, start=1):
+                amount = row["tot_amt"]
+                try:
+                    amount = float(amount)
+                except (TypeError, ValueError):
+                    pass
+                values = [
+                    i, row["invoice_date"], row["contract_no"], row["customer_name"],
+                    amount, row["expired_date"], row["payment_type"],
+                    row["period"], row["invoice_status"], row["payment_date"],
+                ]
+                for col_idx, val in enumerate(values, start=1):
+                    cell = ws.cell(row=row_num, column=col_idx, value=val)
+                    cell.border = _ALL_BORDERS
+                    if col_idx == 1:
+                        cell.alignment = _CENTER
+                    elif col_idx == 5:
+                        cell.alignment = _RIGHT
+                        if isinstance(val, float):
+                            cell.number_format = _NUM_FMT
+                row_num += 1
+
+        for col_idx in range(1, len(_EXPORT_COLUMNS) + 1):
             ws.column_dimensions[get_column_letter(col_idx)].width = 18
+        ws.column_dimensions[last_col].width = 22
 
         buffer = io.BytesIO()
         wb.save(buffer)

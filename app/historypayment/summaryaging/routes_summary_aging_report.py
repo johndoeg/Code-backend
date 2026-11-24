@@ -127,18 +127,23 @@ def export_pdf():
 
 def _fmt_num(v) -> str:
     try:
-        n = float(v or 0)
-        if n != int(n):
-            return f'{n:,.2f}'
-        return f'{int(n):,}'
+        return f'{int(round(float(v or 0))):,}'
     except (TypeError, ValueError):
         return str(v or '')
+
+def _fmt_pct(v) -> str:
+    try:
+        n = float(v or 0)
+    except (TypeError, ValueError):
+        return str(v or '')
+    return f'{n:,.4f}'.rstrip('0').rstrip('.') or '0'
 
 _MARGIN   = 8 * mm
 _USABLE_W = landscape(A3)[0] - 2 * _MARGIN
 _BRANCH_W = 26 * mm
 _DATA_W   = (_USABLE_W - _BRANCH_W) / 24
 _FS       = 5.3
+_LINE_W   = 0.5
 
 def _footer(canvas, doc):
     canvas.saveState()
@@ -167,20 +172,17 @@ def _build_pdf(rows: list[dict], asof: str, company: str = '') -> bytes:
                              fontSize=_FS, fontName='Helvetica-Bold',
                              alignment=TA_CENTER, leading=_FS + 1)
 
-    GREY  = colors.HexColor('#e8eef5')
-    GREY2 = colors.HexColor('#f4f7fb')
     BLACK = colors.black
-    WHITE = colors.white
 
     def P(txt):
         return Paragraph(str(txt), head_s)
 
     def _ts(header_rows=2, num_from_col=1):
         return TableStyle([
-            ('BACKGROUND',     (0, 0), (-1, header_rows - 1), GREY),
             ('FONTNAME',       (0, 0), (-1, header_rows - 1), 'Helvetica-Bold'),
             ('FONTSIZE',       (0, 0), (-1, -1), _FS),
-            ('GRID',           (0, 0), (-1, -1), 0.3, BLACK),
+            ('GRID',           (0, 0), (-1, -1), _LINE_W, BLACK),
+            ('BOX',            (0, 0), (-1, -1), _LINE_W, BLACK),
             ('ALIGN',          (0, 0), (-1, header_rows - 1), 'CENTER'),
             ('ALIGN',          (0, header_rows), (num_from_col - 1, -1), 'LEFT'),
             ('ALIGN',          (num_from_col, header_rows), (-1, -1), 'RIGHT'),
@@ -189,8 +191,6 @@ def _build_pdf(rows: list[dict], asof: str, company: str = '') -> bytes:
             ('RIGHTPADDING',   (0, 0), (-1, -1), 2),
             ('TOPPADDING',     (0, 0), (-1, -1), 1.5),
             ('BOTTOMPADDING',  (0, 0), (-1, -1), 1.5),
-            ('ROWBACKGROUNDS', (0, header_rows), (-1, -2), [WHITE, GREY2]),
-            ('BACKGROUND',     (0, -1), (-1, -1), GREY),
             ('FONTNAME',       (0, -1), (-1, -1), 'Helvetica-Bold'),
         ])
 
@@ -231,7 +231,7 @@ def _build_pdf(rows: list[dict], asof: str, company: str = '') -> bytes:
             tot_row += [value_fn(None, f, cat) for f in FIELDS]
         data.append(tot_row)
 
-        t = Table(data, colWidths=col_w, repeatRows=2)
+        t = Table(data, colWidths=col_w, repeatRows=2, hAlign='LEFT')
         st = _ts(2)
         st.add(*branch_span)
         for sp in bucket_spans:
@@ -254,10 +254,10 @@ def _build_pdf(rows: list[dict], asof: str, company: str = '') -> bytes:
     for r in rows:
         t3_data.append([
             r.get('BRANCH_NAME', ''),
-            _fmt_num(r.get('tot_acc', 0)), _fmt_num(r.get('acc_persen', 0)),
-            _fmt_num(r.get('tot_amt', 0)), _fmt_num(r.get('amt_persen', 0)),
-            _fmt_num(r.get('tot_op', 0)),  _fmt_num(r.get('op_persen', 0)),
-            _fmt_num(r.get('tot_ar', 0)),  _fmt_num(r.get('ar_persen', 0)),
+            _fmt_num(r.get('tot_acc', 0)), _fmt_pct(r.get('acc_persen', 0)),
+            _fmt_num(r.get('tot_amt', 0)), _fmt_pct(r.get('amt_persen', 0)),
+            _fmt_num(r.get('tot_op', 0)),  _fmt_pct(r.get('op_persen', 0)),
+            _fmt_num(r.get('tot_ar', 0)),  _fmt_pct(r.get('ar_persen', 0)),
         ])
     t3_data.append([
         'Total',
@@ -272,13 +272,13 @@ def _build_pdf(rows: list[dict], asof: str, company: str = '') -> bytes:
     t3 = Table(t3_data,
                colWidths=[30 * mm, 24 * mm, 14 * mm, 30 * mm, 14 * mm,
                           40 * mm, 14 * mm, 30 * mm, 14 * mm],
-               repeatRows=2)
+               repeatRows=2, hAlign='LEFT')
     t3.setStyle(t3_style)
 
     def _cmp(r, f, cat):
         if r is None:
-            return _fmt_num(_safe_pct(tots[f'{f}_{cat}'], tot_out[f]))
-        return _fmt_num(r.get(f'{f}_{cat}_tot'))
+            return _fmt_pct(_safe_pct(tots[f'{f}_{cat}'], tot_out[f]))
+        return _fmt_pct(r.get(f'{f}_{cat}_tot'))
 
     t4 = _bucket_table(PERIODS_1, CATS_1, _cmp)
     t5 = _bucket_table(PERIODS_2, CATS_2, _cmp)
