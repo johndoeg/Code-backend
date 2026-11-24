@@ -21,23 +21,9 @@ from .summary_aging_excel import (
     _KEYS_T1, _KEYS_T2, _KEYS_CMO,
 )
 from app.utils.helpers.settings_helpers import company_name as get_company_name
+from app.utils.helpers.shared_helpers import _exec_sp
 
 summary_aging_bp = Blueprint('summary_aging', __name__, url_prefix='/SummaryAging')
-
-def _exec_sp(sp_name: str, params: list) -> list[dict]:
-    placeholders = ', '.join(['?'] * len(params))
-    sql          = f"EXEC {sp_name} {placeholders}"
-    raw_conn     = db.session.connection().connection
-    cursor       = raw_conn.cursor()
-    try:
-        cursor.execute(sql, params)
-        while cursor.description is None:
-            if not cursor.nextset():
-                return []
-        columns = [col[0] for col in cursor.description]
-        return [dict(zip(columns, row)) for row in cursor.fetchall()]
-    finally:
-        cursor.close()
 
 @summary_aging_bp.route('/combo')
 @login_required

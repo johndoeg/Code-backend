@@ -6,6 +6,7 @@ from app import db
 from app.auth.decorators import login_required
 from sqlalchemy import text
 from app.utils.helpers.base_format import fmt_date
+from app.utils.helpers.shared_helpers import _calc_as_of
 
 master_data_deviation_dp_view_bp = Blueprint('master_data_deviation_dp_view', __name__, url_prefix='/MasterData')
 
@@ -14,26 +15,6 @@ _ALLOWED_MIME_TYPES = {
     'image/x-png', 'image/png', 'image/bmp',
 }
 MAX_FILE_SIZE = 2_000_000
-
-def _calc_as_of():
-    
-    today = date.today()
-    year = today.year
-    year_plus1 = year + 1
-    year_minus1 = year - 1
-
-    range1_start = date(year, 8, 1)
-    range1_end = date(year_plus1, 1, 31)
-
-    range2_start = date(year, 2, 1)
-    range2_end = date(year, 7, 31)
-
-    if range1_start <= today <= range1_end:
-        return f"30 Juni {year}", date(year, 6, 30)
-    elif range2_start <= today <= range2_end:
-        return f"31 Desember {year_minus1}", date(year_minus1, 12, 31)
-    else:
-        return "", None
 
 @master_data_deviation_dp_view_bp.route('/deviation-dp/npf-info')
 @login_required

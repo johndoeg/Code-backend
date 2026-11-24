@@ -14,6 +14,7 @@ from app.utils.helpers.aws_helpers import (
 from app.utils.helpers.base_format import (
     _username, _branch, _emp_id, _to_bit, _strip_non_digit, fmt_date, parse_date, as_of_date, can_edit, format_threshold, get_combo
 )
+from app.utils.helpers.shared_helpers import _cleanup_ocr_for_nik
 
 prechecking_corporate_bp = Blueprint("prechecking_corporate", __name__, url_prefix="/CAM/Prechecking")
 
@@ -697,35 +698,6 @@ _OCR_DOC_TYPE_RE = re.compile(r"^(corp-ocr-ktp|wna-corp-board)_[A-Za-z0-9]+$")
 
 def _is_ocr_doc_type(document_type: str) -> bool:
     return bool(_OCR_DOC_TYPE_RE.match(document_type or ""))
-
-def _cleanup_ocr_for_nik(prechecking_id: str, nik: str) -> None:
-   
-    if not nik:
-        return
-
-    ocr_row = db.session.execute(
-        text("""
-            SELECT Id FROM TEMP_CAFLESS_OCR WITH(NOLOCK)
-            WHERE Prechecking_Id = :pid AND NIK = :nik AND ISNULL(OCR_For, '') <> 'H'
-        """),
-        {"pid": prechecking_id, "nik": nik},
-    ).fetchone()
-    if not ocr_row:
-        return
-
-    ocr_id = ocr_row.Id
-    db.session.execute(
-        text("DELETE FROM TEMP_CAFLESS_OCR_Rate WHERE Id = :id"),
-        {"id": ocr_id},
-    )
-    db.session.execute(
-        text("DELETE FROM TEMP_CAFLESS_OCR_Dukcapil WHERE Id = :id"),
-        {"id": ocr_id},
-    )
-    db.session.execute(
-        text("DELETE FROM TEMP_CAFLESS_OCR WHERE Id = :id"),
-        {"id": ocr_id},
-    )
 
 @prechecking_corporate_bp.route("/upload-document-corporate", methods=["POST"])
 @login_required

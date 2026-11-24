@@ -2,16 +2,9 @@ from flask import Blueprint, jsonify, request, current_app, session
 from app import db
 from app.auth.decorators import login_required
 from sqlalchemy import text
+from app.utils.helpers.shared_helpers import _get_session_ctx
 
 onhand_cam_bp = Blueprint("onhand_cam_bp", __name__, url_prefix="/CAM")
-
-def _get_session_ctx() -> dict:
-    return {
-        "emp_id":       session.get("emp_id", ""),
-        "username":     session.get("username", ""),
-        "access_level": session.get("accesslevel", ""),
-        "branch_cd":    session.get("branchcode", ""),
-    }
 
 def _call_onhand_sp(emp_id: str, username: str, offset: int, end: int,
                     order: str, search_by: str, search_val: str):
@@ -241,8 +234,12 @@ def send_cam():
     if not appl_nos:
         return jsonify({"success": False, "message": "No items selected"}), 400
 
+    if not isinstance(appl_nos, list) or not all(isinstance(a, str) for a in appl_nos):
+        return jsonify({"success": False, "message": "Invalid items selected"}), 400
+
     if multiple:
-        in_clause = ", ".join(f"'{a}'" for a in appl_nos)
+        in_params = {f"appl_{i}": a for i, a in enumerate(appl_nos)}
+        in_clause = ", ".join(f":{k}" for k in in_params)
         try:
             row = db.session.execute(
                 text(f"""
@@ -265,7 +262,8 @@ def send_cam():
                         INNER JOIN cafdisbacc    zz             ON zz.APPL_NO = a.APPL_NO
                     WHERE b.APPL_NO IN ({in_clause})
                       AND zz.SPLIT = 'Dealer'
-                """)
+                """),
+                in_params,
             ).scalar()
 
             if row != 1:

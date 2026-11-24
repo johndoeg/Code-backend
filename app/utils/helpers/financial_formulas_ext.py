@@ -7,6 +7,7 @@ from typing import List, Optional, Sequence
 from app.utils.helpers import financial_formulas as ff
 
 from .php_compat import number_format, php_float
+from app.utils.helpers.shared_helpers import pangkat
 
 ADVANCE = "V"
 ARREARS = "R"
@@ -21,9 +22,6 @@ def _at(values: Sequence, index: int) -> float:
     if index < 0 or index >= len(values):
         return 0.0
     return php_float(values[index])
-
-def pangkat(x: float, n: float) -> float:
-    return math.exp(n * math.log(x))
 
 def calc_flat_rental_1000(
     op: float,

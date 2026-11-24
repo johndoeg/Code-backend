@@ -6,28 +6,9 @@ from flask import Blueprint, jsonify, request, session, current_app
 
 from app import db
 from app.auth.decorators import login_required
+from app.utils.helpers.shared_helpers import _exec_rows, _exec_write, _num
 
 edit_cam_by_ma_bp = Blueprint('edit_cam_by_ma', __name__, url_prefix='/CAM/Edit')
-
-def _exec_rows(sql: str, params: list) -> list[dict]:
-    raw_conn = db.session.connection().connection
-    cursor = raw_conn.cursor()
-    try:
-        cursor.execute(sql, params)
-        if cursor.description is None:
-            return []
-        columns = [col[0] for col in cursor.description]
-        return [dict(zip(columns, row)) for row in cursor.fetchall()]
-    finally:
-        cursor.close()
-
-def _exec_write(sql: str, params: list) -> None:
-    raw_conn = db.session.connection().connection
-    cursor = raw_conn.cursor()
-    try:
-        cursor.execute(sql, params)
-    finally:
-        cursor.close()
 
 def _parse_date(raw: str) -> Optional[date]:
     raw = (raw or '').strip()
@@ -39,11 +20,6 @@ def _parse_date(raw: str) -> Optional[date]:
         except ValueError:
             continue
     return None
-
-def _num(val) -> float:
-    if val is None:
-        return 0.0
-    return float(val)
 
 def _fetch_revisions(appl_nos: list[str]) -> dict[str, str]:
     if not appl_nos:

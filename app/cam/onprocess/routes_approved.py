@@ -5,18 +5,11 @@ from flask import Blueprint, jsonify, request, current_app, session
 from app import db
 from app.auth.decorators import login_required
 from sqlalchemy import text
+from app.utils.helpers.shared_helpers import _get_session_ctx
 
 approved_cam_bp = Blueprint("approved_cam_bp", __name__, url_prefix="/CAM")
 
 HQ_APPROVER_LEVELS = ("CRH", "CRDH", "DR", "PD", "ODH")
-
-def _get_session_ctx() -> dict:
-    return {
-        "emp_id":       session.get("emp_id", ""),
-        "username":     session.get("username", ""),
-        "access_level": session.get("accesslevel", ""),
-        "branch_cd":    session.get("branchcode", ""),
-    }
 
 def _months_ago(d: date, months: int) -> date:
     month = d.month - months

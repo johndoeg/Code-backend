@@ -66,7 +66,9 @@ def get_menu_rights():
 @uacc_bp.route('/uacc/save', methods=['POST'])
 @login_required
 def save_uacc():
-    
+    if str(session.get("accesslevel", "")).strip().upper() != "ADMIN":
+        return jsonify({"success": False, "message": "Forbidden"}), 403
+
     body      = request.get_json()
     accesscam = (body.get('accesscam') or '').strip()
     rights    = body.get('rights', [])

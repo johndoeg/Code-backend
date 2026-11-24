@@ -7,6 +7,7 @@ from sqlalchemy import text
 from app import db
 from models.customer_document import CustomerDocument
 from app.utils.helpers.aws_helpers import build_key, upload_fileobj, delete_object, _validate_file, _aws_presign
+from app.utils.helpers.shared_helpers import _record_upload_audit_log
 
 S3_KEY_NAMESPACE = "customer-documents"
 
@@ -22,9 +23,6 @@ def get_lessee_category(apless: str) -> Optional[str]:
         {"apless": apless},
     ).first()
     return row.Lessee_Cat if row else None
-
-def _record_upload_audit_log(username: str, applno: str, apless: str, document_type: str, file_name: str) -> None:
-    pass
 
 def upload_customer_document(
     file_storage,

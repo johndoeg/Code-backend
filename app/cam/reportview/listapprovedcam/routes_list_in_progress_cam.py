@@ -32,6 +32,12 @@ from app.utils.helpers.base_format import (
     write_report_header,
 )
 from app.utils.helpers.settings_helpers import company_name as get_company_name
+from app.utils.helpers.shared_helpers import (
+    _build_common_filter,
+    _render_rows_html,
+    _resolve_scope,
+    _row_to_detail,
+)
 
 in_progress_cam_bp = Blueprint('in_progress_cam', __name__, url_prefix='/CAM/Approved')
 
@@ -39,55 +45,6 @@ PAGE_SIZE = 100
 
 _PASSENGER_MODELS = ['01', '02', '03']
 _COMMERCIAL_MODELS = ['04', '05', '06', '07', '08', '09', '10']
-
-def _resolve_scope(requested_branch: str) -> dict:
-    access_level = _access_level()
-    emp_id = _emp_id()
-    own_branch_cd = _branch()
-    is_ho = (own_branch_cd == '100')
-
-    branch = (requested_branch or '000') if is_ho else own_branch_cd
-
-    if access_level == 'CMO':
-        cmo_filter = [emp_id]
-    elif access_level == 'CMH':
-        cmo_filter = fetch_subordinate_ids(emp_id)
-    else:
-        cmo_filter = None
-
-    return {
-        'disabled': not is_ho,
-        'branch': branch,
-        'cmo_filter': cmo_filter,
-        'show_all_branches': branch == '000',
-    }
-
-def _build_common_filter(scope: dict, start_date: Optional[date], end_date: Optional[date],
-                          lessee_nm: str) -> tuple[str, list]:
-    clauses = []
-    params: list = []
-
-    if scope['cmo_filter'] is not None:
-        placeholders = ','.join('?' for _ in scope['cmo_filter'])
-        clauses.append(f"a.CMO IN ({placeholders})")
-        params.extend(scope['cmo_filter'])
-
-    if not scope['show_all_branches'] and scope['branch']:
-        clauses.append("a.BRANCH_CD = ?")
-        params.append(scope['branch'])
-
-    if start_date and end_date:
-        clauses.append("CAST(a.CREATE_DATE AS DATE) >= ? AND CAST(a.CREATE_DATE AS DATE) <= ?")
-        params.append(start_date)
-        params.append(end_date)
-
-    if lessee_nm:
-        clauses.append("b.LESSEE_NM LIKE ?")
-        params.append(f"%{lessee_nm}%")
-
-    if not clauses:
-        return "1=1", []
-    return " AND ".join(clauses), params
 
 _OUTS_SUBQUERY = """
 INNER JOIN (
@@ -144,42 +101,6 @@ def _fetch_date_range(where_sql: str, params: list) -> tuple[Optional[date], Opt
         return None, None
     min_dt, max_dt = rows[0].get('min_dt'), rows[0].get('max_dt')
     return (min_dt.date() if min_dt else None), (max_dt.date() if max_dt else None)
-
-def _edit_link_params(r: dict) -> dict:
-    cons_leas = (r.get('Cons_Leas') or '').strip()
-    fin_type = cons_leas or None
-    guarantor = 2 if r.get('HAS_GUARANTOR') == '1' else 1
-    ind_cor = 2 if r.get('LESSEE_TP') == 'PT' else 1
-    c2c = 1 if str(r.get('SUPP')) == '999999' else 0
-    condition = (r.get('CONDITION') or '').strip()
-    new_car = 2 if condition == 'NEW' else 1
-
-    return {
-        'id1': fin_type, 'id2': ind_cor, 'id3': 1, 'id4': guarantor, 'id5': new_car,
-        'id6': 'Edit', 'id7': r.get('TENOR'), 'id8': c2c,
-        'apless': r.get('APLESS'), 'applno': r.get('APPL_NO'),
-    }
-
-def _row_to_detail(r: dict, no: int, revision: str) -> dict:
-    create_date = r.get('CREATE_DATE')
-    brand = (r.get('BRAND_NM') or '').strip()
-    type_nm = (r.get('TYPE_NM') or '').strip()
-    return {
-        'no': no,
-        'cam_no': f"{r.get('Cons_Leas')} - {r.get('APPL_NO')}{revision}",
-        'appl_no': r.get('APPL_NO'),
-        'customer_name': r.get('LESSEE_NM') or '-',
-        'brand_type': f"{brand} / {type_nm}" if (brand or type_nm) else '-',
-        'net_finance': num(r.get('Net_Finance')),
-        'total_outstanding': num(r.get('tot_outs')),
-        'interest': round(num(r.get('DECLRATE')), 4),
-        'tenor': int(num(r.get('TENOR'))),
-        'create_date': create_date.strftime('%d-%m-%Y') if create_date else '',
-        'cmo': r.get('cmo') or '-',
-        'status': r.get('approver') or '-',
-        'is_revision': bool(revision),
-        'edit_link_params': _edit_link_params(r),
-    }
 
 _GRANDTOTAL_BASE = """
 SELECT ISNULL(SUM(v.Net_Finance), 0) AS tot_fin, ISNULL(COUNT(a.APPL_NO), 0) AS tot_unit
@@ -465,28 +386,6 @@ table {{ border-collapse: collapse; }}
     </table>
 </body>
 </html>"""
-
-def _render_rows_html(rows: list[dict]) -> str:
-    if not rows:
-        return ('<tr><td colspan="11" align="center" style="border:thin solid #000">'
-                '<font color="red"><b>Data Not Found</b></font></td></tr>')
-    parts = []
-    for d in rows:
-        parts.append(f"""
-            <tr>
-                <td style="border:thin solid #000" align="center">{d['no']}</td>
-                <td style="border:thin solid #000">{d['cam_no']}</td>
-                <td style="border:thin solid #000">{d['customer_name']}</td>
-                <td style="border:thin solid #000">{d['brand_type']}</td>
-                <td style="border:thin solid #000" align="right">{d['net_finance']:,.0f}</td>
-                <td style="border:thin solid #000" align="right">{d['total_outstanding']:,.0f}</td>
-                <td style="border:thin solid #000" align="right">{d['interest']:.4f}</td>
-                <td style="border:thin solid #000" align="center">{d['tenor']}</td>
-                <td style="border:thin solid #000">{d['create_date']}</td>
-                <td style="border:thin solid #000">{d['cmo']}</td>
-                <td style="border:thin solid #000">{d['status']}</td>
-            </tr>""")
-    return ''.join(parts)
 
 def _render_segment_rows_html(grand_totals: dict) -> str:
     parts = []

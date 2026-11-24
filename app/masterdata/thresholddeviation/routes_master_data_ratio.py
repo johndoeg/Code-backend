@@ -4,6 +4,7 @@ from app import db
 from app.auth.decorators import login_required
 from sqlalchemy import text
 from app.utils.helpers.base_format import fmt_date, as_of_date, format_threshold, get_combo
+from app.utils.helpers.shared_helpers import _fetch_ratio_rows, _ratio_title
 
 master_data_ratio_bp = Blueprint('master_data_ratio', __name__, url_prefix='/MasterData')
 
@@ -381,59 +382,6 @@ def delete(record_id: int):
         db.session.rollback()
         current_app.logger.exception("Delete error")
         return jsonify({"error": str(e)}), 500
-
-def _fetch_ratio_rows(ratio: str, tahun: str) -> list:
-    rows = db.session.execute(
-        text("""
-            SELECT
-                a.Ratio                                                       AS ratio_val,
-                i.DESC_VALUE                                                  AS remark_desc,
-                a.Remark                                                      AS remark_val,
-                a.As_Of,
-                CASE WHEN a.Ratio IN ('1','5') THEN z.DESC_VALUE ELSE CAST(a.Actual_From AS VARCHAR(20)) END AS actual_from,
-                CASE WHEN a.Ratio IN ('1','5') THEN x.DESC_VALUE ELSE CAST(a.Actual_To   AS VARCHAR(20)) END AS actual_to,
-                CASE WHEN a.Ratio IN ('1','5') THEN d.DESC_VALUE ELSE CAST(a.Thresholder_Level_From AS VARCHAR(20)) END AS ojk_from,
-                CASE WHEN a.Ratio IN ('1','5') THEN e.DESC_VALUE ELSE CAST(a.Threshold_Level_To     AS VARCHAR(20)) END AS ojk_to,
-                f.fullname AS created_by,
-                a.Created_Date,
-                g.fullname AS update_by,
-                a.Update_Date
-            FROM Ratio a WITH(NOLOCK)
-                LEFT JOIN MSTCOMBO d WITH(NOLOCK) ON d.VALUE = a.Thresholder_Level_From AND d.CAT_VALUE = 'threshold'
-                LEFT JOIN MSTCOMBO e WITH(NOLOCK) ON e.VALUE = a.Threshold_Level_To     AND e.CAT_VALUE = 'threshold'
-                LEFT JOIN MSTCOMBO z WITH(NOLOCK) ON z.VALUE = a.Actual_From            AND z.CAT_VALUE = 'threshold'
-                LEFT JOIN MSTCOMBO x WITH(NOLOCK) ON x.VALUE = a.Actual_To              AND x.CAT_VALUE = 'threshold'
-                LEFT JOIN MSTCOMBO i WITH(NOLOCK) ON i.VALUE = a.Remark                 AND i.CAT_VALUE = 'REMARK_THRS'
-                LEFT JOIN APP_USRMST f WITH(NOLOCK) ON f.employee_id = a.Created_By
-                LEFT JOIN APP_USRMST g WITH(NOLOCK) ON g.employee_id = a.Update_By
-            WHERE a.Ratio = :ratio AND YEAR(a.As_Of) = :tahun
-            ORDER BY a.As_Of
-        """),
-        {"ratio": ratio, "tahun": int(tahun)}
-    ).fetchall()
-
-    result = []
-    for r in rows:
-        update_by   = r.update_by   or "-"
-        update_date = fmt_date(r.Update_Date, "%d-%m-%Y") or "-"
-        result.append({
-            "as_of":        fmt_date(r.As_Of, "%B %Y"),
-            "remark_desc":  r.remark_desc or "",
-            "actual":       format_threshold(r.ratio_val, r.remark_val, r.actual_from or "", r.actual_to   or ""),
-            "ojk":          format_threshold(r.ratio_val, r.remark_val, r.ojk_from    or "", r.ojk_to      or ""),
-            "created_by":   r.created_by   or "",
-            "created_date": fmt_date(r.Created_Date, "%d-%m-%Y"),
-            "update_by":    update_by,
-            "update_date":  update_date,
-        })
-    return result
-
-def _ratio_title(ratio: str) -> str:
-    row = db.session.execute(
-        text("SELECT DESC_VALUE FROM MSTCOMBO WITH(NOLOCK) WHERE CAT_VALUE = 'RATIO' AND VALUE = :v"),
-        {"v": ratio}
-    ).fetchone()
-    return row.DESC_VALUE if row else ratio
 
 @master_data_ratio_bp.route('/actual-ratio/print')
 @login_required

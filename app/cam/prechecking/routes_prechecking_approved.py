@@ -3,17 +3,9 @@ from app import db
 from app.auth.decorators import login_required
 from sqlalchemy import text
 from datetime import datetime
+from app.utils.helpers.shared_helpers import format_date
 
 prechecking_approved_bp = Blueprint('approved', __name__, url_prefix='/Prechecking/Approved')
-
-def format_date(value) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, datetime):
-        if value.year == 2011:
-            return ""
-        return value.strftime("%d-%m-%Y %H:%M:%S")
-    return str(value)
 
 @prechecking_approved_bp.route('/data')
 @login_required

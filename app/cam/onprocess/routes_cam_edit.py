@@ -47,14 +47,12 @@ from app.services.cam_creation_service import (
     get_portfolio_limit_check,
     get_purpose_of_finance_options,
 )
+from app.utils.helpers.shared_helpers import _fetch_combo, _session_str
 
 cam_edit_bp = Blueprint("cam_edit", __name__, url_prefix="/CAM/EditIndex")
 
 FUND_FACILITY_LIMIT = 500_000_000
 CAPITAL_FACILITY_LIMIT = 10_000_000_000
-
-def _session_str(key: str) -> str:
-    return session.get(key, "") or ""
 
 _CAM_BLOCKED_MESSAGE = "The Application is on approval process or has finished. The Data cannot be changed"
 
@@ -101,12 +99,6 @@ def _check_cam_editable(appl_no: str):
         current_app.logger.exception("Failed to write MCMOUSERAUDIT entry for %s", appl_no)
 
     return True, _CAM_BLOCKED_MESSAGE
-
-def _fetch_combo(cat_value: str):
-    rows = db.session.execute(text(
-        "SELECT VALUE, DESC_VALUE FROM MSTCOMBO WITH(NOLOCK) WHERE CAT_VALUE = :cat"
-    ), {"cat": cat_value}).fetchall()
-    return [{"value": r.VALUE, "label": r.DESC_VALUE} for r in rows]
 
 def _fetch_purposes():
     rows = db.session.execute(text("""
@@ -955,6 +947,7 @@ def delete_survey_file():
     return jsonify({"success": True})
 
 @cam_edit_bp.route("/survey-file/download/<int:file_id>", methods=["GET"])
+@login_required
 def download_survey_file(file_id):
     row = db.session.execute(db.text("""
         SELECT AWSKey, DocumentName FROM SURVEY_FILE WHERE ID = :id
@@ -10067,9 +10060,6 @@ def validate_document_file(file_storage, max_file_size_mb: float) -> str:
             return f"File exceeds the {max_file_size_mb}MB limit."
 
     return ""
-
-def _record_upload_audit_log(username: str, applno: str, apless: str, document_type: str, file_name: str) -> None:
-    pass
 
 def list_customer_documents(applno: str, apless: str, organization_type: str) -> dict:
     docs = (

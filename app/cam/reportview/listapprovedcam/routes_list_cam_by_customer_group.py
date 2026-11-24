@@ -32,6 +32,7 @@ from app.utils.helpers.base_format import (
     write_report_header,
 )
 from app.utils.helpers.settings_helpers import company_name as get_company_name
+from app.utils.helpers.shared_helpers import _edit_link_params
 
 cam_by_cust_group_bp = Blueprint('cam_by_cust_group', __name__, url_prefix='/CAM/Approved')
 
@@ -137,20 +138,6 @@ def _fetch_date_range(where_sql: str, params: list) -> tuple[Optional[date], Opt
         return None, None
     min_dt, max_dt = rows[0].get('min_dt'), rows[0].get('max_dt')
     return (min_dt.date() if min_dt else None), (max_dt.date() if max_dt else None)
-
-def _edit_link_params(r: dict) -> dict:
-    cons_leas = (r.get('Cons_Leas') or '').strip()
-    fin_type = cons_leas or None
-    guarantor = 2 if r.get('HAS_GUARANTOR') == '1' else 1
-    ind_cor = 2 if r.get('LESSEE_TP') == 'PT' else 1
-    c2c = 1 if str(r.get('SUPP')) == '999999' else 0
-    condition = (r.get('CONDITION') or '').strip()
-    new_car = 2 if condition == 'NEW' else 1
-    return {
-        'id1': fin_type, 'id2': ind_cor, 'id3': 1, 'id4': guarantor, 'id5': new_car,
-        'id6': 'Edit', 'id7': r.get('TENOR'), 'id8': c2c,
-        'apless': r.get('APLESS'), 'applno': r.get('APPL_NO'),
-    }
 
 def _row_to_detail(r: dict, no: int, revision: str) -> dict:
     adm_date = r.get('AdmDate')

@@ -18,6 +18,7 @@ from docx.shared import Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.section import WD_ORIENT
 from docx.enum.table import WD_TABLE_ALIGNMENT
+from app.utils.helpers.shared_helpers import _exec_rows, _exec_scalar, _fmt_date
 
 blacklist_report_bp = Blueprint('blacklist_report', __name__, url_prefix='/MasterData')
 
@@ -53,28 +54,6 @@ _SELECT_COLS = """
         mw.attachment AS Attachment,
         cf.LESSEE_TP  AS LesseeType
 """
-
-def _exec_rows(sql: str, params: list) -> list[dict]:
-    raw_conn = db.session.connection().connection
-    cursor = raw_conn.cursor()
-    try:
-        cursor.execute(sql, params)
-        if cursor.description is None:
-            return []
-        columns = [col[0] for col in cursor.description]
-        return [dict(zip(columns, row)) for row in cursor.fetchall()]
-    finally:
-        cursor.close()
-
-def _exec_scalar(sql: str, params: list):
-    raw_conn = db.session.connection().connection
-    cursor = raw_conn.cursor()
-    try:
-        cursor.execute(sql, params)
-        row = cursor.fetchone()
-        return row[0] if row else 0
-    finally:
-        cursor.close()
 
 def _resolve_status(existing: str, deleted: str) -> Optional[str]:
    
@@ -123,11 +102,6 @@ def _query_blacklist(as_of, searchby, searchbytext, reason_cat, existing, delete
 
     rows = _exec_rows(data_sql, data_params)
     return total, rows
-
-def _fmt_date(val) -> str:
-    if isinstance(val, (date, datetime)):
-        return val.strftime('%d-%m-%Y')
-    return str(val) if val is not None else ''
 
 def _serialize_row(r: dict, no: int) -> dict:
     lessee_type = (r.get('LesseeType') or '').strip()

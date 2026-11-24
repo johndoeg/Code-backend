@@ -107,7 +107,7 @@ def _fetch(branch: str, lessee_nm: str, search_no: str,
     where_sql, params = _where(branch, lessee_nm, search_no)
 
     if want_all:
-        sql = f"{_SELECT}{where_sql} ORDER BY LastUpdate DESC"
+        sql = f"{_SELECT}{where_sql} ORDER BY LastUpdate DESC, ApplNo"
         rows = db.session.execute(text(sql), params).mappings().all()
         return _serialize(rows), len(rows)
 
@@ -116,7 +116,7 @@ def _fetch(branch: str, lessee_nm: str, search_no: str,
         FROM (
             {_SELECT}{where_sql}
         ) t
-        ORDER BY LastUpdate DESC
+        ORDER BY LastUpdate DESC, ApplNo
         OFFSET :offset ROWS FETCH NEXT :limit ROWS ONLY
     """
     params = {**params, "offset": (page - 1) * limit, "limit": limit}

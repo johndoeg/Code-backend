@@ -5,6 +5,7 @@ from flask import Blueprint, jsonify, request, current_app, session
 
 from app import db
 from app.auth.decorators import login_required
+from app.utils.helpers.shared_helpers import _exec_rows
 
 history_incentive_3rd_party_bp = Blueprint('history_incentive_3rd_party', __name__, url_prefix='/CAM/Incentive')
 
@@ -21,18 +22,6 @@ def _month_name(month_num) -> str:
     if 1 <= n <= 12:
         return _INDO_MONTHS[n - 1]
     return str(n)
-
-def _exec_rows(sql: str, params: list) -> list[dict]:
-    raw_conn = db.session.connection().connection
-    cursor = raw_conn.cursor()
-    try:
-        cursor.execute(sql, params)
-        if cursor.description is None:
-            return []
-        columns = [col[0] for col in cursor.description]
-        return [dict(zip(columns, row)) for row in cursor.fetchall()]
-    finally:
-        cursor.close()
 
 @history_incentive_3rd_party_bp.route('/history-incentive-3rd-party-report/branches')
 @login_required

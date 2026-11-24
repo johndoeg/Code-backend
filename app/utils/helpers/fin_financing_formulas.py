@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP, InvalidOperation
 from typing import Optional, Sequence
+from app.utils.helpers.shared_helpers import pangkat
 
 LOOP_GUARD = 200000
 
@@ -78,10 +79,6 @@ def substr6(value) -> float:
         return float(text)
     except ValueError:
         return 0.0
-
-
-def pangkat(x: float, n: float) -> float:
-    return math.exp(n * math.log(x))
 
 
 def fv(rate: float = 0, nper: float = 0, pmt_: float = 0, pv_: float = 0, type_: int = 0) -> float:

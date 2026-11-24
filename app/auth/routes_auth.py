@@ -18,6 +18,8 @@ auth_bp = Blueprint('auth', __name__)
 PIN_LENGTH = 6
 PIN_EXPIRY_MINUTES = 5
 MAX_PIN_ATTEMPTS = 3
+MAX_LOGIN_FAILURES = 10
+LOGIN_FAILURE_WINDOW_SECONDS = 900
 OTP_REQUEST_TYPE = 'CAM'
 
 OTP_CAM_SETTING_KEY = 'otp_cam'
@@ -25,6 +27,9 @@ OTP_ON_VALUES = ('1', 'y', 'yes', 'true', 'on')
 
 TELEGRAM_TIMEOUT = (3.05, 5)
 TELEGRAM_SLOW_WARN_SECONDS = 3.0
+
+_login_failures: dict[str, list[float]] = {}
+_pin_failures: dict[int, int] = {}
 
 _telegram_http = requests.Session()
 _telegram_http.mount("https://", HTTPAdapter(pool_connections=4, pool_maxsize=8))
@@ -176,6 +181,20 @@ def login():
         if not username or not password:
             return jsonify({"message": "Username and password required"}), 400
 
+        fail_key = username.lower()
+        now_ts = time.time()
+        recent_failures = [
+            t for t in _login_failures.get(fail_key, [])
+            if now_ts - t < LOGIN_FAILURE_WINDOW_SECONDS
+        ]
+        if recent_failures:
+            _login_failures[fail_key] = recent_failures
+        else:
+            _login_failures.pop(fail_key, None)
+        if len(recent_failures) >= MAX_LOGIN_FAILURES:
+            _insert_audit_log(username, "Login blocked - too many failed attempts")
+            return jsonify({"message": "Too many failed attempts. Please try again later."}), 429
+
         dev_bypass = (
             current_app.config.get("ENV_NAME") != "production"
             and is_dev_login_bypass_enabled()
@@ -212,6 +231,7 @@ def login():
         user = result.fetchone()
 
         if not user:
+            _login_failures.setdefault(fail_key, []).append(now_ts)
             _insert_audit_log(username, "Login failed")
             return jsonify({"message": "Username/Password incorrect"}), 401
 
@@ -231,6 +251,7 @@ def login():
             for key in [k for k in session.keys() if k.startswith('pending_')]:
                 session.pop(key, None)
             _start_session(db_username, emp_id, accesscam, branchcode, branch_call, full_name, branch_name)
+            _login_failures.pop(fail_key, None)
             _insert_audit_log(db_username, "Login")
             return jsonify({
                 "message": "Login successful",
@@ -277,7 +298,7 @@ def login():
         session['pending_fullname']     = full_name
         session['pending_branch_name']  = branch_name
         session['pending_otp_id']       = otp_id
-        session['pending_pin_attempts'] = 0
+        _pin_failures[otp_id] = 0
 
         _insert_audit_log(db_username, "Login step 1 successful - PIN sent")
 
@@ -310,8 +331,10 @@ def verify_pin():
         if not submitted_pin or len(submitted_pin) != PIN_LENGTH:
             return jsonify({"message": f"Please enter the {PIN_LENGTH}-digit PIN"}), 400
 
-        attempts = session.get('pending_pin_attempts', 0)
+        attempts = _pin_failures.get(otp_id, 0)
         if attempts >= MAX_PIN_ATTEMPTS:
+            _pin_failures.pop(otp_id, None)
+            _discard_otp(otp_id)
             _insert_audit_log(pending_username, "Login failed - too many PIN attempts")
             session.clear()
             return jsonify({"message": "Too many incorrect attempts. Please log in again."}), 400
@@ -327,17 +350,31 @@ def verify_pin():
         """), {"otp_id": otp_id, "request_type": OTP_REQUEST_TYPE, "id_no": id_no}).fetchone()
 
         if not row:
+            _pin_failures.pop(otp_id, None)
             return jsonify({"message": "No PIN found. Please log in again."}), 400
 
         _, stored_pin, expiry_date = row
 
         if expiry_date and datetime.now() > expiry_date:
+            _pin_failures.pop(otp_id, None)
+            _discard_otp(otp_id)
             return jsonify({"message": "PIN has expired. Please log in again."}), 400
 
-        if submitted_pin != stored_pin:
-            session['pending_pin_attempts'] = attempts + 1
+        if not secrets.compare_digest(submitted_pin, str(stored_pin or "")):
+            _pin_failures[otp_id] = attempts + 1
+            _login_failures.setdefault(pending_username.lower(), []).append(time.time())
+            if attempts + 1 >= MAX_PIN_ATTEMPTS:
+                _pin_failures.pop(otp_id, None)
+                _discard_otp(otp_id)
+                _insert_audit_log(pending_username, "Login failed - too many PIN attempts")
+                session.clear()
+                return jsonify({"message": "Too many incorrect attempts. Please log in again."}), 400
             _insert_audit_log(pending_username, "Login failed - incorrect PIN")
             return jsonify({"message": "Incorrect PIN"}), 401
+
+        _pin_failures.pop(otp_id, None)
+        _discard_otp(otp_id)
+        _login_failures.pop(pending_username.lower(), None)
 
         _start_session(
             pending_username,
@@ -351,7 +388,6 @@ def verify_pin():
         session.pop('pending_username', None)
         session.pop('pending_id_no', None)
         session.pop('pending_otp_id', None)
-        session.pop('pending_pin_attempts', None)
 
         _insert_audit_log(pending_username, "Login")
 

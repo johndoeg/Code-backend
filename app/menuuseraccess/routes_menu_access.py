@@ -73,6 +73,9 @@ def get_parent_options():
 @menu_user_access_bp.route('/menu', methods=['POST'])
 @login_required
 def save_menu():
+    if str(session.get("accesslevel", "")).strip().upper() != "ADMIN":
+        return jsonify({"success": False, "message": "Forbidden"}), 403
+
     data        = request.get_json()
     menu_parent = (data.get('menu_parent') or '').strip()
     menu_desc   = (data.get('menu_desc')   or '').strip()
@@ -165,7 +168,9 @@ def get_menu_detail(menu_id):
 @menu_user_access_bp.route('/menu/<path:menu_id>', methods=['PUT'])
 @login_required
 def update_menu(menu_id):
-  
+    if str(session.get("accesslevel", "")).strip().upper() != "ADMIN":
+        return jsonify({"success": False, "message": "Forbidden"}), 403
+
     data      = request.get_json()
     menu_desc = (data.get('menu_desc') or '').strip()
     url       = (data.get('url')       or '').strip()
@@ -193,7 +198,9 @@ def update_menu(menu_id):
 @menu_user_access_bp.route('/menu/<path:menu_id>', methods=['DELETE'])
 @login_required
 def delete_menu(menu_id):
-   
+    if str(session.get("accesslevel", "")).strip().upper() != "ADMIN":
+        return jsonify({"success": False, "message": "Forbidden"}), 403
+
     try:
         children = db.session.execute(
             text("SELECT menu_id FROM APP_CAMMNLST WHERE menu_parent = :pid"),

@@ -6,22 +6,12 @@ from app.utils.helpers.aws_helpers import copy_object, _aws_presign
 from datetime import datetime
 from flask import Blueprint, request, jsonify, current_app, session
 from sqlalchemy import text
+from app.utils.helpers.shared_helpers import _clean_row, _truthy_bit
 
 cam_bp = Blueprint('cam', __name__, url_prefix='/CAM')
 
 _USED_ONLY_FIN_TYPES = ('S', 'D', 'M', 'W')
 _CONTRACT_TYPE_FIN_TYPES = ('D', 'M', 'W')
-
-def _truthy_bit(value) -> bool:
-    return value not in (None, "", 0, "0", False)
-
-def _clean_db_value(value):
-    if isinstance(value, str) and value.strip().upper() == "NULL":
-        return None
-    return value
-
-def _clean_row(mapping) -> dict:
-    return {k: _clean_db_value(v) for k, v in dict(mapping).items()}
 
 def _resolve_company_type(id_card: str, apless: str, prechecking_id) -> tuple:
     debug: dict = {}
@@ -650,6 +640,7 @@ def get_data_customer():
         }), 500
 
 @cam_bp.route('/init', methods=['GET'])
+@login_required
 def init_cam():
     try:
         purpose_result = db.session.execute(

@@ -6,6 +6,7 @@ from sqlalchemy import text
 from app import db
 from app.auth.decorators import login_required
 from app.utils.helpers.prechecking_ocr import load_person_ocr
+from app.utils.helpers.shared_helpers import _session_str
 
 try:
     from app.utils.helpers.telegram_helpers import send_telegram  # type: ignore
@@ -25,9 +26,6 @@ MARITAL_LABELS = {
     "O": "Married without Certificate",
     "P": "Married with Prenuptial Agreement",
 }
-
-def _session_str(key: str) -> str:
-    return session.get(key, "") or ""
 
 def _field(payload: dict, form, *keys):
     for k in keys:

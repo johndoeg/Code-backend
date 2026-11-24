@@ -13,6 +13,19 @@ from app.utils.helpers.prechecking_documents import (
     save_prechecking_document,
     remove_prechecking_document,
 )
+from app.utils.helpers.shared_helpers import (
+    _bit,
+    _carro,
+    _carry_source,
+    _citizen_of,
+    _clear_person,
+    _dob_to_display,
+    _dob_to_sql,
+    _has_document,
+    _s,
+    _save_wna_person,
+    _wna_signature,
+)
 
 prechecking_edit_pr_bp = Blueprint("prechecking_edit_pr", __name__, url_prefix="/Prechecking/EditPR")
 
@@ -47,39 +60,6 @@ DUKCAPIL_KEYS = [f[0] for f in PERSON_FIELDS if f[3]]
 _COL = {f[0]: f[1] for f in PERSON_FIELDS}
 _LABEL = {f[0]: f[2] for f in PERSON_FIELDS}
 
-def _s(value) -> str:
-    return "" if value is None else str(value).strip()
-
-def _bit(value) -> int:
-    if isinstance(value, bool):
-        return 1 if value else 0
-    return 1 if _s(value) in ("True", "true", "1") else 0
-
-def _carro(value) -> int:
-    return 1 if _s(value) in ("1", "True", "true") else 0
-
-def _dob_to_sql(value):
-    v = _s(value)
-    if not v:
-        return None
-    try:
-        return datetime.strptime(v, "%d-%m-%Y").strftime("%Y-%m-%d")
-    except ValueError:
-        return None
-
-def _dob_to_display(value) -> str:
-    if value is None or value == "":
-        return ""
-    if isinstance(value, (datetime, date)):
-        return value.strftime("%d-%m-%Y")
-    v = _s(value)
-    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y"):
-        try:
-            return datetime.strptime(v[:19] if fmt.endswith("%S") else v[:10], fmt).strftime("%d-%m-%Y")
-        except ValueError:
-            continue
-    return v
-
 def _norm_id_type(value, citizen: str) -> str:
     if citizen != "WNA":
         return "KTP"
@@ -88,13 +68,6 @@ def _norm_id_type(value, citizen: str) -> str:
 
 def _doc_prefix(check_for: str) -> str:
     return "guarantor" if check_for == "G" else "cust"
-
-def _has_document(prechecking_id: str, document_type: str) -> bool:
-    row = db.session.execute(text("""
-        SELECT TOP 1 CustomerDocumentId FROM TEMP_CUSTOMER_DOCUMENT WITH(NOLOCK)
-        WHERE Prechecking_Id = :pid AND DocumentType = :dt
-    """), {"pid": prechecking_id, "dt": document_type}).fetchone()
-    return row is not None
 
 def _marital_codes() -> set:
     try:
@@ -139,22 +112,6 @@ _SPOUSE_KTP_META = {
 
 class CarryOverError(Exception):
     pass
-
-def _carry_source(carried):
-    if not isinstance(carried, list):
-        return None
-    for item in carried:
-        doc_id = item.get("customer_document_id") if isinstance(item, dict) else None
-        if not doc_id:
-            continue
-        src = db.session.execute(text("""
-            SELECT CustomerDocumentId, DocumentName, AWSKey, OrganizationType, Prechecking_Id
-            FROM TEMP_CUSTOMER_DOCUMENT WITH(NOLOCK)
-            WHERE CustomerDocumentId = :id
-        """), {"id": doc_id}).fetchone()
-        if src and src.AWSKey:
-            return src
-    return None
 
 def _carry_spouse_ktp(prechecking_id: str, apless: str, target_type: str, src) -> list:
     name_prefix, subfolder = _SPOUSE_KTP_META.get(
@@ -222,11 +179,6 @@ def _fetch_person(prechecking_id: str, ocr_for: str):
     row = db.session.execute(text(_FETCH_PERSON_SQL), {"pid": prechecking_id, "ocr_for": ocr_for}).fetchone()
     return dict(row._mapping) if row else None
 
-def _citizen_of(rec) -> str:
-    if not rec:
-        return ""
-    return "WNA" if _s(rec.get("Citizen")).upper() == "WNA" else "WNI"
-
 def _record_values(rec) -> dict:
     values = {key: _s(rec.get(col)) for key, col in _COL.items()}
     values["dateOfBirth"] = _dob_to_display(rec.get("Tgl_Lahir"))
@@ -285,9 +237,6 @@ def _wni_signature(values: dict, conf: dict, ver: dict, photo: str, signature: s
     sig["signature"] = signature
     return sig
 
-def _wna_signature(name, id_no, id_type) -> dict:
-    return {"citizen": "WNA", "id_type": id_type, "idCardNo": _s(id_no), "name": _s(name)}
-
 def _db_signature(rec):
     if not rec:
         return None
@@ -327,19 +276,6 @@ def _validate_person(prefix: str, label: str, person: dict) -> dict:
         if value and not _RTRW_RE.match(value):
             errors[f"{prefix}.{key}"] = f"{label} {_LABEL[key]} must be a 3-digit number (e.g. 003)"
     return errors
-
-def _delete_ocr_ids(ids) -> None:
-    for ocr_id in ids:
-        db.session.execute(text("DELETE FROM TEMP_CAFLESS_OCR_Dukcapil WHERE Id = :id"), {"id": ocr_id})
-        db.session.execute(text("DELETE FROM TEMP_CAFLESS_OCR_Rate WHERE Id = :id"), {"id": ocr_id})
-        db.session.execute(text("DELETE FROM TEMP_CAFLESS_OCR WHERE Id = :id"), {"id": ocr_id})
-
-def _clear_person(prechecking_id: str, ocr_for: str, keep_id=None) -> None:
-    rows = db.session.execute(text("""
-        SELECT Id FROM TEMP_CAFLESS_OCR WITH(NOLOCK)
-        WHERE Prechecking_Id = :pid AND OCR_For = :ocr_for
-    """), {"pid": prechecking_id, "ocr_for": ocr_for}).fetchall()
-    _delete_ocr_ids([r.Id for r in rows if r.Id != keep_id])
 
 def _save_wni_person(prechecking_id: str, ocr_for: str, ocr_id, block: dict, marital: str) -> None:
     person = block.get("person") or {}
@@ -430,27 +366,6 @@ def _save_wni_person(prechecking_id: str, ocr_for: str, ocr_id, block: dict, mar
                  :subdistrict, :district, :city, :province, :job)
         """), duk)
 
-    _clear_person(prechecking_id, ocr_for, keep_id=ocr_id)
-
-def _save_wna_person(prechecking_id: str, ocr_for: str, ocr_id, name: str, id_no: str,
-                     id_type: str, marital: str) -> None:
-    params = {"pid": prechecking_id, "ocr_for": ocr_for, "name": name, "nik": id_no,
-              "id_type": id_type, "marital": marital}
-    if ocr_id:
-        db.session.execute(text("""
-            UPDATE TEMP_CAFLESS_OCR SET
-                Citizen = 'WNA', Kewarnegaraan = 'WNA', Id_Type = :id_type,
-                Nama = :name, NIK = :nik, Status_Perkawinan = :marital, UpdatedDate = GETDATE()
-            WHERE Id = :id
-        """), {**params, "id": ocr_id})
-    else:
-        ocr_id = db.session.execute(text("""
-            INSERT INTO TEMP_CAFLESS_OCR
-                (Prechecking_Id, OCR_For, Citizen, Kewarnegaraan, Id_Type, Nama, NIK,
-                 Status_Perkawinan, UpdatedDate)
-            OUTPUT INSERTED.Id
-            VALUES (:pid, :ocr_for, 'WNA', 'WNA', :id_type, :name, :nik, :marital, GETDATE())
-        """), params).fetchone().Id
     _clear_person(prechecking_id, ocr_for, keep_id=ocr_id)
 
 @prechecking_edit_pr_bp.route("/get-data", methods=["GET"])

@@ -6,17 +6,9 @@ from datetime import datetime, date
 
 from flask import Blueprint, request, jsonify, current_app, session
 from sqlalchemy import text
+from app.utils.helpers.shared_helpers import _fetch_combo, _session_str, _strip_special
 
 cam_customer_bp = Blueprint("cam_customer", __name__, url_prefix="/CAM/Customer")
-
-def _session_str(key: str) -> str:
-    return session.get(key, "") or ""
-
-def _fetch_combo(cat_value: str):
-    rows = db.session.execute(text(
-        "SELECT VALUE, DESC_VALUE FROM MSTCOMBO WITH(NOLOCK) WHERE CAT_VALUE = :cat"
-    ), {"cat": cat_value}).fetchall()
-    return [{"value": r.VALUE, "label": r.DESC_VALUE} for r in rows]
 
 def _normalize_phone(phone: str) -> str:
     if not phone:
@@ -638,9 +630,6 @@ CORPORATE_REQUIRED_FIELDS_MESSAGES = [
 ]
 
 CORPORATE_PHONE_FIELDS = ["phone1", "mobilePhone1", "mobilePhone2", "mobilePhone3", "otherPhone1", "otherPhone2"]
-
-def _strip_special(value: str) -> str:
-    return re.sub(r"[^a-zA-Z0-9]", "", value or "")
 
 @cam_customer_bp.route("/corporate-detail", methods=["GET"])
 @login_required

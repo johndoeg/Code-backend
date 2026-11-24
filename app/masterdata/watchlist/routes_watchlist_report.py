@@ -18,6 +18,7 @@ from docx.shared import Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.section import WD_ORIENT
 from docx.enum.table import WD_TABLE_ALIGNMENT
+from app.utils.helpers.shared_helpers import _exec_rows, _exec_scalar, _fmt_date, _format_npwp
 
 watchlist_report_bp = Blueprint('watchlist_report', __name__, url_prefix='/MasterData')
 
@@ -52,28 +53,6 @@ _SELECT_COLS = """
         mw.attachment AS Attachment,
         cf.LESSEE_TP  AS LesseeType
 """
-
-def _exec_rows(sql: str, params: list) -> list[dict]:
-    raw_conn = db.session.connection().connection
-    cursor = raw_conn.cursor()
-    try:
-        cursor.execute(sql, params)
-        if cursor.description is None:
-            return []
-        columns = [col[0] for col in cursor.description]
-        return [dict(zip(columns, row)) for row in cursor.fetchall()]
-    finally:
-        cursor.close()
-
-def _exec_scalar(sql: str, params: list):
-    raw_conn = db.session.connection().connection
-    cursor = raw_conn.cursor()
-    try:
-        cursor.execute(sql, params)
-        row = cursor.fetchone()
-        return row[0] if row else 0
-    finally:
-        cursor.close()
 
 def _resolve_status(existing: str, deleted: str) -> Optional[str]:
     existing_on = bool(existing)
@@ -117,11 +96,6 @@ def _query_watchlist(as_of, searchby, searchbytext, existing, deleted,
 
     rows = _exec_rows(data_sql, data_params)
     return total, rows
-
-def _fmt_date(val) -> str:
-    if isinstance(val, (date, datetime)):
-        return val.strftime('%d-%m-%Y')
-    return str(val) if val is not None else ''
 
 def _serialize_row(r: dict, no: int) -> dict:
     lessee_type = (r.get('LesseeType') or '').strip()
@@ -523,12 +497,6 @@ _PT_ORG_DOC_LABELS = {
         'Surat Kuasa Asli dari Direktur',
     ],
 }
-
-def _format_npwp(npwp: Optional[str]) -> str:
-    if not npwp:
-        return '-'
-    return (f"{npwp[0:2]}.{npwp[2:5]}.{npwp[5:8]}.{npwp[8:9]}"
-            f"-{npwp[9:12]}.{npwp[12:16]}")
 
 def _address_block(address, city, zipcode, phone, fax):
     if not address:

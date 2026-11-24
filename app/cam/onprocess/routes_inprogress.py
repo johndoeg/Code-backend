@@ -2,16 +2,9 @@ from flask import Blueprint, jsonify, request, current_app, session
 from app import db
 from app.auth.decorators import login_required
 from sqlalchemy import text
+from app.utils.helpers.shared_helpers import _get_session_ctx
 
 inprogress_cam_bp = Blueprint("inprogress_cam_bp", __name__, url_prefix="/CAM")
-
-def _get_session_ctx() -> dict:
-    return {
-        "emp_id":       session.get("emp_id", ""),
-        "username":     session.get("username", ""),
-        "access_level": session.get("accesslevel", ""),
-        "branch_cd":    session.get("branchcode", ""),
-    }
 
 def _build_list_query(username: str, search_by: str, search_val: str):
     params = {"username": username}

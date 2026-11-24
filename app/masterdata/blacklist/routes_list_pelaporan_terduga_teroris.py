@@ -4,6 +4,7 @@ from datetime import date, datetime
 from flask import Blueprint, jsonify, request, current_app
 from app import db
 from app.auth.decorators import login_required
+from app.utils.helpers.shared_helpers import _exec_rows
 
 ttot_report_bp = Blueprint('ttot_report', __name__, url_prefix='/MasterData')
 
@@ -26,18 +27,6 @@ _TTOT_QUERY = """
     GROUP BY tt.ID_BLACKLIST, vv.Name, xx.NAME, vv.Address
     ORDER BY vv.Name ASC
 """
-
-def _exec_rows(sql: str, params: list) -> list[dict]:
-    raw_conn = db.session.connection().connection
-    cursor = raw_conn.cursor()
-    try:
-        cursor.execute(sql, params)
-        if cursor.description is None:
-            return []
-        columns = [col[0] for col in cursor.description]
-        return [dict(zip(columns, row)) for row in cursor.fetchall()]
-    finally:
-        cursor.close()
 
 def _parse_date(raw: str, field_name: str) -> date:
     raw = (raw or '').strip()

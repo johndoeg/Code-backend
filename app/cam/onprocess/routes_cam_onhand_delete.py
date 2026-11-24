@@ -27,7 +27,11 @@ def delete_cam(appl_no):
 
         upload_root = current_app.config.get("CAM_UPLOAD_PATH")
         if upload_root and apless:
-            pattern = os.path.join(upload_root, apless, f"{appl_no}*.*")
+            root_dir = os.path.realpath(upload_root)
+            cam_dir = os.path.realpath(os.path.join(root_dir, apless))
+            if cam_dir == root_dir or os.path.commonpath([root_dir, cam_dir]) != root_dir:
+                return jsonify({"success": False, "message": "Invalid request."}), 400
+            pattern = os.path.join(glob.escape(cam_dir), f"{glob.escape(appl_no)}*.*")
             for file_path in glob.glob(pattern):
                 try:
                     os.remove(file_path)

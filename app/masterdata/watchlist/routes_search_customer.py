@@ -4,23 +4,12 @@ from flask import Blueprint, jsonify, request, current_app
 
 from app import db
 from app.auth.decorators import login_required
+from app.utils.helpers.shared_helpers import _exec_rows
 
 customer_lookup_bp = Blueprint('customer_lookup', __name__, url_prefix='/MasterData')
 
 _VALID_LESSEE_TYPES = {'PR', 'PT'}
 _MAX_RESULTS = 100
-
-def _exec_rows(sql: str, params: list) -> list[dict]:
-    raw_conn = db.session.connection().connection
-    cursor = raw_conn.cursor()
-    try:
-        cursor.execute(sql, params)
-        if cursor.description is None:
-            return []
-        columns = [col[0] for col in cursor.description]
-        return [dict(zip(columns, row)) for row in cursor.fetchall()]
-    finally:
-        cursor.close()
 
 @customer_lookup_bp.route('/customers')
 @login_required

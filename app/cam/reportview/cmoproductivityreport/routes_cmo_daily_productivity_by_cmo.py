@@ -6,29 +6,9 @@ from flask import Blueprint, jsonify, request, current_app, session
 
 from app import db
 from app.auth.decorators import login_required
+from app.utils.helpers.shared_helpers import _exec_rows, _parse_date
 
 cmo_daily_productivity_by_cmo_bp = Blueprint('cmo_daily_productivity_by_cmo', __name__, url_prefix='/CAM/CMO')
-
-def _exec_rows(sql: str, params: list) -> list[dict]:
-    raw_conn = db.session.connection().connection
-    cursor = raw_conn.cursor()
-    try:
-        cursor.execute(sql, params)
-        if cursor.description is None:
-            return []
-        columns = [col[0] for col in cursor.description]
-        return [dict(zip(columns, row)) for row in cursor.fetchall()]
-    finally:
-        cursor.close()
-
-def _parse_date(raw: str) -> Optional[date]:
-    raw = (raw or '').strip()
-    if not raw:
-        return None
-    try:
-        return datetime.strptime(raw, '%Y-%m-%d').date()
-    except ValueError:
-        return None
 
 CONSOLIDATE_BRANCH = {'branch_cd': '000', 'branch_name': 'Consolidate'}
 

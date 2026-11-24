@@ -13,22 +13,12 @@ from urllib.parse import urlparse
 
 import mimetypes
 from urllib.parse import quote
+from app.utils.helpers.shared_helpers import _clean_db_value, _clean_row, _truthy_bit
 
 STREAM_CHUNK = 64 * 1024
 UPSTREAM_TIMEOUT = 30
 
 view_prechecking_bp = Blueprint("view_prechecking", __name__, url_prefix="/Prechecking/View")
-
-def _clean_db_value(value):
-    if isinstance(value, str) and value.strip().upper() == "NULL":
-        return None
-    return value
-
-def _clean_row(mapping) -> dict:
-    return {k: _clean_db_value(v) for k, v in dict(mapping).items()}
-
-def _truthy_bit(value) -> bool:
-    return value not in (None, "", 0, "0", False)
 
 def _tf(val):
     if val is None:

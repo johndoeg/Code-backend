@@ -8,6 +8,7 @@ from datetime import date, datetime
 
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from app.utils.helpers.shared_helpers import _apply
 
 pending_contract_delete_bp = Blueprint("pending_contract_delete", __name__, url_prefix="/CAM/Others")
 
@@ -21,12 +22,6 @@ _FONT_DATA   = Font(name="Tahoma", size=10)
 _FILL_HEADER = PatternFill("solid", fgColor="D9E1F2")
 
 MAX_PAGE_SIZE = 200
-
-def _apply(cell, font=None, alignment=None, border=None, fill=None):
-    if font:      cell.font      = font
-    if alignment: cell.alignment = alignment
-    if border:    cell.border    = border
-    if fill:      cell.fill      = fill
 
 def _is_admin() -> bool:
     return session.get("branchcode", "") == "100"

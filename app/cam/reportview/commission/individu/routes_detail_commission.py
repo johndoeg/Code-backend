@@ -6,85 +6,9 @@ from flask import Blueprint, jsonify, request, current_app
 
 from app import db
 from app.auth.decorators import login_required
+from app.utils.helpers.shared_helpers import _exec_rows, _fetch_sales, _fmt_value, _parse_date
 
 commission_individual_detail_bp = Blueprint('commission_individual_detail', __name__, url_prefix='/CAM/Commission')
-
-def _exec_rows(sql: str, params: list) -> list[dict]:
-    raw_conn = db.session.connection().connection
-    cursor = raw_conn.cursor()
-    try:
-        cursor.execute(sql, params)
-        if cursor.description is None:
-            return []
-        columns = [col[0] for col in cursor.description]
-        return [dict(zip(columns, row)) for row in cursor.fetchall()]
-    finally:
-        cursor.close()
-
-def _parse_date(raw: str) -> Optional[date]:
-    raw = (raw or '').strip()
-    if not raw:
-        return None
-    try:
-        return datetime.strptime(raw, '%Y-%m-%d').date()
-    except ValueError:
-        return None
-
-def _fmt_value(val):
-    if isinstance(val, (date, datetime)):
-        return val.strftime('%d-%m-%Y')
-    return val
-
-def _fetch_sales(as_of: date, search: str) -> list[dict]:
-    first_date = date(as_of.year, 1, 1)
-
-    where = [
-        "d.NPWP_Type IN ('PR', '00')",
-        "c.Category = 'SALES'",
-        "d.Category = 'SALES'",
-        "c.AccountType = 'C'",
-        "e.EXECUTION IS NOT NULL",
-        "a.SD_TYPE = 'S'",
-        "e.EXECUTION BETWEEN ? AND ?",
-    ]
-    params: list = [first_date, as_of]
-
-    top_clause = ""
-    if search:
-        where.append("b.NAME LIKE ?")
-        params.append(f"%{search}%")
-    else:
-        top_clause = "TOP 200"
-
-    sql = f"""
-        SELECT {top_clause}
-            c.BeneficiaryID AS RegNo,
-            'Individual' AS Type,
-            b.NAME AS CommRecvName,
-            b.ADDRESS AS CommRecvAddress,
-            d.NPWP_Start AS Npwp,
-            ISNULL(d.NPWP_No, '') AS NpwpNumber
-        FROM CAFKOMIS a WITH (NOLOCK)
-            INNER JOIN CLFSALES b WITH (NOLOCK) ON a.SALES_NO = b.SALES_NO
-            INNER JOIN BeneficiaryAccount c ON b.SALES_NO = c.BeneficiaryID
-            INNER JOIN BeneficiaryTax d ON b.SALES_NO = d.BeneficiaryID
-            INNER JOIN CLFCONT e ON a.APPL_NO = e.APPL_NO
-        WHERE {' AND '.join(where)}
-        GROUP BY c.BeneficiaryID, b.NAME, b.ADDRESS, d.NPWP_Start, d.NPWP_No
-        ORDER BY b.NAME
-    """
-    rows = _exec_rows(sql, params)
-    return [
-        {
-            'reg_no': r.get('RegNo'),
-            'type': r.get('Type'),
-            'name': r.get('CommRecvName') or '-',
-            'address': r.get('CommRecvAddress') or '-',
-            'npwp': _fmt_value(r.get('Npwp')),
-            'npwp_number': r.get('NpwpNumber') or '-',
-        }
-        for r in rows
-    ]
 
 @commission_individual_detail_bp.route('/commission-detail-report/sales')
 @login_required

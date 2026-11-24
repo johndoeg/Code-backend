@@ -13,6 +13,7 @@ from app.utils.helpers.ahing_query import (
     save_blacklist_image, save_general_attachment, delete_blacklist_file,
 )
 from app.utils.helpers.base_format import fmt_date
+from app.utils.helpers.shared_helpers import _lookup_apless, _strip_special, _validate_members
 
 blacklist_bp = Blueprint('blacklist', __name__, url_prefix='/MasterData')
 
@@ -24,9 +25,6 @@ BOD_OS_CODE = 'PT02'
 BOC_OS_CODE = 'PT03'
 BOD_OTHER_VALUE = '5'
 BOC_OTHER_VALUE = '10'
-
-def _strip_special(value: str) -> str:
-    return re.sub(r'[^a-zA-Z0-9]', '', value or '')
 
 def _parse_date(raw: str, errors: list):
     raw = (raw or '').strip()
@@ -41,13 +39,6 @@ def _parse_date(raw: str, errors: list):
         errors.append("DOB / Establishment Date not valid")
         return None
     return parsed
-
-def _lookup_apless(name: str, address: str) -> str:
-    row = db.session.execute(
-        text("SELECT apless FROM cafless WITH(NOLOCK) WHERE LESSEE_NM LIKE :name AND [address1] LIKE :address"),
-        {"name": name, "address": address}
-    ).fetchone()
-    return row.apless if row and row.apless else "nonMLCI"
 
 def _validate_core(data: dict, customer_type: str) -> tuple:
     errors = []
@@ -69,16 +60,6 @@ def _validate_core(data: dict, customer_type: str) -> tuple:
     est = _parse_date(data.get('establishment_date'), errors) if customer_type == 'PT' else None
 
     return errors, dob, est
-
-def _validate_members(members: list) -> list:
-    errors = []
-    for entry in members:
-        name = (entry.get('name') or '').strip()
-        if not name:
-            continue
-        if not (entry.get('bod_position') or '').strip() and not (entry.get('boc_position') or '').strip():
-            errors.append(f"BOD or BOC position must be selected for {name}")
-    return errors
 
 def _member_image(files, index: int, blacklist_name: str, member_name: str, apless: str, errors: list):
     file = files.get(f'member_image_{index}')

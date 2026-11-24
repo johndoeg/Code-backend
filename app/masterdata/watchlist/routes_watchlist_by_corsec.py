@@ -9,6 +9,7 @@ from flask import Blueprint, jsonify, request, current_app, session
 
 from app import db
 from app.auth.decorators import login_required
+from app.utils.helpers.shared_helpers import _exec_rows, _parse_date
 
 watchlist_by_corsec_bp = Blueprint('watchlist_by_corsec', __name__, url_prefix='/MasterData')
 
@@ -19,18 +20,6 @@ MAX_ATTACHMENT_SIZE = 2_000_000
 SEARCH_BY_ID_CARD = '1'
 SEARCH_BY_NAME = '2'
 SEARCH_BY_NPWP = '3'
-
-def _exec_rows(sql: str, params: list) -> list[dict]:
-    raw_conn = db.session.connection().connection
-    cursor = raw_conn.cursor()
-    try:
-        cursor.execute(sql, params)
-        if cursor.description is None:
-            return []
-        columns = [col[0] for col in cursor.description]
-        return [dict(zip(columns, row)) for row in cursor.fetchall()]
-    finally:
-        cursor.close()
 
 def _exec(sql: str, params: list) -> None:
     raw_conn = db.session.connection().connection
@@ -54,21 +43,6 @@ def _fmt_date(val) -> Optional[str]:
     if isinstance(val, (date, datetime)):
         return val.strftime('%d-%m-%Y')
     return None
-
-def _parse_date(raw: str) -> Optional[date]:
-    raw = (raw or '').strip()
-    if not raw:
-        return None
-    try:
-        return datetime.strptime(raw, '%Y-%m-%d').date()
-    except ValueError:
-        return None
-
-def _format_npwp(npwp: Optional[str]) -> str:
-    if not npwp:
-        return '-'
-    return (f"{npwp[0:2]}.{npwp[2:5]}.{npwp[5:8]}.{npwp[8:9]}"
-            f"-{npwp[9:12]}.{npwp[12:16]}")
 
 def _serialize_summary(r: dict) -> dict:
     lessee_type = (r.get('customer_type') or '').strip()

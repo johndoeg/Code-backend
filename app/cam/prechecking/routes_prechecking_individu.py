@@ -15,6 +15,7 @@ from app.utils.helpers.base_format import (
     _username, _branch, _emp_id, _to_bit, _strip_non_digit,
     fmt_date, parse_date, as_of_date, can_edit, format_threshold, get_combo,
 )
+from app.utils.helpers.shared_helpers import _apless_for_prechecking, _carried_source_filename, _sql_date
 
 prechecking_individu_bp = Blueprint("prechecking_individu", __name__, url_prefix="/CAM/Prechecking")
 
@@ -29,30 +30,6 @@ def _norm_id_type(value: str, nationality: str) -> str:
         return "KTP"
     v = (value or "").strip().upper()
     return v if v in _WNA_ID_TYPES else "KITAS"
-
-def _sql_date(value: str):
-    v = (value or "").strip()
-    if not v:
-        return None
-    for fmt in ("%d-%m-%Y", "%Y-%m-%d", "%d/%m/%Y"):
-        try:
-            return datetime.strptime(v, fmt).strftime("%Y-%m-%d")
-        except ValueError:
-            continue
-    return None
-
-def _apless_for_prechecking(prechecking_id: str) -> str:
-    if not prechecking_id:
-        return ""
-    row = db.session.execute(
-        text("""
-            SELECT TOP 1 Apless FROM TEMP_CAFLESS WITH(NOLOCK)
-            WHERE Prechecking_Id = :pid AND ISNULL(Apless, '') <> ''
-            ORDER BY CreatedDate DESC
-        """),
-        {"pid": prechecking_id},
-    ).fetchone()
-    return (row.Apless or "") if row else ""
 
 def _auto_carry_missing_document(prechecking_id: str, apless: str, username: str,
                                  dtype: str, cust_nik: str = "", debug: list = None) -> bool:
@@ -169,10 +146,6 @@ def _auto_carry_missing_document(prechecking_id: str, apless: str, username: str
     )
     _dbg("DONE -> carried")
     return True
-
-def _carried_source_filename(source_name: str) -> str:
-    stripped = re.sub(r"^[^-]*-[A-Z0-9_]+-", "", source_name or "", count=1)
-    return stripped or (source_name or "document")
 
 def _carry_over_documents(prechecking_id: str, apless: str, username: str, items) -> list:
     failed = []

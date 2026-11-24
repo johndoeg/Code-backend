@@ -1,5 +1,7 @@
 from flask import Blueprint, jsonify, redirect, request, session
 
+from app.auth.decorators import login_required
+
 from app.services.customer_document_service import (
     delete_customer_document,
     get_document_view_url,
@@ -7,15 +9,14 @@ from app.services.customer_document_service import (
     list_customer_documents,
     upload_customer_document,
 )
+from app.utils.helpers.shared_helpers import _current_username
 
 customer_documents_bp = Blueprint(
     "customer_documents", __name__, url_prefix="/api/cam/customer-documents"
 )
 
-def _current_username() -> str:
-    return session.get("username", "")
-
 @customer_documents_bp.get("")
+@login_required
 def get_customer_documents():
     apless = request.args.get("apless", "")
     applno = request.args.get("applno", "")
@@ -25,6 +26,7 @@ def get_customer_documents():
     return jsonify(list_customer_documents(applno, apless, organization_type))
 
 @customer_documents_bp.get("/lessee-category")
+@login_required
 def get_lessee_category_route():
     apless = request.args.get("apless", "")
     if not apless:
@@ -32,6 +34,7 @@ def get_lessee_category_route():
     return jsonify({"lessee_cat": get_lessee_category(apless)})
 
 @customer_documents_bp.post("")
+@login_required
 def post_customer_document():
     form = request.form
     apless = form.get("apless", "")
@@ -64,6 +67,7 @@ def post_customer_document():
     return jsonify({"document": doc}), 201
 
 @customer_documents_bp.delete("/<int:id_customer_document>")
+@login_required
 def delete_customer_document_route(id_customer_document: int):
     deleted = delete_customer_document(id_customer_document)
     if not deleted:
@@ -71,6 +75,7 @@ def delete_customer_document_route(id_customer_document: int):
     return jsonify({"deleted": True})
 
 @customer_documents_bp.get("/<int:id_customer_document>/download")
+@login_required
 def download_customer_document(id_customer_document: int):
     url = get_document_view_url(id_customer_document)
     if not url:
@@ -78,6 +83,7 @@ def download_customer_document(id_customer_document: int):
     return redirect(url)
 
 @customer_documents_bp.get("/<int:id_customer_document>/view")
+@login_required
 def view_customer_document(id_customer_document: int):
     url = get_document_view_url(id_customer_document)
     if not url:

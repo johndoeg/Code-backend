@@ -10,6 +10,14 @@ from flask import Blueprint, jsonify, request, current_app, session, redirect
 from app.auth.decorators import login_required
 from app.utils.helpers.aws_helpers import _aws_presign
 from sqlalchemy import text
+from app.utils.helpers.shared_helpers import (
+    _blank,
+    _doc_row,
+    build_address_block,
+    build_id_card_address,
+    join_nonempty,
+    lookup_combo_description,
+)
 
 cam_view_bp = Blueprint("cam_view", __name__, url_prefix="/CAM/View")
 
@@ -5497,12 +5505,6 @@ COMPANY_DOCUMENT_SECTIONS_BOTTOM = [
     ('corp-spk', 'SPK'),
 ]
 
-def _blank(value):
-    if value is None:
-        return '-'
-    value = str(value).strip()
-    return value if value else '-'
-
 def format_npwp(npwp):
     if not npwp:
         return '-'
@@ -5514,40 +5516,6 @@ def format_npwp(npwp):
         f"-{npwp[9:12]}.{npwp[12:15]}"
     )
 
-def join_nonempty(*values, sep=', '):
-    parts = [str(v) for v in values if v not in (None, '')]
-    return sep.join(parts) if parts else '-'
-
-def build_address_block(address, city, zipcode, phone, fax, extra_line=None):
-    if not address:
-        return None
-    line = address if not extra_line else f"{address}, {extra_line}"
-    line = f"{line}, {join_nonempty(city, zipcode, sep=' ')}"
-    contact_parts = []
-    if phone:
-        contact_parts.append(f"(P) {phone}")
-    if fax:
-        contact_parts.append(f"(F) {fax}")
-    return {
-        "address_line": line,
-        "contact_line": " - ".join(contact_parts) if contact_parts else '-',
-    }
-
-def build_id_card_address(address2, rt, rw, kelurahan2, kecamatan2, city2, zipcode2, phone1, fax1):
-    if not address2:
-        return None
-    extra = f"RT. {rt or '-'}/{rw or '-'}, {join_nonempty(kelurahan2, kecamatan2)}"
-    line = f"{address2}, {extra}, {join_nonempty(city2, zipcode2, sep=' ')}"
-    contact_parts = []
-    if phone1:
-        contact_parts.append(f"(P) {phone1}")
-    if fax1:
-        contact_parts.append(f"(F) {fax1}")
-    return {
-        "address_line": line,
-        "contact_line": " - ".join(contact_parts) if contact_parts else '-',
-    }
-
 def format_date(value):
     if value is None:
         return '-'
@@ -5555,18 +5523,6 @@ def format_date(value):
         return value.strftime('%d-%m-%Y')
     except AttributeError:
         return str(value)
-
-def lookup_combo_description(cat_value, value):
-    if not value:
-        return value
-    row = db.session.execute(
-        text(
-            "SELECT DESC_VALUE FROM MSTCOMBO WITH (NOLOCK) "
-            "WHERE CAT_VALUE = :cat_value AND [VALUE] = :value"
-        ),
-        {"cat_value": cat_value, "value": value},
-    ).mappings().first()
-    return row["DESC_VALUE"] if row else value
 
 @cam_view_bp.route('/corporate-detail')
 @login_required
@@ -5744,9 +5700,6 @@ def _fetch_document_files(apless, applno):
         })
 
     return files_by_type
-
-def _doc_row(key, label, files_by_type):
-    return {"key": key, "label": label, "files": files_by_type.get(key, [])}
 
 def _build_document_groups_corp(lessee_cat, files_by_type):
     groups = []

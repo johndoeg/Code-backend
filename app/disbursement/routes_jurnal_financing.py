@@ -1,31 +1,20 @@
-from flask import Blueprint, jsonify, request, current_app, session, make_response
-from app import db
+from flask import Blueprint, jsonify, request, current_app
 from app.auth.decorators import login_required
-import io
 from datetime import date, datetime
 
 from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-from openpyxl.utils  import get_column_letter
+from openpyxl.styles import Alignment, Border, Font, Side
+from app.utils.helpers.shared_helpers import _exec_sp, _fmt_date
+from app.utils.helpers.base_format import (
+    WRAP_TOP_LEFT,
+    _username,
+    title_font,
+    today_ddmmyyyy,
+    workbook_response,
+)
+from app.utils.helpers.settings_helpers import company_name as get_company_name
 
 jurnal_financing_bp = Blueprint('jurnal_financing', __name__, url_prefix='/JurnalFinancing')
-
-def _exec_sp(sp_name: str, params: list) -> list[dict]:
-   
-    placeholders = ', '.join(['?'] * len(params))
-    sql          = f"EXEC {sp_name} {placeholders}"
-
-    raw_conn = db.session.connection().connection
-    cursor   = raw_conn.cursor()
-    try:
-        cursor.execute(sql, params)
-        while cursor.description is None:
-            if not cursor.nextset():
-                return []
-        columns = [col[0] for col in cursor.description]
-        return [dict(zip(columns, row)) for row in cursor.fetchall()]
-    finally:
-        cursor.close()
 
 _THIN = Side(style='thin', color='000000')
 _BORDER = Border(left=_THIN, right=_THIN, top=_THIN, bottom=_THIN)
@@ -101,43 +90,29 @@ _COLUMNS = [
 
 LAST_COL = _COLUMNS[-1][0]
 
-def _fmt_date(val) -> str:
-   
-    if isinstance(val, (date, datetime)):
-        return val.strftime('%d-%m-%Y')
-    return str(val) if val is not None else ''
+def _build_excel(rows: list[dict], date_from: str, date_to: str) -> Workbook:
 
-def _build_excel(rows: list[dict], date_from: str, date_to: str,
-                 company: str, username: str) -> bytes:
-   
     wb = Workbook()
     ws = wb.active
     ws.title = 'JurnalFinancing'
 
-    ws.merge_cells(f'A1:AO1')
-    ws.merge_cells(f'A2:AO2')
-    cell_company           = ws['A2']
-    cell_company.value     = company
+    cell_company           = ws['A1']
+    cell_company.value     = get_company_name()
     cell_company.font      = Font(name='Tahoma', size=10)
-    cell_company.alignment = Alignment(horizontal='left', vertical='center')
+    cell_company.alignment = Alignment(horizontal='left', vertical='top')
 
-    ws['AP1'].value     = f'Date : {date.today().strftime("%d %b %Y")}'
-    ws['AP1'].font      = Font(name='Tahoma', size=9)
-    ws['AP1'].alignment = Alignment(horizontal='left')
+    cell_stamp             = ws[f'{LAST_COL}1']
+    cell_stamp.value       = f'Date : {today_ddmmyyyy()}\nPrint By : {_username()}'
+    cell_stamp.font        = Font(name='Tahoma', size=9)
+    cell_stamp.alignment   = WRAP_TOP_LEFT
+    ws.row_dimensions[1].height = 30
 
-    ws['AP2'].value     = f'Print By : {username}'
-    ws['AP2'].font      = Font(name='Tahoma', size=9)
-    ws['AP2'].alignment = Alignment(horizontal='left')
-
-    ws.row_dimensions[1].height = 18
-    ws.row_dimensions[2].height = 16
-
-    ws.merge_cells(f'A3:{LAST_COL}3')
-    cell_title            = ws['A3']
+    ws.merge_cells(f'A2:{LAST_COL}2')
+    cell_title            = ws['A2']
     cell_title.value      = 'JURNAL FINANCING'
-    cell_title.font       = Font(name='Tahoma', bold=True, size=12)
+    cell_title.font       = title_font(16)
     cell_title.alignment  = Alignment(horizontal='center', vertical='center')
-    ws.row_dimensions[3].height = 20
+    ws.row_dimensions[2].height = 24
 
     def _disp(d: str) -> str:
         try:
@@ -145,12 +120,12 @@ def _build_excel(rows: list[dict], date_from: str, date_to: str,
         except ValueError:
             return d
 
-    ws.merge_cells(f'A4:{LAST_COL}4')
-    cell_period            = ws['A4']
+    ws.merge_cells(f'A3:{LAST_COL}3')
+    cell_period            = ws['A3']
     cell_period.value      = f'Disbursement Date {_disp(date_from)} to {_disp(date_to)}'
     cell_period.font       = Font(name='Tahoma', size=10)
     cell_period.alignment  = Alignment(horizontal='center', vertical='center')
-    ws.row_dimensions[4].height = 16
+    ws.row_dimensions[3].height = 16
 
     ws.row_dimensions[5].height = 30
     for col_idx, (col_letter, label, _, __) in enumerate(_COLUMNS, start=1):
@@ -181,10 +156,7 @@ def _build_excel(rows: list[dict], date_from: str, date_to: str,
 
     ws.freeze_panes = 'A6'
 
-    buf = io.BytesIO()
-    wb.save(buf)
-    buf.seek(0)
-    return buf.read()
+    return wb
 
 @jurnal_financing_bp.route('/excel')
 @login_required
@@ -196,23 +168,20 @@ def export_excel():
     if not date_from or not date_to:
         return jsonify({'error': 'date_from and date_to are required'}), 400
 
-    username = session.get('username', '')
-    company  = session.get('company',  '')
+    try:
+        parsed_from = datetime.strptime(date_from, '%Y-%m-%d').date()
+        parsed_to   = datetime.strptime(date_to,   '%Y-%m-%d').date()
+    except ValueError:
+        return jsonify({'error': 'dates must be YYYY-MM-DD'}), 400
+
+    if parsed_from > parsed_to:
+        return jsonify({'error': 'date_from cannot be later than date_to'}), 400
 
     try:
-        
         rows = _exec_sp('USP_JURNAL_FINANCING', [date_from, date_to])
+        wb   = _build_excel(rows, date_from, date_to)
+        return workbook_response(wb, 'JurnalFinancing.xlsx')
 
-        xlsx_bytes = _build_excel(rows, date_from, date_to, company, username)
-        filename   = 'JurnalFinancing.xlsx'
-
-        response = make_response(xlsx_bytes)
-        response.headers['Content-Type']        = (
-            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-        )
-        response.headers['Content-Disposition'] = f'attachment; filename="{filename}"'
-        return response
-
-    except Exception as e:
+    except Exception:
         current_app.logger.exception("Jurnal Financing export error")
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': 'Failed to generate Excel'}), 500

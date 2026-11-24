@@ -15,6 +15,7 @@ from app.utils.helpers.base_format import (
     today_ddmmyyyy,
 )
 from app.utils.helpers.settings_helpers import company_name as get_company_name
+from app.utils.helpers.shared_helpers import _apply
 
 history_bpkb_submission_bp = Blueprint("history_bpkb_submission", __name__, url_prefix="/CAM/Others")
 
@@ -27,12 +28,6 @@ _FONT_DATA   = Font(name="Tahoma", size=10)
 _FILL_HEADER = PatternFill("solid", fgColor="D9E1F2")
 
 MAX_PAGE_SIZE = 200
-
-def _apply(cell, font=None, alignment=None, border=None, fill=None):
-    if font:      cell.font      = font
-    if alignment: cell.alignment = alignment
-    if border:    cell.border    = border
-    if fill:      cell.fill      = fill
 
 _MONTHS_ID = ["","Januari","Februari","Maret","April","Mei","Juni",
                "Juli","Agustus","September","Oktober","November","Desember"]

@@ -14,6 +14,22 @@ from app.utils.helpers.aws_helpers import (
 from app.utils.helpers.base_format import (
     _username, _branch, _emp_id, _to_bit, _strip_non_digit, fmt_date, parse_date, as_of_date, can_edit, format_threshold, get_combo
 )
+from app.utils.helpers.shared_helpers import (
+    _assign_doc_types,
+    _bit,
+    _carro,
+    _cleanup_ocr_for_nik,
+    _delete_doc_rows,
+    _delete_ocr_ids,
+    _delete_s3_keys,
+    _doc_types_like,
+    _docs_of_types,
+    _is_wna,
+    _ocr_for_of,
+    _retype_docs,
+    _s,
+    _token,
+)
 
 prechecking_guarantor_corporate_bp = Blueprint("prechecking_guarantor_corporate", __name__, url_prefix="/CAM/Prechecking")
 
@@ -21,34 +37,6 @@ _OCR_DOC_TYPE_RE = re.compile(r"^(corp-guarantor-ocr-ktp|wna-corp-guarantor-boar
 
 def _is_ocr_doc_type(document_type: str) -> bool:
     return bool(_OCR_DOC_TYPE_RE.match(document_type or ""))
-
-def _cleanup_ocr_for_nik(prechecking_id: str, nik: str) -> None:
-    if not nik:
-        return
-
-    ocr_row = db.session.execute(
-        text("""
-            SELECT Id FROM TEMP_CAFLESS_OCR WITH(NOLOCK)
-            WHERE Prechecking_Id = :pid AND NIK = :nik AND ISNULL(OCR_For, '') <> 'H'
-        """),
-        {"pid": prechecking_id, "nik": nik},
-    ).fetchone()
-    if not ocr_row:
-        return
-
-    ocr_id = ocr_row.Id
-    db.session.execute(
-        text("DELETE FROM TEMP_CAFLESS_OCR_Rate WHERE Id = :id"),
-        {"id": ocr_id},
-    )
-    db.session.execute(
-        text("DELETE FROM TEMP_CAFLESS_OCR_Dukcapil WHERE Id = :id"),
-        {"id": ocr_id},
-    )
-    db.session.execute(
-        text("DELETE FROM TEMP_CAFLESS_OCR WHERE Id = :id"),
-        {"id": ocr_id},
-    )
 
 _GUARANTOR_MARITAL_MAP = {
     "BELUM KAWIN": "S", "KAWIN": "M", "KAWIN TERCATAT": "M",
@@ -933,21 +921,6 @@ _DIR_REQUIRED = [f[0] for f in _DIR_FIELDS if f[0] not in ("blood_type", "religi
 _DIR_PREFIX = "corp-guarantor-ocr-ktp_"
 _WNA_PREFIX = "wna-corp-guarantor-board_"
 
-def _s(value) -> str:
-    return "" if value is None else str(value).strip()
-
-def _token(value) -> str:
-    return re.sub(r"[^A-Za-z0-9]", "", _s(value))
-
-def _bit(value) -> int:
-    if isinstance(value, bool):
-        return 1 if value else 0
-    return 1 if _s(value) in ("True", "true", "1") else 0
-
-def _carro(value) -> int:
-    return 1 if _s(value) in ("1", "True", "true") else 0
-
-
 def _marital_code(value) -> str:
     v = _s(value).upper()
     if v in _MARRIED_LABELS:
@@ -967,9 +940,6 @@ def _norm_wna_id_type(value) -> str:
     v = _s(value).upper()
     return v if v in _WNA_ID_TYPES else "KITAS"
 
-def _ocr_for_of(check_for: str) -> str:
-    return "G"
-
 def _fetch_board(prechecking_id: str, ocr_for: str) -> list:
     rate_cols = ", ".join(f"r.{c} AS r_{c}" for c in _DIR_COL.values())
     duk_cols = ", ".join(f"d.{_DIR_COL[k]} AS d_{_DIR_COL[k]}" for k in _DIR_DUK_KEYS)
@@ -986,9 +956,6 @@ def _fetch_board(prechecking_id: str, ocr_for: str) -> list:
         ORDER BY o.Id
     """), {"pid": prechecking_id, "ocr_for": ocr_for}).mappings().all()
     return [dict(r) for r in rows]
-
-def _is_wna(rec) -> bool:
-    return _s(rec.get("Citizen")).upper() == "WNA"
 
 def _rec_values(rec) -> dict:
     values = {k: _s(rec.get(c)) for k, c in _DIR_COL.items()}
@@ -1015,28 +982,6 @@ def _director_sig(values: dict, conf: dict, ver: dict, photo: str, sign: str) ->
 def _db_director_sig(rec) -> dict:
     return _director_sig(_rec_values(rec), _rec_conf(rec), _rec_ver(rec),
                          _s(rec.get("Foto")), _s(rec.get("Tanda_Tangan")))
-
-def _doc_types_like(prechecking_id: str, prefix: str) -> dict:
-    rows = db.session.execute(text("""
-        SELECT CustomerDocumentId, DocumentName, DocumentType, AWSKey
-        FROM TEMP_CUSTOMER_DOCUMENT WITH(NOLOCK)
-        WHERE Prechecking_Id = :pid AND DocumentType LIKE :pfx
-        ORDER BY CreatedDate
-    """), {"pid": prechecking_id, "pfx": prefix.replace("_", "[_]") + "%"}).fetchall()
-    out: dict = {}
-    for r in rows:
-        out.setdefault(r.DocumentType, []).append(r)
-    return out
-
-def _assign_doc_types(owner_tokens: list, prefix: str, available: dict):
-    assigned = [[f"{prefix}{t}"] if t and f"{prefix}{t}" in available else [] for t in owner_tokens]
-    used = {t for types in assigned for t in types}
-    leftover = [t for t in available if t not in used]
-    missing = [i for i, types in enumerate(assigned) if not types]
-    if len(missing) == 1 and len(leftover) == 1:
-        assigned[missing[0]] = [leftover[0]]
-        leftover = []
-    return assigned, leftover
 
 @prechecking_guarantor_corporate_bp.route("/edit-guarantor-corporate", methods=["GET"])
 @login_required
@@ -1204,12 +1149,6 @@ def _validate_director(i: int, d: dict, errors: dict) -> None:
     if _s(d.get("marital_status")) and not _marital_code(d.get("marital_status")):
         errors[f"director_{i}_marital_status"] = f"{label}: Status Perkawinan is not valid"
 
-def _delete_ocr_ids(ids) -> None:
-    for ocr_id in ids:
-        db.session.execute(text("DELETE FROM TEMP_CAFLESS_OCR_Dukcapil WHERE Id = :id"), {"id": ocr_id})
-        db.session.execute(text("DELETE FROM TEMP_CAFLESS_OCR_Rate WHERE Id = :id"), {"id": ocr_id})
-        db.session.execute(text("DELETE FROM TEMP_CAFLESS_OCR WHERE Id = :id"), {"id": ocr_id})
-
 def _save_director(prechecking_id: str, ocr_for: str, ocr_id, d: dict) -> int:
     params = {k: _s(d.get(k)) for k in _DIR_COL}
     params["dob"] = _dob_to_sql(d.get("dob"))
@@ -1310,29 +1249,6 @@ def _save_wna(prechecking_id: str, ocr_for: str, ocr_id, w: dict) -> int:
     """), params).fetchone().Id
 
 
-def _docs_of_types(prechecking_id: str, types) -> list:
-    types = [t for t in dict.fromkeys(types) if t]
-    if not types:
-        return []
-    ph = ", ".join(f":t{i}" for i in range(len(types)))
-    return db.session.execute(text(f"""
-        SELECT CustomerDocumentId, DocumentName, DocumentType, AWSKey, OrganizationType
-        FROM TEMP_CUSTOMER_DOCUMENT WITH(NOLOCK)
-        WHERE Prechecking_Id = :pid AND DocumentType IN ({ph})
-    """), {"pid": prechecking_id, **{f"t{i}": t for i, t in enumerate(types)}}).fetchall()
-
-def _delete_doc_rows(rows) -> list:
-    for r in rows:
-        db.session.execute(text("DELETE FROM TEMP_CUSTOMER_DOCUMENT WHERE CustomerDocumentId = :id"),
-                           {"id": r.CustomerDocumentId})
-    return [r.AWSKey for r in rows if r.AWSKey]
-
-def _retype_docs(prechecking_id: str, old_type: str, new_type: str) -> None:
-    if old_type and new_type and old_type != new_type:
-        db.session.execute(text("""
-            UPDATE TEMP_CUSTOMER_DOCUMENT SET DocumentType = :new
-            WHERE Prechecking_Id = :pid AND DocumentType = :old
-        """), {"pid": prechecking_id, "old": old_type, "new": new_type})
 class CorpCarryError(Exception):
     pass
 
@@ -1362,13 +1278,6 @@ def _copy_doc_into(prechecking_id: str, apless: str, target_type: str, doc_id, u
     """), {"apless": apless, "name": doc_name, "org": src.OrganizationType or "PT",
            "dt": target_type, "user": username, "key": aws_key, "pid": prechecking_id})
     return aws_key
-
-def _delete_s3_keys(keys) -> None:
-    for key in dict.fromkeys(keys):
-        try:
-            _aws_delete(key)
-        except Exception:
-            current_app.logger.exception("S3 delete failed for %s", key)
 
 def _finalize_member_docs(prechecking_id: str, apless: str, prefix: str, target_token: str,
                           staging_token: str, existing_types, carried_ids, username: str) -> list:
