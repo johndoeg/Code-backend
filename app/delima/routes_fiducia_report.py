@@ -1,12 +1,13 @@
 from flask import Blueprint, jsonify, request, current_app, session, make_response
 from app import db
 from app.auth.decorators import login_required
+from app.utils.helpers.settings_helpers import company_name as get_company_name
 from sqlalchemy import text
 
 import base64
 import zipfile
 import io
-from datetime import datetime
+from datetime import date, datetime
 
 from reportlab.lib           import colors
 from reportlab.lib.pagesizes import A4, landscape
@@ -44,68 +45,187 @@ _CERT_LABELS = {
     'fiducia_not_scan':          'List Fidusia Belum Di Scan',
 }
 
-def _build_print_pdf(cert_type: str, asof: str, rows: list[dict]) -> bytes:
+_MONTHS_ID = ['Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni',
+              'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember']
+
+_DATE_FMT      = '%d-%m-%Y'
+_DATE_PATTERNS = ('%Y-%m-%d %H:%M:%S.%f', '%Y-%m-%d %H:%M:%S', '%Y-%m-%dT%H:%M:%S',
+                  '%Y-%m-%d', '%d-%m-%Y', '%d/%m/%Y', '%d-%b-%Y', '%d-%B-%Y')
+
+_PRINT_REPORTS = {
+    'fiducia_not_accepted': {
+        'title': 'Laporan Sertifikat Fidusia Yang Belum Diterima',
+        'columns': [
+            ('No.',               None,           5),
+            ('Contract No.',      'LeaseNo',      10),
+            ('Customer Name',     'CustomerName', 25),
+            ('Disbursement Date', 'DisbDate',     10),
+            ('Cover Date',        'CoverDate',    10),
+            ('Overdue Days *',    'od',           10),
+            ('Remarks',           'Remark',       30),
+        ],
+        'notes': [
+            '* Overdue Days:',
+            'Perhitungan \u201cOverdue Days\u201d adalah sebagai berikut :',
+            '-   Kondisi \u201cDisbursement Date\u201d dan "Cover Date" terisi = Tanggal Login \u2013 Cover Date',
+            '-   Kondisi \u201cCover Date\u201d kosong = Tanggal Login \u2013 Disbursement Date',
+        ],
+    },
+    'roya_fiducia_not_accepted': {
+        'title': 'Laporan Sertifikat Roya Fidusia Yang Belum Diterima',
+        'columns': [
+            ('No.',            None,           5),
+            ('Contract No.',   'LeaseNo',      10),
+            ('Customer Name',  'CustomerName', 25),
+            ('Release Date',   'ReleaseDate',  10),
+            ('Roya Date',      'RoyaDate',     10),
+            ('Overdue Days *', 'od',           10),
+            ('Remarks',        'Remark',       30),
+        ],
+        'notes': [
+            '* Overdue Days:',
+            'Perhitungan \u201cOverdue Days\u201d adalah sebagai berikut :',
+            '-   Kondisi \u201cRelease Date\u201d dan "Roya Date" terisi = Tanggal Login \u2013 Roya Date',
+            '-   Kondisi \u201cRoya Date\u201d kosong = Tanggal Login \u2013 Release Date',
+        ],
+    },
+    'fiducia_not_scan': {
+        'title': 'List fidusia yang belum di scan',
+        'columns': [
+            ('No.',                         None,           5),
+            ('Contract No.',                'LeaseNo',      15),
+            ('Customer Name',               'CustomerName', 25),
+            ('Disbursement Date',           'DisbDate',     10),
+            ('Cover Date',                  'CoverDate',    10),
+            ('Fiducia Receive From Vendor', 'ReceiveDate',  25),
+            ('Overdue Days *',              'od',           10),
+        ],
+        'notes': [
+            '* Rumus = Tanggal Login - Fiducia Receive From Vendor',
+        ],
+    },
+}
+
+def _fmt_date(value) -> str:
+    if value in (None, ''):
+        return ''
+    if isinstance(value, datetime):
+        return value.strftime(_DATE_FMT)
+    if isinstance(value, date):
+        return value.strftime(_DATE_FMT)
+    raw = str(value).strip()
+    if not raw:
+        return ''
+    for fmt in _DATE_PATTERNS:
+        try:
+            return datetime.strptime(raw, fmt).strftime(_DATE_FMT)
+        except ValueError:
+            continue
+    return raw
+
+def _asof_label(asof: str) -> str:
+    for fmt in _DATE_PATTERNS:
+        try:
+            parsed = datetime.strptime(asof.strip(), fmt)
+        except ValueError:
+            continue
+        return f"{parsed.day:02d} {_MONTHS_ID[parsed.month - 1]} {parsed.year}"
+    return asof
+
+def _asof_sql(asof: str) -> str:
+    for fmt in _DATE_PATTERNS:
+        try:
+            return datetime.strptime(asof.strip(), fmt).strftime('%Y-%m-%d')
+        except ValueError:
+            continue
+    return asof
+
+def _branch_label(branch_cd: str) -> str:
+    if branch_cd == '100':
+        return 'Consolidate'
+    try:
+        row = db.session.execute(
+            text("""
+                SELECT a.BRANCH_NAME
+                FROM UMFBRANCH a WITH (NOLOCK)
+                INNER JOIN APP_USRMST b WITH (NOLOCK) ON a.BRANCH_CD = b.BRANCHCODE
+                WHERE a.BRANCH_CD = :branch_cd AND b.EMPLOYEE_ID = :employee
+            """),
+            {"branch_cd": branch_cd, "employee": session.get('emp_id', '')},
+        ).first()
+    except Exception:
+        current_app.logger.exception("Fiducia branch lookup error")
+        return ''
+    if not row or not row[0]:
+        return ''
+    return f"{str(row[0]).strip()} Branch"
+
+def _build_print_pdf(cert_type: str, asof: str, rows: list[dict], branch_label: str) -> bytes:
+    report = _PRINT_REPORTS[cert_type]
+
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(
         buffer,
         pagesize=landscape(A4),
-        leftMargin=15 * mm, rightMargin=15 * mm,
-        topMargin=15 * mm,  bottomMargin=15 * mm,
+        leftMargin=12 * mm, rightMargin=12 * mm,
+        topMargin=12 * mm,  bottomMargin=12 * mm,
     )
 
     styles   = getSampleStyleSheet()
+    head_st  = ParagraphStyle('head', parent=styles['Normal'],
+                              fontSize=11, fontName='Helvetica',
+                              alignment=TA_LEFT, leading=14)
     title_st = ParagraphStyle('title', parent=styles['Normal'],
-                              fontSize=13, fontName='Helvetica-Bold',
-                              alignment=TA_CENTER, spaceAfter=4)
-    sub_st   = ParagraphStyle('sub', parent=styles['Normal'],
-                              fontSize=9, alignment=TA_CENTER, spaceAfter=8)
+                              fontSize=16, fontName='Helvetica-Bold',
+                              alignment=TA_CENTER, leading=20)
     cell_st  = ParagraphStyle('cell', parent=styles['Normal'],
-                              fontSize=8, fontName='Helvetica', leading=10)
+                              fontSize=8, fontName='Helvetica',
+                              alignment=TA_CENTER, leading=10)
+    head_cell_st = ParagraphStyle('headcell', parent=cell_st, fontName='Helvetica-Bold')
+    note_st  = ParagraphStyle('note', parent=styles['Normal'],
+                              fontSize=8, fontName='Helvetica',
+                              alignment=TA_LEFT, leading=11)
 
     story = [
-        Paragraph(f"Report {_CERT_LABELS.get(cert_type, cert_type)}", title_st),
-        Paragraph(f"As Of : {asof}", sub_st),
-        Spacer(1, 4 * mm),
+        Paragraph(get_company_name(), head_st),
+        Paragraph(branch_label, head_st),
+        Spacer(1, 6 * mm),
+        Paragraph(report['title'], title_st),
+        Paragraph(f"As Of {_asof_label(asof)}", title_st),
+        Spacer(1, 8 * mm),
     ]
 
-    header     = ['No.', 'Contract No.', 'Customer Name', 'Address', 'City', 'Phone', 'As Of Date']
-    col_widths = [12*mm, 35*mm, 60*mm, 80*mm, 35*mm, 30*mm, 28*mm]
+    usable    = doc.width
+    col_widths = [usable * pct / 100.0 for _, _, pct in report['columns']]
 
-    table_data = [header]
+    table_data = [[Paragraph(label, head_cell_st) for label, _, _ in report['columns']]]
     for i, r in enumerate(rows, start=1):
-        table_data.append([
-            str(i),
-            Paragraph(r.get('lease_no',  ''), cell_st),
-            Paragraph(r.get('lessee_nm', ''), cell_st),
-            Paragraph(r.get('address',   ''), cell_st),
-            Paragraph(r.get('city',      ''), cell_st),
-            Paragraph(r.get('phone',     ''), cell_st),
-            Paragraph(r.get('asof_date', ''), cell_st),
-        ])
+        line = []
+        for _, field, _ in report['columns']:
+            value = f"{i}." if field is None else r.get(field, '')
+            line.append(Paragraph(str(value or ''), cell_st))
+        table_data.append(line)
 
     tbl = Table(table_data, colWidths=col_widths, repeatRows=1)
     tbl.setStyle(TableStyle([
-        ('BACKGROUND',    (0, 0), (-1, 0),  colors.HexColor('#235b98')),
-        ('TEXTCOLOR',     (0, 0), (-1, 0),  colors.white),
-        ('FONTNAME',      (0, 0), (-1, 0),  'Helvetica-Bold'),
-        ('FONTSIZE',      (0, 0), (-1, 0),  8),
-        ('ALIGN',         (0, 0), (-1, 0),  'CENTER'),
-        ('VALIGN',        (0, 0), (-1, 0),  'MIDDLE'),
-        ('FONTSIZE',      (0, 1), (-1, -1), 8),
-        ('VALIGN',        (0, 1), (-1, -1), 'TOP'),
-        ('ALIGN',         (0, 1), (0, -1),  'CENTER'),
-        ('ROWBACKGROUNDS',(0, 1), (-1, -1), [colors.white, colors.HexColor('#f3f4f6')]),
-        ('GRID',          (0, 0), (-1, -1), 0.4, colors.HexColor('#d1d5db')),
-        ('TOPPADDING',    (0, 0), (-1, -1), 3),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
-        ('LEFTPADDING',   (0, 0), (-1, -1), 4),
-        ('RIGHTPADDING',  (0, 0), (-1, -1), 4),
+        ('BACKGROUND',    (0, 0), (-1, 0),  colors.HexColor('#60caf2')),
+        ('TEXTCOLOR',     (0, 0), (-1, 0),  colors.black),
+        ('VALIGN',        (0, 0), (-1, -1), 'MIDDLE'),
+        ('GRID',          (0, 0), (-1, -1), 0.75, colors.black),
+        ('TOPPADDING',    (0, 0), (-1, -1), 4),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+        ('LEFTPADDING',   (0, 0), (-1, -1), 3),
+        ('RIGHTPADDING',  (0, 0), (-1, -1), 3),
     ]))
 
     story.append(tbl)
+    story.append(Spacer(1, 6 * mm))
+    for note in report['notes']:
+        story.append(Paragraph(note, note_st))
+
     doc.build(story)
     buffer.seek(0)
-    
+
     return buffer.read()
 
 @fiducia_bp.route('/fiducia-data', methods=['POST'])
@@ -137,7 +257,7 @@ def get_fiducia_data():
                 rows.append({
                     'lease_no':        r.get('LEASE_NO',        ''),
                     'lessee_nm':       r.get('LESSEE_NM',       ''),
-                    'DisbDate':        disb.strftime('%d-%m-%Y') if isinstance(disb, datetime) else (disb or ''),
+                    'DisbDate':        _fmt_date(disb),
                     'has_certificate': bool(r.get('CertificateFile')),
                 })
             elif cert_type == 'roya_fidusia':
@@ -145,7 +265,7 @@ def get_fiducia_data():
                 rows.append({
                     'lease_no':    r.get('LEASE_NO',   ''),
                     'lessee_nm':   r.get('LESSEE_NM',  ''),
-                    'ReleaseDate': rel.strftime('%d-%m-%Y') if isinstance(rel, datetime) else (rel or ''),
+                    'ReleaseDate': _fmt_date(rel),
                     'has_file':    bool(r.get('RoyaFile')),
                 })
 
@@ -216,15 +336,41 @@ def get_fiducia_file():
         current_app.logger.exception("Fiducia file fetch error")
         return jsonify({'error': str(e)}), 500
 
+@fiducia_bp.route('/context')
+@login_required
+def get_context():
+    try:
+        row = db.session.execute(
+            text("""
+                SELECT a.BRANCH_CD, a.BRANCH_NAME, b.FULLNAME, b.ACCESSCAM
+                FROM UMFBRANCH a WITH (NOLOCK)
+                INNER JOIN APP_USRMST b WITH (NOLOCK) ON a.BRANCH_CD = b.BRANCHCODE
+                WHERE b.EMPLOYEE_ID = :employee
+            """),
+            {"employee": session.get('emp_id', '')},
+        ).mappings().first()
+
+        if not row:
+            return jsonify({'access': '', 'branch_cd': '', 'branch_name': '', 'full_name': ''})
+
+        return jsonify({
+            'access':      (row['ACCESSCAM'] or '').strip().upper(),
+            'branch_cd':   (row['BRANCH_CD'] or '').strip(),
+            'branch_name': (row['BRANCH_NAME'] or '').strip(),
+            'full_name':   (row['FULLNAME'] or '').strip(),
+        })
+    except Exception:
+        current_app.logger.exception("Fiducia context error")
+        return jsonify({'access': '', 'branch_cd': '', 'branch_name': '', 'full_name': ''})
+
 @fiducia_bp.route('/fiducia-print')
 @login_required
 def fiducia_print():
-   
+
     cert_type = request.args.get('cert_type', '').strip()
     asof      = request.args.get('asof',      '').strip()
 
-    PRINT_ONLY = {'fiducia_not_accepted', 'roya_fiducia_not_accepted', 'fiducia_not_scan'}
-    if cert_type not in PRINT_ONLY:
+    if cert_type not in _PRINT_REPORTS:
         return jsonify({'error': 'Invalid cert_type for print'}), 400
     if not asof:
         return jsonify({'error': 'asof is required'}), 400
@@ -233,26 +379,25 @@ def fiducia_print():
 
     try:
         raw_rows = _exec_sp(
-            'USP_CA_GetDataFiducia',
-            [cert_type, 'asof', '', '', asof, asof, branch_cd],
+            'USP_CA_ReportFiducia',
+            [cert_type, _asof_sql(asof), branch_cd],
         )
 
+        date_fields = {'DisbDate', 'CoverDate', 'ReceiveDate', 'ReleaseDate', 'RoyaDate'}
         rows = []
         for r in raw_rows:
-            asof_val = r.get('ASOF_DATE')
-            rows.append({
-                'lease_no':  r.get('LEASE_NO',  ''),
-                'lessee_nm': r.get('LESSEE_NM', ''),
-                'address':   r.get('ADDRESS',   ''),
-                'city':      r.get('CITY',      ''),
-                'phone':     r.get('PHONE',     ''),
-                'asof_date': asof_val.strftime('%d-%m-%Y') if isinstance(asof_val, datetime) else (asof_val or asof),
-            })
+            row = {}
+            for _, field, _w in _PRINT_REPORTS[cert_type]['columns']:
+                if field is None:
+                    continue
+                value = r.get(field)
+                row[field] = _fmt_date(value) if field in date_fields else (value if value is not None else '')
+            rows.append(row)
 
-        pdf_bytes = _build_print_pdf(cert_type, asof, rows)
+        pdf_bytes = _build_print_pdf(cert_type, asof, rows, _branch_label(branch_cd))
 
         label    = _CERT_LABELS.get(cert_type, cert_type).replace(' ', '_')
-        filename = f"Report_{label}_{asof}.pdf"
+        filename = f"Report_{label}_{_fmt_date(asof)}.pdf"
 
         response = make_response(pdf_bytes)
         response.headers['Content-Type']        = 'application/pdf'
