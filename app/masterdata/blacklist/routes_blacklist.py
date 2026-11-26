@@ -1,161 +1,414 @@
 import json
-import os
 import re
 from datetime import date, datetime
 
-from flask import Blueprint, jsonify, request, current_app, session, send_from_directory
+from flask import Blueprint, jsonify, request, current_app, session
 from sqlalchemy import text
 
 from app import db
 from app.auth.decorators import login_required
-from app.utils.helpers.ahing_query import (
-    check_id_card_status, check_npwp_status,
-    save_blacklist_image, save_general_attachment, delete_blacklist_file,
-)
 from app.utils.helpers.base_format import fmt_date
-from app.utils.helpers.shared_helpers import _lookup_apless, _strip_special, _validate_members
+from app.utils.helpers.shared_helpers import _strip_special
 
 blacklist_bp = Blueprint('blacklist', __name__, url_prefix='/MasterData')
 
-ALLOWED_IMAGE_TYPES = {'image/jpeg', 'image/pjpeg', 'image/x-png', 'image/png', 'image/gif'}
-MAX_IMAGE_SIZE = 2_000_000
 MAX_PAGE_LIMIT = 200
 
-BOD_OS_CODE = 'PT02'
-BOC_OS_CODE = 'PT03'
-BOD_OTHER_VALUE = '5'
-BOC_OTHER_VALUE = '10'
+OS_CODE_ALLOWED = {
+    'CO': ('CO01', 'CO02'),
+    'CV': ('CV01', 'CV02'),
+    'FD': ('FD01', 'FD02', 'FD03'),
+    'PT': ('PT01', 'PT02', 'PT03'),
+}
+OS_CODE_LABEL = {
+    'CO01': 'Pengurus',
+    'CO02': 'Pengawas',
+    'CV01': 'Persero Aktif',
+    'CV02': 'Persero Pasif',
+    'FD01': 'Pembina',
+    'FD02': 'Pengurus',
+    'FD03': 'Pengawas',
+    'PT01': 'Shareholder',
+    'PT02': 'BOD / Direksi',
+    'PT03': 'BOC / Komisaris',
+}
+OS_CODE_WHITELIST = frozenset(c for codes in OS_CODE_ALLOWED.values() for c in codes)
+SHAREHOLDER_OS_CODE = 'PT01'
+SHAREHOLDER_STATUS_CODES = ('PR', 'PT')
 
-def _parse_date(raw: str, errors: list):
-    raw = (raw or '').strip()
+MEMBER_LIMITS = (
+    ('Name', 'name', 200),
+    ('ID Card', 'id_card', 40),
+    ('NPWP', 'npwp', 30),
+    ('Position Other', 'position_other', 500),
+    ('Shareholder Status', 'shareholder_status', 2),
+)
+
+REASON_RULES = {
+    'create': {'excluded': ('6', '7', '10'), 'disabled': ('4', '9')},
+    'edit': {'excluded': ('6', '7'), 'disabled': ('4',)},
+}
+REASON_LOCKED = '4'
+REASON_OTHER = '5'
+REASON_PROBLEM_SINCE = '2'
+
+PR_NAME_PATTERN = re.compile(r'^[a-zA-Z., ]*$')
+
+WHERE_ID_CARD = "ID_Card = :v AND ID_Card IS NOT NULL AND ID_Card <> ''"
+WHERE_NPWP = "NPWP = :v AND NPWP IS NOT NULL AND NPWP <> ''"
+WHERE_PERSON_ID = (
+    "((ID_Card = :v AND ID_Card IS NOT NULL AND ID_Card <> '') "
+    "OR (SpouseIDCard = :v AND SpouseIDCard IS NOT NULL AND SpouseIDCard <> ''))"
+)
+WHERE_NAME_DOB = (
+    "((dbo.RemoveSpecialChars(Name) = :n AND CONVERT(date, DOB) = :d) "
+    "OR (dbo.RemoveSpecialChars(Spouse_Name) = :n AND CONVERT(date, SpouseDOB) = :d))"
+)
+
+_caforg_identity_cache = None
+
+
+def _s(value) -> str:
+    if value is None:
+        return ''
+    return str(value).strip()
+
+
+def _alnum(value: str) -> str:
+    return re.sub(r'[^a-zA-Z0-9]', '', value or '')
+
+
+def _is_other_position(desc) -> bool:
+    d = (desc or '').lower()
+    return 'other' in d or 'lain' in d
+
+
+def _wl_label(flag: str) -> str:
+    return 'Watchlist' if flag == 'W' else 'Blacklist'
+
+
+def _wl_find(where: str, params: dict, exclude_no=None) -> str:
+    sql = (
+        "SELECT TOP 1 Flag_Type FROM MCMOWatchList WITH (NOLOCK) "
+        "WHERE ISNULL(FlagDel, '0') <> '1' AND Flag_Type IN ('W', 'B') AND " + where
+    )
+    bind = dict(params)
+    if exclude_no:
+        sql += " AND [No] <> :exclude_no"
+        bind['exclude_no'] = exclude_no
+    row = db.session.execute(text(sql), bind).fetchone()
+    return _s(row.Flag_Type) if row else ''
+
+
+def _caforg_exists(where: str, params: dict, exclude_no=None) -> bool:
+    sql = "SELECT TOP 1 MANAGEMENT_NM FROM CAFORGSTRUCT_Blacklist WITH (NOLOCK) WHERE " + where
+    bind = dict(params)
+    if exclude_no:
+        sql += " AND ISNULL(McmoWatchlistID, 0) <> :exclude_no"
+        bind['exclude_no'] = exclude_no
+    return db.session.execute(text(sql), bind).fetchone() is not None
+
+
+def _caforg_id_is_identity() -> bool:
+    global _caforg_identity_cache
+    if _caforg_identity_cache is None:
+        row = db.session.execute(text(
+            "SELECT COLUMNPROPERTY(OBJECT_ID('CAFORGSTRUCT_Blacklist'), 'ID_Blacklist', 'IsIdentity') AS is_ident"
+        )).fetchone()
+        _caforg_identity_cache = bool(row and row.is_ident == 1)
+    return _caforg_identity_cache
+
+
+def _other_position_ids() -> set:
+    rows = db.session.execute(
+        text("SELECT ID_OS_POSITION, [DESC] FROM MSTOS_POSITION WITH (NOLOCK)")
+    ).fetchall()
+    return {_s(r.ID_OS_POSITION) for r in rows if _is_other_position(r.DESC)}
+
+
+def _parse_past_date(raw: str, errors: list, message: str):
+    raw = _s(raw)
     if not raw:
         return None
     try:
         parsed = datetime.strptime(raw, "%Y-%m-%d").date()
     except ValueError:
-        errors.append("DOB / Establishment Date not valid")
+        errors.append(message)
         return None
     if parsed > date.today():
-        errors.append("DOB / Establishment Date not valid")
+        errors.append(message)
         return None
     return parsed
 
-def _validate_core(data: dict, customer_type: str) -> tuple:
-    errors = []
 
-    if customer_type == 'PR' and not (data.get('id_card') or '').strip():
+def _load_payload():
+    try:
+        data = json.loads(request.form.get('data', '{}'))
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _errors_response(errors: list):
+    return jsonify({"error": " ".join(errors), "errors": errors}), 400
+
+
+def _read_fields(data: dict, customer_type: str) -> dict:
+    is_pr = customer_type == 'PR'
+    return {
+        'name': _s(data.get('name')),
+        'address': _s(data.get('address')),
+        'phone': _s(data.get('phone')),
+        'npwp': _strip_special(_s(data.get('npwp'))) or '',
+        'id_card': _s(data.get('id_card')) if is_pr else '',
+        'dob': _s(data.get('dob')) if is_pr else _s(data.get('establishment_date')),
+        'spouse_name': _s(data.get('spouse_name')) if is_pr else '',
+        'spouse_idcard': _s(data.get('spouse_idcard')) if is_pr else '',
+        'spouse_dob': _s(data.get('spouse_dob')) if is_pr else '',
+        'mother': _s(data.get('mother')) if is_pr else '',
+        'contact_person': '' if is_pr else _s(data.get('contact_person')),
+        'contact_address': '' if is_pr else _s(data.get('contact_address')),
+        'lessee_cat': '' if is_pr else _s(data.get('lessee_cat')),
+        'reason_category': _s(data.get('reason_category')),
+        'reason_other': _s(data.get('reason_other')),
+        'remark': _s(data.get('remark')),
+    }
+
+
+def _read_members(raw, customer_type: str) -> list:
+    rows = []
+    for entry in raw if isinstance(raw, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        os_code = _s(entry.get('os_code'))
+        shareholder = _s(entry.get('shareholder_status'))
+        id_card = _s(entry.get('id_card'))
+        npwp = _s(entry.get('npwp'))
+
+        if customer_type != 'PT' or os_code != SHAREHOLDER_OS_CODE:
+            shareholder = ''
+        if shareholder not in SHAREHOLDER_STATUS_CODES:
+            shareholder = ''
+        if shareholder == 'PT':
+            id_card = ''
+        else:
+            npwp = ''
+
+        rows.append({
+            'name': _s(entry.get('name')),
+            'os_code': os_code,
+            'position': _s(entry.get('position')),
+            'position_other': _s(entry.get('position_other')),
+            'shareholder_status': shareholder,
+            'id_card': id_card,
+            'npwp': npwp,
+        })
+    return rows
+
+
+def _validate_members(members: list, lessee_cat: str, exclude_no=None) -> list:
+    errors = []
+    allowed = OS_CODE_ALLOWED.get(lessee_cat, ())
+    owner = "another blacklisted customer" if exclude_no else "a blacklisted customer"
+
+    for idx, m in enumerate(members, start=1):
+        name = m['name']
+        if not name:
+            if m['id_card'] or m['npwp']:
+                errors.append(
+                    f"Row {idx} has details but no Name. "
+                    "Enter the Name in the BOD / BOC grid or clear the row."
+                )
+            continue
+
+        if not m['os_code']:
+            errors.append(f"Type must be selected for {name}")
+            continue
+
+        if m['os_code'] not in OS_CODE_WHITELIST or m['os_code'] not in allowed:
+            errors.append(f"Type is not valid for the selected Company Profile ({name})")
+            continue
+
+        for label, key, limit in MEMBER_LIMITS:
+            if len(m[key]) > limit:
+                errors.append(f"{label} for {name} exceeds {limit} characters")
+
+        if m['id_card']:
+            flag = _wl_find(WHERE_PERSON_ID, {'v': m['id_card']}, exclude_no)
+            if flag:
+                errors.append(f"ID Card for {name} is already registered in {_wl_label(flag)}")
+            if _caforg_exists("ID_CARD = :v AND ID_CARD IS NOT NULL AND ID_CARD <> ''", {'v': m['id_card']}, exclude_no):
+                errors.append(f"ID Card for {name} is already registered as management of {owner}")
+
+        if m['os_code'] == SHAREHOLDER_OS_CODE and m['npwp']:
+            flag = _wl_find(WHERE_NPWP, {'v': m['npwp']}, exclude_no)
+            if flag:
+                errors.append(f"NPWP for {name} is already registered in {_wl_label(flag)}")
+            if _caforg_exists("NPWP = :v AND NPWP IS NOT NULL AND NPWP <> ''", {'v': m['npwp']}, exclude_no):
+                errors.append(f"NPWP for {name} is already registered as a shareholder of {owner}")
+
+    return errors
+
+
+def _validate(f: dict, customer_type: str, members: list, mode: str,
+              exclude_no=None, locked_category: str = '') -> tuple:
+    errors, date_errors = [], []
+    is_pr = customer_type == 'PR'
+
+    dob = _parse_past_date(f['dob'], date_errors, "DOB / Establishment Date not valid")
+    spouse_dob = _parse_past_date(f['spouse_dob'], date_errors, "Spouse Date of Birth not valid") if is_pr else None
+
+    if is_pr and f['id_card']:
+        flag = _wl_find(WHERE_ID_CARD, {'v': f['id_card']}, exclude_no)
+        if flag:
+            errors.append(f"ID Card is already registered in {_wl_label(flag)}")
+
+    if not is_pr and f['npwp']:
+        flag = _wl_find(WHERE_NPWP, {'v': f['npwp']}, exclude_no)
+        if flag:
+            errors.append(f"NPWP is already registered in {_wl_label(flag)}")
+
+    spouse_key = _alnum(f['spouse_name'])
+    if is_pr and spouse_key and spouse_dob:
+        flag = _wl_find(WHERE_NAME_DOB, {'n': spouse_key, 'd': spouse_dob}, exclude_no)
+        if flag:
+            errors.append(f"Spouse Name and Date of Birth are already registered in {_wl_label(flag)}")
+
+    if is_pr and f['spouse_idcard']:
+        flag = _wl_find(WHERE_PERSON_ID, {'v': f['spouse_idcard']}, exclude_no)
+        if flag:
+            errors.append(f"Spouse ID Card is already registered in {_wl_label(flag)}")
+
+    if is_pr and not f['id_card']:
         errors.append("ID Card must not empty")
-    if not (data.get('name') or '').strip():
+
+    if not f['name']:
         errors.append("Name must not empty")
-    if not (data.get('address') or '').strip():
+    elif is_pr and not PR_NAME_PATTERN.match(f['name']):
+        errors.append("Name only allows letters, dot, comma and space")
+
+    if not f['address']:
         errors.append("Address must not empty")
 
-    reason_category = (data.get('reason_category') or '').strip()
-    if not reason_category:
+    if not is_pr and not f['lessee_cat']:
+        errors.append("Company Profile must not empty")
+
+    if not is_pr and not f['npwp']:
+        errors.append("NPWP must not empty")
+
+    rules = REASON_RULES[mode]
+    category = f['reason_category']
+    if not category:
         errors.append("Reason Category must not empty")
-    if reason_category == '5' and not (data.get('reason_other') or '').strip():
+    elif category in rules['excluded'] or (category in rules['disabled'] and category != locked_category):
+        errors.append("Reason Category not valid")
+
+    if category == REASON_OTHER and not f['reason_other']:
         errors.append("Reason Other must not empty")
 
-    dob = _parse_date(data.get('dob'), errors) if customer_type == 'PR' else None
-    est = _parse_date(data.get('establishment_date'), errors) if customer_type == 'PT' else None
+    errors += date_errors
 
-    return errors, dob, est
+    if not is_pr:
+        errors += _validate_members(members, f['lessee_cat'], exclude_no)
 
-def _member_image(files, index: int, blacklist_name: str, member_name: str, apless: str, errors: list):
-    file = files.get(f'member_image_{index}')
-    if not file or not file.filename:
-        return None
+    return errors, dob, spouse_dob
 
-    file.seek(0, os.SEEK_END)
-    size = file.tell()
-    file.seek(0)
 
-    if file.mimetype not in ALLOWED_IMAGE_TYPES:
-        errors.append(f"{file.filename}: only JPEG, PNG or GIF images are allowed")
-        return None
-    if size > MAX_IMAGE_SIZE:
-        errors.append(f"{file.filename}: file size exceeds Maximum Upload Limit")
-        return None
+def _save_members(blacklist_no: int, customer_type: str, lessee_cat: str, members: list, replace: bool) -> None:
+    if replace:
+        db.session.execute(
+            text("DELETE FROM CAFORGSTRUCT_Blacklist WHERE McmoWatchlistID = :no"),
+            {"no": blacklist_no}
+        )
 
-    suffix = f"-blacklist_{blacklist_name}_{member_name}".replace(".", "_")
-    return save_blacklist_image(file, suffix, apless, current_app.config['UPLOAD_FOLDER_BLACKLIST'])
-
-def _save_members(blacklist_no: int, customer_type: str, members: list) -> None:
     if customer_type != 'PT':
         return
 
-    db.session.execute(
-        text("DELETE FROM CAFORGSTRUCT_Blacklist WHERE McmoWatchlistID = :no"),
-        {"no": blacklist_no}
-    )
+    allowed = OS_CODE_ALLOWED.get(lessee_cat, ())
+    rows = [m for m in members if m['name'] and m['os_code'] in allowed]
+    if not rows:
+        return
 
-    for entry in members:
-        member_name = (entry.get('name') or '').strip()
-        if not member_name:
-            continue
+    other_ids = _other_position_ids()
+    columns = "McmoWatchlistID, MANAGEMENT_NM, POSITION, Position_Other, OS_CODE, SHAREHOLDER_STATUS, NPWP, ID_CARD"
+    values = ":no, :mn, :pos, :pos_other, :os_code, :shst, :npwp, :idc"
 
-        bod_pos = (entry.get('bod_position') or '').strip()
-        boc_pos = (entry.get('boc_position') or '').strip()
-        other = (entry.get('other') or '').strip()
-
-        if bod_pos:
-            os_code, position = BOD_OS_CODE, bod_pos
-            position_other = other if bod_pos == BOD_OTHER_VALUE else None
-        elif boc_pos:
-            os_code, position = BOC_OS_CODE, boc_pos
-            position_other = other if boc_pos == BOC_OTHER_VALUE else None
-        else:
-            continue
-
-        db.session.execute(
-            text("""
-                INSERT INTO CAFORGSTRUCT_Blacklist
-                    (McmoWatchlistID, MANAGEMENT_NM, POSITION, Position_Other,
-                     OS_CODE, ADDRESS, CITY, ID_CARD)
-                VALUES
-                    (:no, :mn, :pos, :pos_other, :os_code, :addr, :city, :idc)
-            """),
-            {
-                "no": blacklist_no, "mn": member_name,
-                "pos": position, "pos_other": position_other or None,
-                "os_code": os_code,
-                "addr": (entry.get('address') or '').strip() or None,
-                "city": (entry.get('city') or '').strip() or None,
-                "idc": (entry.get('id_card') or '').strip() or None,
-            }
+    if _caforg_id_is_identity():
+        sql = f"INSERT INTO CAFORGSTRUCT_Blacklist ({columns}) VALUES ({values})"
+    else:
+        sql = (
+            f"INSERT INTO CAFORGSTRUCT_Blacklist (ID_Blacklist, {columns}) "
+            f"SELECT ISNULL(MAX(ID_Blacklist), 0) + 1, {values} "
+            "FROM CAFORGSTRUCT_Blacklist WITH (UPDLOCK, HOLDLOCK)"
         )
+
+    for m in rows:
+        position = m['position'] or None
+        position_other = m['position_other'] if position in other_ids else ''
+        db.session.execute(text(sql), {
+            "no": blacklist_no,
+            "mn": m['name'],
+            "pos": position,
+            "pos_other": position_other or None,
+            "os_code": m['os_code'],
+            "shst": m['shareholder_status'] or None,
+            "npwp": m['npwp'] or None,
+            "idc": m['id_card'] or None,
+        })
+
+
+def _check_response(flag: str, subject: str):
+    if not flag:
+        return jsonify({"ok": True, "message": ""})
+    return jsonify({"ok": False, "message": f"{subject} exist in {_wl_label(flag)}"})
+
 
 @blacklist_bp.route('/blacklist/options')
 @login_required
 def get_options():
+    mode = 'edit' if request.args.get('mode') == 'edit' else 'create'
+    rules = REASON_RULES[mode]
     try:
         reasons = db.session.execute(
-            text("SELECT VALUE, DESC_VALUE FROM MSTCOMBO WITH(NOLOCK) WHERE CAT_VALUE = 'BLACKLIST_CATEGORY' AND VALUE NOT IN ('6','7') ORDER BY VALUE")
+            text("SELECT VALUE, DESC_VALUE FROM MSTCOMBO WITH (NOLOCK) WHERE CAT_VALUE = 'BLACKLIST_CATEGORY' ORDER BY VALUE")
         ).fetchall()
 
-        groups = db.session.execute(
-            text("SELECT GrpCode, GrpName FROM CLFGROUP WITH(NOLOCK) WHERE FLGDEL = '0' ORDER BY GrpName")
+        profiles = db.session.execute(
+            text("SELECT CUST_TYPE, NAME FROM MSTLESSEETYPE WITH (NOLOCK) WHERE LESSEE_TP = 'PT' ORDER BY NAME")
         ).fetchall()
 
-        bod_positions = db.session.execute(
-            text("SELECT ID_OS_POSITION, [DESC] FROM MSTOS_POSITION WITH(NOLOCK) WHERE OS_CODE = :os ORDER BY ID_OS_POSITION"),
-            {"os": BOD_OS_CODE}
+        position_rows = db.session.execute(
+            text("SELECT OS_CODE, ID_OS_POSITION, [DESC] FROM MSTOS_POSITION WITH (NOLOCK) ORDER BY ID_OS_POSITION")
         ).fetchall()
 
-        boc_positions = db.session.execute(
-            text("SELECT ID_OS_POSITION, [DESC] FROM MSTOS_POSITION WITH(NOLOCK) WHERE OS_CODE = :os ORDER BY ID_OS_POSITION"),
-            {"os": BOC_OS_CODE}
-        ).fetchall()
+        positions = {code: [] for code in sorted(OS_CODE_WHITELIST)}
+        for p in position_rows:
+            code = _s(p.OS_CODE)
+            if code in positions:
+                positions[code].append({
+                    "value": _s(p.ID_OS_POSITION),
+                    "label": p.DESC,
+                    "is_other": _is_other_position(p.DESC),
+                })
 
         return jsonify({
-            "reasons": [{"value": (r.VALUE or '').strip(), "label": r.DESC_VALUE, "disabled": (r.VALUE or '').strip() == '4'} for r in reasons],
-            "groups": [{"value": g.GrpCode, "label": g.GrpName} for g in groups],
-            "bod_positions": [{"value": p.ID_OS_POSITION, "label": p.DESC} for p in bod_positions],
-            "boc_positions": [{"value": p.ID_OS_POSITION, "label": p.DESC} for p in boc_positions],
+            "reasons": [
+                {"value": _s(r.VALUE), "label": r.DESC_VALUE, "disabled": _s(r.VALUE) in rules['disabled']}
+                for r in reasons if _s(r.VALUE) not in rules['excluded']
+            ],
+            "company_profiles": [{"value": _s(p.CUST_TYPE), "label": p.NAME} for p in profiles],
+            "os_types": {
+                prefix: [{"value": c, "label": OS_CODE_LABEL[c]} for c in codes]
+                for prefix, codes in OS_CODE_ALLOWED.items()
+            },
+            "positions": positions,
+            "current_user": session.get("username", ""),
+            "today": date.today().strftime("%d-%m-%Y"),
         })
     except Exception as e:
         current_app.logger.exception("Options error")
         return jsonify({"error": str(e)}), 500
+
 
 @blacklist_bp.route('/blacklist/equip-types')
 @login_required
@@ -171,53 +424,67 @@ def get_equip_types():
 
     return jsonify([{"value": r.TYPE, "label": r.TYPE_NM} for r in rows])
 
+
 @blacklist_bp.route('/blacklist/validate/id-card')
 @login_required
 def validate_id_card():
-    id_card = request.args.get('id_card', '').strip()
+    value = _s(request.args.get('id_card'))
     exclude_no = request.args.get('exclude_no', type=int)
+    if not value:
+        return _check_response('', '')
+    try:
+        return _check_response(_wl_find(WHERE_ID_CARD, {'v': value}, exclude_no), "ID Card is")
+    except Exception as e:
+        current_app.logger.exception("Validate ID card error")
+        return jsonify({"error": str(e)}), 500
 
-    if exclude_no:
-        row = db.session.execute(
-            text("""
-                SELECT TOP 1 Flag_Type FROM MCMOWATCHLIST WITH(NOLOCK)
-                WHERE FlagDel = 0 AND Flag_Type IN ('W','B')
-                  AND ID_Card = :id_card AND ID_Card IS NOT NULL AND ID_Card <> ''
-                  AND No <> :no
-            """),
-            {"id_card": id_card, "no": exclude_no}
-        ).fetchone()
-        if not row:
-            return jsonify({"ok": True, "message": ""})
-        where = "Watchlist" if row.Flag_Type == 'W' else "Blacklist"
-        return jsonify({"ok": False, "message": f"ID Card is exist in {where}"})
-
-    ok, message = check_id_card_status(db, id_card)
-    return jsonify({"ok": ok, "message": message})
 
 @blacklist_bp.route('/blacklist/validate/npwp')
 @login_required
 def validate_npwp():
-    npwp = request.args.get('npwp', '').strip()
+    value = _strip_special(_s(request.args.get('npwp'))) or ''
     exclude_no = request.args.get('exclude_no', type=int)
+    if not value:
+        return _check_response('', '')
+    try:
+        return _check_response(_wl_find(WHERE_NPWP, {'v': value}, exclude_no), "NPWP is")
+    except Exception as e:
+        current_app.logger.exception("Validate NPWP error")
+        return jsonify({"error": str(e)}), 500
 
-    if exclude_no:
-        row = db.session.execute(
-            text("""
-                SELECT TOP 1 Flag_Type FROM MCMOWATCHLIST WITH(NOLOCK)
-                WHERE FlagDel = 0 AND Flag_Type IN ('W','B')
-                  AND NPWP = :npwp AND NPWP IS NOT NULL AND NPWP <> ''
-                  AND No <> :no
-            """),
-            {"npwp": npwp, "no": exclude_no}
-        ).fetchone()
-        if not row:
-            return jsonify({"ok": True, "message": ""})
-        where = "Watchlist" if row.Flag_Type == 'W' else "Blacklist"
-        return jsonify({"ok": False, "message": f"NPWP is exist in {where}"})
 
-    ok, message = check_npwp_status(db, npwp)
-    return jsonify({"ok": ok, "message": message})
+@blacklist_bp.route('/blacklist/validate/spouse-id-card')
+@login_required
+def validate_spouse_id_card():
+    value = _s(request.args.get('spouse_idcard'))
+    exclude_no = request.args.get('exclude_no', type=int)
+    if not value:
+        return _check_response('', '')
+    try:
+        return _check_response(_wl_find(WHERE_PERSON_ID, {'v': value}, exclude_no), "Spouse ID Card is")
+    except Exception as e:
+        current_app.logger.exception("Validate spouse ID card error")
+        return jsonify({"error": str(e)}), 500
+
+
+@blacklist_bp.route('/blacklist/validate/spouse-dob')
+@login_required
+def validate_spouse_dob():
+    spouse_key = _alnum(_s(request.args.get('spouse_name')))
+    exclude_no = request.args.get('exclude_no', type=int)
+    try:
+        spouse_dob = datetime.strptime(_s(request.args.get('spouse_dob')), "%Y-%m-%d").date()
+    except ValueError:
+        spouse_dob = None
+    if not spouse_key or not spouse_dob:
+        return _check_response('', '')
+    try:
+        flag = _wl_find(WHERE_NAME_DOB, {'n': spouse_key, 'd': spouse_dob}, exclude_no)
+        return _check_response(flag, "Spouse Name and Date of Birth are")
+    except Exception as e:
+        current_app.logger.exception("Validate spouse DOB error")
+        return jsonify({"error": str(e)}), 500
+
 
 @blacklist_bp.route('/blacklist/list')
 @login_required
@@ -227,7 +494,7 @@ def get_list():
     page = max(request.args.get('page', 1, type=int), 1)
     limit = min(max(request.args.get('limit', 20, type=int), 1), MAX_PAGE_LIMIT)
 
-    where = "Flag_type = 'B' AND (flagdel <> '1' OR flagdel IS NULL)"
+    where = "Flag_type = 'B' AND ISNULL(flagdel, '0') <> '1'"
     params = {}
 
     if search_val:
@@ -236,7 +503,7 @@ def get_list():
             params["search_val"] = search_val
         elif search_by == '3':
             where += " AND NPWP = :search_val"
-            params["search_val"] = search_val
+            params["search_val"] = re.sub(r'\D', '', search_val)
         else:
             where += " AND Name LIKE :search_val"
             params["search_val"] = f"%{search_val}%"
@@ -265,11 +532,11 @@ def get_list():
         data = [
             {
                 "no": r.No,
-                "id_card_npwp": (r.ID_Card if r.customer_type == 'PR' else r.NPWP) or "",
+                "id_card_npwp": (r.ID_Card if _s(r.customer_type) == 'PR' else r.NPWP) or "",
                 "name": r.Name or "",
                 "address": r.Address or "",
-                "apless": r.apless or "",
-                "customer_type": r.customer_type or "PR",
+                "apless": _s(r.apless),
+                "customer_type": _s(r.customer_type) or "PR",
             }
             for r in rows
         ]
@@ -279,20 +546,19 @@ def get_list():
         current_app.logger.exception("List error")
         return jsonify({"error": str(e)}), 500
 
+
 @blacklist_bp.route('/blacklist/<int:no>')
 @login_required
 def get_blacklist(no):
     try:
         row = db.session.execute(
             text("""
-                SELECT a.No, a.Customer_Type, a.Name, a.Address, a.Phone, a.NPWP, a.ID_Card, a.DOB,
-                       a.Spouse_Name, a.Mother, a.ContactPerson, a.ContactAddress, a.Contact_Group,
-                       a.Reason, a.Reason_Category, a.Reason_Other, a.Problem_Since,
-                       a.CreateUser, a.CreateDate, a.LastUser, a.LastUpdate, a.apless,
-                       b.NAME AS alias_name
-                FROM MCMOWatchList a WITH(NOLOCK)
-                    LEFT JOIN MCMOWATCHLIST_ALIASNM b WITH(NOLOCK) ON a.No = b.NO
-                WHERE a.No = :no AND a.Flag_type = 'B'
+                SELECT No, Customer_Type, Lessee_Cat, Name, Address, Phone, NPWP, ID_Card, DOB,
+                       Spouse_Name, SpouseIDCard, SpouseDOB, Mother, ContactPerson, ContactAddress,
+                       Reason, Reason_Category, Reason_Other,
+                       CreateUser, CreateDate, LastUser, LastUpdate, apless, FlagDel
+                FROM MCMOWatchList WITH(NOLOCK)
+                WHERE No = :no AND Flag_type = 'B'
             """),
             {"no": no}
         ).fetchone()
@@ -300,15 +566,15 @@ def get_blacklist(no):
         if not row:
             return jsonify({"error": "Record not found"}), 404
 
-        is_pr = row.Customer_Type == 'PR'
-        npwp = row.NPWP or ""
+        customer_type = 'PR' if _s(row.Customer_Type) == 'PR' else 'PT'
+        is_pr = customer_type == 'PR'
 
         members = []
         if not is_pr:
             member_rows = db.session.execute(
                 text("""
-                    SELECT ID_Blacklist, MANAGEMENT_NM, POSITION, Position_Other,
-                           OS_CODE, ADDRESS, CITY, ID_CARD
+                    SELECT ID_Blacklist, MANAGEMENT_NM, POSITION, Position_Other, OS_CODE,
+                           SHAREHOLDER_STATUS, NPWP, ID_CARD
                     FROM CAFORGSTRUCT_Blacklist WITH(NOLOCK)
                     WHERE McmoWatchlistID = :no
                     ORDER BY OS_CODE, ID_Blacklist
@@ -317,49 +583,54 @@ def get_blacklist(no):
             ).fetchall()
 
             for r in member_rows:
-                os_code = (r.OS_CODE or "").strip()
-                position = (r.POSITION or "").strip()
+                if not _s(r.MANAGEMENT_NM):
+                    continue
+                os_code = _s(r.OS_CODE)
                 members.append({
                     "id_blacklist": r.ID_Blacklist,
                     "name": r.MANAGEMENT_NM or "",
-                    "bod_position": position if os_code == BOD_OS_CODE else "",
-                    "boc_position": position if os_code == BOC_OS_CODE else "",
-                    "other": (r.Position_Other or "").strip(),
+                    "os_code": os_code if os_code in OS_CODE_WHITELIST else "",
+                    "position": _s(r.POSITION),
+                    "position_other": r.Position_Other or "",
+                    "shareholder_status": _s(r.SHAREHOLDER_STATUS),
+                    "npwp": r.NPWP or "",
                     "id_card": r.ID_CARD or "",
-                    "address": r.ADDRESS or "",
-                    "city": r.CITY or "",
                 })
+
+        dob_iso = fmt_date(row.DOB, "%Y-%m-%d") if row.DOB else ""
 
         return jsonify({
             "no": row.No,
-            "customer_type": row.Customer_Type,
+            "customer_type": customer_type,
+            "lessee_cat": "" if is_pr else _s(row.Lessee_Cat),
             "name": row.Name or "",
-            "alias_name": row.alias_name or "",
             "address": row.Address or "",
             "phone": row.Phone or "",
-            "npwp": npwp,
-            "id_card": row.ID_Card or "",
-            "dob": fmt_date(row.DOB, "%Y-%m-%d") if (is_pr and row.DOB) else "",
-            "spouse_name": row.Spouse_Name or "",
-            "mother": row.Mother or "",
-            "contact_person": row.ContactPerson or "",
-            "contact_address": row.ContactAddress or "",
-            "contact_group": row.Contact_Group or "",
-            "establishment_date": fmt_date(row.DOB, "%Y-%m-%d") if (not is_pr and row.DOB) else "",
-            "reason_category": (row.Reason_Category or "").strip(),
-            "reason_other": (row.Reason_Other or "").strip(),
-            "remark": row.Reason or "",
-            "problem_since": fmt_date(row.Problem_Since, "%Y-%m-%d") if row.Problem_Since else "",
-            "create_by": row.CreateUser or "",
-            "create_date": fmt_date(row.CreateDate, "%Y-%m-%d") if row.CreateDate else "",
+            "npwp": _s(row.NPWP),
+            "id_card": (row.ID_Card or "") if is_pr else "",
+            "dob": dob_iso if is_pr else "",
+            "establishment_date": "" if is_pr else dob_iso,
+            "spouse_name": (row.Spouse_Name or "") if is_pr else "",
+            "spouse_idcard": (row.SpouseIDCard or "") if is_pr else "",
+            "spouse_dob": fmt_date(row.SpouseDOB, "%Y-%m-%d") if (is_pr and row.SpouseDOB) else "",
+            "mother": (row.Mother or "") if is_pr else "",
+            "contact_person": "" if is_pr else (row.ContactPerson or ""),
+            "contact_address": "" if is_pr else (row.ContactAddress or ""),
+            "reason_category": _s(row.Reason_Category),
+            "reason_other": _s(row.Reason_Other),
+            "remark": _s(row.Reason),
+            "create_by": row.CreateUser or session.get("username", ""),
+            "create_date": fmt_date(row.CreateDate, "%d-%m-%Y") if row.CreateDate else "",
             "last_user": row.LastUser or "",
-            "last_update": fmt_date(row.LastUpdate, "%Y-%m-%d") if row.LastUpdate else "",
-            "apless": row.apless or "",
+            "last_update": fmt_date(row.LastUpdate, "%d-%m-%Y") if row.LastUpdate else "",
+            "apless": _s(row.apless),
+            "deleted": _s(row.FlagDel) == '1',
             "members": members,
         })
     except Exception as e:
         current_app.logger.exception("Get blacklist error")
         return jsonify({"error": str(e)}), 500
+
 
 @blacklist_bp.route('/blacklist', methods=['POST'])
 @login_required
@@ -367,119 +638,65 @@ def create_blacklist():
     try:
         username = session.get("username", "")
 
-        try:
-            data = json.loads(request.form.get('data', '{}'))
-        except ValueError:
+        data = _load_payload()
+        if data is None:
             return jsonify({"error": "Malformed payload"}), 400
 
-        customer_type = data.get('customer_type')
+        customer_type = _s(data.get('customer_type'))
         if customer_type not in ('PR', 'PT'):
             return jsonify({"error": "Customer Type must not empty"}), 400
 
-        name = (data.get('name') or '').strip()
-        address = (data.get('address') or '').strip()
-        npwp = _strip_special(data.get('npwp'))
-        id_card = (data.get('id_card') or '').strip()
-        alias_name = (data.get('alias_name') or '').strip()
-        reason_category = (data.get('reason_category') or '').strip()
-        members = data.get('members', [])
+        is_pr = customer_type == 'PR'
+        f = _read_fields(data, customer_type)
+        members = [] if is_pr else _read_members(data.get('members'), customer_type)
 
-        errors, dob, est = _validate_core(data, customer_type)
-        if customer_type == 'PT':
-            errors += _validate_members(members)
+        errors, dob, spouse_dob = _validate(f, customer_type, members, 'create')
         if errors:
-            return jsonify({"error": " ".join(errors)}), 400
+            return _errors_response(errors)
 
-        name_uth = _strip_special(name)
-        address_uth = _strip_special(address)
+        new_no = int(db.session.execute(
+            text("SELECT ISNULL(MAX(No), 0) + 1 AS no FROM MCMOWatchList WITH (UPDLOCK, HOLDLOCK)")
+        ).fetchone().no)
 
-        if customer_type == 'PR':
-            existing = db.session.execute(
-                text("""
-                    SELECT TOP 1 Flag_Type FROM MCMOWatchList WITH(NOLOCK)
-                    WHERE dbo.RemoveSpecialChars(Name) = :n AND dbo.RemoveSpecialChars(Address) = :a
-                      AND dbo.RemoveSpecialChars(ID_Card) = :i AND Flagdel = 0
-                """),
-                {"n": name_uth, "a": address_uth, "i": _strip_special(id_card)}
-            ).fetchone()
-            if not existing:
-                existing = db.session.execute(
-                    text("""
-                        SELECT TOP 1 Flag_Type FROM MCMOWatchList WITH(NOLOCK)
-                        WHERE dbo.RemoveSpecialChars(Name) = :n AND dbo.RemoveSpecialChars(Address) = :a
-                          AND Flagdel = 0
-                    """),
-                    {"n": name_uth, "a": address_uth}
-                ).fetchone()
-        else:
-            existing = db.session.execute(
-                text("""
-                    SELECT TOP 1 Flag_Type FROM MCMOWatchList WITH(NOLOCK)
-                    WHERE dbo.RemoveSpecialChars(Name) = :n AND dbo.RemoveSpecialChars(Address) = :a
-                      AND dbo.RemoveSpecialChars(NPWP) = :p AND Flagdel = 0
-                """),
-                {"n": name_uth, "a": address_uth, "p": npwp}
-            ).fetchone()
+        problem_since_sql = "CONVERT(date, GETDATE())" if f['reason_category'] == REASON_PROBLEM_SINCE else "NULL"
 
-        if existing:
-            if existing.Flag_Type == 'W':
-                return jsonify({"error": "Customer sudah terdaftar di Watchlist"}), 400
-            if existing.Flag_Type == 'B':
-                return jsonify({"error": "Customer sudah terdaftar di Blacklist"}), 400
+        db.session.execute(
+            text(f"""
+                INSERT INTO MCMOWatchList
+                    (No, Name, Address, ID_Card, Phone, CreateUser, CreateDate, Reason,
+                     DOB, Flag_Type, Customer_Type, Lessee_Cat, Spouse_Name, SpouseIDCard,
+                     SpouseDOB, FlagDel, Mother, ContactPerson, ContactAddress,
+                     Reason_Category, Reason_Other, NPWP, Problem_Since)
+                VALUES
+                    (:no, :name, :address, :id_card, :phone, :create_user, CONVERT(date, GETDATE()), :remark,
+                     :dob, 'B', :customer_type, :lessee_cat, :spouse_name, :spouse_idcard,
+                     :spouse_dob, '0', :mother, :contact_person, :contact_address,
+                     :reason_category, :reason_other, :npwp, {problem_since_sql})
+            """),
+            {
+                "no": new_no,
+                "name": f['name'],
+                "address": f['address'],
+                "id_card": f['id_card'] if is_pr else None,
+                "phone": f['phone'],
+                "create_user": username,
+                "remark": f['remark'],
+                "dob": dob,
+                "customer_type": customer_type,
+                "lessee_cat": None if is_pr else f['lessee_cat'],
+                "spouse_name": f['spouse_name'] if is_pr else None,
+                "spouse_idcard": f['spouse_idcard'] if is_pr else None,
+                "spouse_dob": spouse_dob if is_pr else None,
+                "mother": f['mother'] if is_pr else None,
+                "contact_person": None if is_pr else f['contact_person'],
+                "contact_address": None if is_pr else f['contact_address'],
+                "reason_category": f['reason_category'],
+                "reason_other": f['reason_other'],
+                "npwp": f['npwp'],
+            }
+        )
 
-        max_row = db.session.execute(
-            text("SELECT MAX(No) AS no FROM MCMOWatchList WITH(UPDLOCK, HOLDLOCK)")
-        ).fetchone()
-        new_no = (max_row.no or 0) + 1
-
-        problem_since_sql = "GETDATE()" if reason_category == '2' else "NULL"
-
-        if customer_type == 'PR':
-            db.session.execute(
-                text(f"""
-                    INSERT INTO MCMOWatchList
-                        (No, Name, Address, ID_Card, Phone, CreateUser, CreateDate, Reason, DOB,
-                         Flag_type, Customer_Type, Spouse_Name, FlagDel, Mother,
-                         Reason_Category, Reason_Other, NPWP, Problem_Since)
-                    VALUES
-                        (:no, :name, :address, :id_card, :phone, :create_user, GETDATE(), :remark, :dob,
-                         'B', 'PR', :spouse_name, '0', :mother,
-                         :reason_category, :reason_other, :npwp, {problem_since_sql})
-                """),
-                {"no": new_no, "name": name, "address": address, "id_card": id_card,
-                 "phone": (data.get('phone') or '').strip(), "create_user": username,
-                 "remark": (data.get('remark') or '').strip(), "dob": dob,
-                 "spouse_name": (data.get('spouse_name') or '').strip(),
-                 "mother": (data.get('mother') or '').strip(),
-                 "reason_category": reason_category,
-                 "reason_other": (data.get('reason_other') or '').strip(), "npwp": npwp}
-            )
-        else:
-            db.session.execute(
-                text(f"""
-                    INSERT INTO MCMOWatchList
-                        (No, Name, Address, Phone, CreateUser, CreateDate, Reason,
-                         ContactPerson, ContactAddress, DOB, Flag_type, Customer_Type, FlagDel,
-                         Contact_Group, Reason_Category, Reason_Other, NPWP, Problem_Since)
-                    VALUES
-                        (:no, :name, :address, :phone, :create_user, GETDATE(), :remark,
-                         :contact_person, :contact_address, :est_date, 'B', 'PT', '0',
-                         :contact_group, :reason_category, :reason_other, :npwp, {problem_since_sql})
-                """),
-                {"no": new_no, "name": name, "address": address,
-                 "phone": (data.get('phone') or '').strip(), "create_user": username,
-                 "remark": (data.get('remark') or '').strip(),
-                 "contact_person": (data.get('contact_person') or '').strip(),
-                 "contact_address": (data.get('contact_address') or '').strip(),
-                 "est_date": est, "contact_group": (data.get('contact_group') or '').strip(),
-                 "reason_category": reason_category,
-                 "reason_other": (data.get('reason_other') or '').strip(), "npwp": npwp}
-            )
-
-        if customer_type == 'PR' and alias_name:
-            _insert_alias(new_no, alias_name)
-
-        _save_members(new_no, customer_type, members)
+        _save_members(new_no, customer_type, f['lessee_cat'], members, replace=False)
 
         db.session.commit()
         return jsonify({"message": "success", "no": new_no})
@@ -488,14 +705,6 @@ def create_blacklist():
         current_app.logger.exception("Create blacklist error")
         return jsonify({"error": str(e)}), 500
 
-def _insert_alias(no: int, alias_name: str):
-    row = db.session.execute(
-        text("SELECT MAX(ID) AS id FROM MCMOWATCHLIST_ALIASNM WITH(UPDLOCK, HOLDLOCK)")
-    ).fetchone()
-    db.session.execute(
-        text("INSERT INTO MCMOWATCHLIST_ALIASNM (NO, ID, NAME) VALUES (:no, :id, :name)"),
-        {"no": no, "id": (row.id or 0) + 1, "name": alias_name}
-    )
 
 @blacklist_bp.route('/blacklist/<int:no>', methods=['PUT'])
 @login_required
@@ -503,16 +712,15 @@ def update_blacklist(no):
     try:
         username = session.get("username", "")
 
-        try:
-            data = json.loads(request.form.get('data', '{}'))
-        except ValueError:
+        data = _load_payload()
+        if data is None:
             return jsonify({"error": "Malformed payload"}), 400
 
         current = db.session.execute(
             text("""
-                SELECT Customer_Type, Name, NPWP, Reason_Category, apless
-                FROM MCMOWatchList WITH(NOLOCK)
-                WHERE No = :no AND Flag_Type = 'B' AND FlagDel = '0'
+                SELECT Customer_Type, Reason_Category, apless
+                FROM MCMOWatchList
+                WHERE No = :no AND Flag_Type = 'B' AND ISNULL(FlagDel, '0') <> '1'
             """),
             {"no": no}
         ).fetchone()
@@ -520,173 +728,73 @@ def update_blacklist(no):
         if not current:
             return jsonify({"error": "Record not found"}), 404
 
-        customer_type = current.Customer_Type
+        if _s(current.apless):
+            return jsonify({"error": "Record linked to a customer cannot be edited"}), 403
 
-        name = (data.get('name') or '').strip()
-        address = (data.get('address') or '').strip()
-        npwp = _strip_special(data.get('npwp'))
-        alias_name = (data.get('alias_name') or '').strip()
-        members = data.get('members', [])
+        customer_type = 'PR' if _s(current.Customer_Type) == 'PR' else 'PT'
+        is_pr = customer_type == 'PR'
 
-        stored_category = (current.Reason_Category or '').strip()
-        if stored_category == '4':
-            reason_category = '4'
-            data = {**data, 'reason_category': '4'}
-        else:
-            reason_category = (data.get('reason_category') or '').strip()
+        f = _read_fields(data, customer_type)
+        locked_category = REASON_LOCKED if _s(current.Reason_Category) == REASON_LOCKED else ''
+        if locked_category:
+            f['reason_category'] = locked_category
 
-        errors, dob, est = _validate_core(data, customer_type)
-        if customer_type == 'PT':
-            errors += _validate_members(members)
+        members = [] if is_pr else _read_members(data.get('members'), customer_type)
+
+        errors, dob, spouse_dob = _validate(f, customer_type, members, 'edit', no, locked_category)
         if errors:
-            return jsonify({"error": " ".join(errors)}), 400
+            return _errors_response(errors)
 
-        if customer_type == 'PR':
-            db.session.execute(
+        if is_pr:
+            result = db.session.execute(
                 text("""
                     UPDATE MCMOWatchList SET
-                        Name = :name, Address = :address, ID_Card = :id_card, DOB = :dob,
-                        Phone = :phone, Spouse_Name = :spouse_name, Mother = :mother,
-                        LastUser = :last_user, LastUpdate = SYSDATETIME(), Reason = :remark,
-                        Reason_Category = :reason_category, Reason_Other = :reason_other, NPWP = :npwp
-                    WHERE No = :no AND FlagDel = '0' AND Flag_Type = 'B'
+                        Name = :name, Address = :address, ID_Card = :id_card, DOB = :dob, Phone = :phone,
+                        Spouse_Name = :spouse_name, SpouseIDCard = :spouse_idcard, SpouseDOB = :spouse_dob,
+                        Mother = :mother, LastUser = :last_user, LastUpdate = SYSDATETIME(),
+                        Reason = :remark, Reason_Category = :reason_category,
+                        Reason_Other = :reason_other, NPWP = :npwp
+                    WHERE No = :no AND ISNULL(FlagDel, '0') <> '1' AND Flag_Type = 'B'
                 """),
-                {"name": name, "address": address, "id_card": (data.get('id_card') or '').strip(),
-                 "dob": dob, "phone": (data.get('phone') or '').strip(),
-                 "spouse_name": (data.get('spouse_name') or '').strip(),
-                 "mother": (data.get('mother') or '').strip(), "last_user": username,
-                 "remark": (data.get('remark') or '').strip(), "reason_category": reason_category,
-                 "reason_other": (data.get('reason_other') or '').strip(), "npwp": npwp, "no": no}
+                {
+                    "name": f['name'], "address": f['address'], "id_card": f['id_card'],
+                    "dob": dob, "phone": f['phone'],
+                    "spouse_name": f['spouse_name'], "spouse_idcard": f['spouse_idcard'],
+                    "spouse_dob": spouse_dob, "mother": f['mother'], "last_user": username,
+                    "remark": f['remark'], "reason_category": f['reason_category'],
+                    "reason_other": f['reason_other'], "npwp": f['npwp'], "no": no,
+                }
             )
-
-            alias_exists = db.session.execute(
-                text("SELECT TOP 1 NAME FROM MCMOWATCHLIST_ALIASNM WITH(NOLOCK) WHERE NO = :no"),
-                {"no": no}
-            ).fetchone()
-
-            if alias_exists:
-                db.session.execute(
-                    text("UPDATE MCMOWATCHLIST_ALIASNM SET NAME = :name WHERE NO = :no"),
-                    {"name": alias_name, "no": no}
-                )
-            elif alias_name:
-                _insert_alias(no, alias_name)
         else:
-            db.session.execute(
+            result = db.session.execute(
                 text("""
                     UPDATE MCMOWatchList SET
                         Name = :name, Address = :address, Phone = :phone,
                         ContactPerson = :contact_person, ContactAddress = :contact_address,
-                        Contact_Group = :contact_group, DOB = :dob,
-                        LastUser = :last_user, LastUpdate = SYSDATETIME(), Reason = :remark,
-                        Reason_Category = :reason_category, Reason_Other = :reason_other, NPWP = :npwp
-                    WHERE No = :no AND FlagDel = '0' AND Flag_Type = 'B'
+                        Lessee_Cat = :lessee_cat, DOB = :dob,
+                        LastUser = :last_user, LastUpdate = SYSDATETIME(),
+                        Reason = :remark, Reason_Category = :reason_category,
+                        Reason_Other = :reason_other, NPWP = :npwp
+                    WHERE No = :no AND ISNULL(FlagDel, '0') <> '1' AND Flag_Type = 'B'
                 """),
-                {"name": name, "address": address, "phone": (data.get('phone') or '').strip(),
-                 "contact_person": (data.get('contact_person') or '').strip(),
-                 "contact_address": (data.get('contact_address') or '').strip(),
-                 "contact_group": (data.get('contact_group') or '').strip(), "dob": est,
-                 "last_user": username, "remark": (data.get('remark') or '').strip(),
-                 "reason_category": reason_category,
-                 "reason_other": (data.get('reason_other') or '').strip(), "npwp": npwp, "no": no}
+                {
+                    "name": f['name'], "address": f['address'], "phone": f['phone'],
+                    "contact_person": f['contact_person'], "contact_address": f['contact_address'],
+                    "lessee_cat": f['lessee_cat'], "dob": dob, "last_user": username,
+                    "remark": f['remark'], "reason_category": f['reason_category'],
+                    "reason_other": f['reason_other'], "npwp": f['npwp'], "no": no,
+                }
             )
 
-        _save_members(no, customer_type, members)
+        if result.rowcount == 0:
+            db.session.rollback()
+            return jsonify({"error": "Record not found"}), 404
+
+        _save_members(no, customer_type, f['lessee_cat'], members, replace=True)
 
         db.session.commit()
         return jsonify({"message": "success"})
     except Exception as e:
         db.session.rollback()
         current_app.logger.exception("Update blacklist error")
-        return jsonify({"error": str(e)}), 500
-
-@blacklist_bp.route('/blacklist/<int:no>/delete', methods=['POST'])
-@login_required
-def delete_blacklist(no):
-    try:
-        username = session.get("username", "")
-        reason = (request.form.get('reason') or '').strip()
-
-        if not reason:
-            return jsonify({"error": "fill the reason first"}), 400
-
-        file = request.files.get('attachment')
-        if not file or not file.filename:
-            return jsonify({"error": "Upload the file first"}), 400
-
-        row = db.session.execute(
-            text("""
-                SELECT Name, Address, apless FROM MCMOWatchList WITH(NOLOCK)
-                WHERE No = :no AND Flag_Type = 'B' AND (FlagDel <> '1' OR FlagDel IS NULL)
-            """),
-            {"no": no}
-        ).fetchone()
-
-        if not row:
-            return jsonify({"error": "Record not found"}), 404
-
-        apless = row.apless or _lookup_apless(row.Name, row.Address)
-        filename = save_general_attachment(file, f"blacklist-{no}", apless, current_app.config['UPLOAD_FOLDER'])
-
-        result = db.session.execute(
-            text("""
-                UPDATE MCMOWATCHLIST
-                SET flagdel = '1', attachment = :attachment, deleteby = :deleteby,
-                    Reason_Delete = :reason, DeleteDate = SYSDATETIME()
-                WHERE No = :no AND flag_type = 'B' AND (FlagDel <> '1' OR FlagDel IS NULL)
-            """),
-            {"attachment": filename, "deleteby": username, "reason": reason, "no": no}
-        )
-
-        if result.rowcount == 0:
-            db.session.rollback()
-            return jsonify({"error": "Record not found"}), 404
-
-        db.session.commit()
-        return jsonify({"message": "success"})
-    except Exception as e:
-        db.session.rollback()
-        current_app.logger.exception("Delete blacklist error")
-        return jsonify({"error": str(e)}), 500
-
-@blacklist_bp.route('/blacklist/management/<int:id_blacklist>/image')
-@login_required
-def get_management_image(id_blacklist):
-    try:
-        row = db.session.execute(
-            text("SELECT IMAGES FROM CAFORGSTRUCT_Blacklist WITH(NOLOCK) WHERE ID_Blacklist = :id"),
-            {"id": id_blacklist}
-        ).fetchone()
-
-        if not row or not row.IMAGES:
-            return jsonify({"error": "No image found"}), 404
-
-        return send_from_directory(current_app.config['UPLOAD_FOLDER_BLACKLIST'], row.IMAGES)
-    except Exception as e:
-        current_app.logger.exception("Get image error")
-        return jsonify({"error": str(e)}), 500
-
-@blacklist_bp.route('/blacklist/management/<int:id_blacklist>/image', methods=['DELETE'])
-@login_required
-def delete_management_image(id_blacklist):
-    try:
-        row = db.session.execute(
-            text("SELECT IMAGES FROM CAFORGSTRUCT_Blacklist WITH(NOLOCK) WHERE ID_Blacklist = :id"),
-            {"id": id_blacklist}
-        ).fetchone()
-
-        if not row or not row.IMAGES:
-            return jsonify({"error": "No image found"}), 404
-
-        delete_blacklist_file(row.IMAGES, current_app.config['UPLOAD_FOLDER_BLACKLIST'])
-
-        db.session.execute(
-            text("UPDATE CAFORGSTRUCT_Blacklist SET IMAGES = NULL WHERE ID_Blacklist = :id"),
-            {"id": id_blacklist}
-        )
-        db.session.commit()
-        return jsonify({"message": "success"})
-    except Exception as e:
-        db.session.rollback()
-        current_app.logger.exception("Delete image error")
         return jsonify({"error": str(e)}), 500
