@@ -5,6 +5,16 @@ from sqlalchemy import text
 
 insurance_master_bp = Blueprint("insurance_master", __name__, url_prefix="/MasterData")
 
+def _s(value, default=""):
+    return default if value is None else str(value).strip()
+
+def _flag(value) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, (bool, int)):
+        return bool(value)
+    return str(value).strip().upper() in ("1", "Y", "YES", "T", "TRUE")
+
 @insurance_master_bp.route("/insurance")
 @login_required
 def get_insurance():
@@ -203,10 +213,10 @@ def get_premiums(ins_cd):
             "l_amount":      str(r["L_AMOUNT"]  or "0"),
             "tlo_ar":        r["TLO_AR"]           or "",
             "tlo_name":      r["tlo_name"]         or "",
-            "net_premi":     str(r["NET_PREMI"]   or ""),
-            "net_rec_new":   str(r["NET_REC_NEW"] or ""),
-            "net_rec_used":  str(r["NET_REC_USED"]or ""),
-            "premi":         str(r["PREMI"]        or ""),
+            "net_premi":     _s(r["NET_PREMI"]),
+            "net_rec_new":   _s(r["NET_REC_NEW"]),
+            "net_rec_used":  _s(r["NET_REC_USED"]),
+            "premi":         _s(r["PREMI"]),
         } for r in rows]})
     except Exception:
         current_app.logger.exception("Premium list error")
@@ -369,10 +379,10 @@ def get_clauses(ins_cd):
             "clause_name":    r["clause_name"]      or "",
             "tlo_ar":         r["TLO_AR"]           or "",
             "tlo_name":       r["tlo_name"]         or "",
-            "net_premi":      str(r["NET_PREMI"]   or ""),
-            "net_rec_new":    str(r["NET_REC_NEW"] or ""),
-            "net_rec_used":   str(r["NET_REC_USED"]or ""),
-            "premi":          str(r["PREMI"]        or ""),
+            "net_premi":      _s(r["NET_PREMI"]),
+            "net_rec_new":    _s(r["NET_REC_NEW"]),
+            "net_rec_used":   _s(r["NET_REC_USED"]),
+            "premi":          _s(r["PREMI"]),
         } for r in rows]})
     except Exception:
         current_app.logger.exception("Clause list error")
@@ -515,29 +525,51 @@ def get_passenger(ins_cd):
             WHERE INS_CD=:c ORDER BY SEAT_AMOUNT
         """), {"c": ins_cd}).mappings().all()
         return jsonify({"data": [{
-            "seat_amount":  str(r["SEAT_AMOUNT"]  or "0"),
-            "seat":         str(r["SEAT"]          or ""),
-            "seat_fee_ins": str(r["SEAT_FEE_INS"]  or "0"),
-            "seat_fee_cust":str(r["SEAT_FEE_CUST"] or "0"),
+            "seat_amount":  _s(r["SEAT_AMOUNT"], "0"),
+            "seat":         _s(r["SEAT"]),
+            "seat_fee_ins": _s(r["SEAT_FEE_INS"], "0"),
+            "seat_fee_cust":_s(r["SEAT_FEE_CUST"], "0"),
         } for r in rows]})
     except Exception:
         current_app.logger.exception("Passenger list error")
         return jsonify({"data": []}), 500
 
+def _amount(value, default="0") -> str:
+    v = _s(value).replace(",", "")
+    return v if v else default
+
+def _passenger_key():
+    return _s(request.args.get("seat_amount")).replace(",", ""), _s(request.args.get("seat"))
+
 @insurance_master_bp.route("/insurance/<string:ins_cd>/passenger", methods=["POST"])
 @login_required
 def add_passenger(ins_cd):
     d = request.get_json(force=True) or {}
+    seat_amount = _s(d.get("seat_amount")).replace(",", "")
+    seat = _s(d.get("seat"))
+    if not seat_amount:
+        return jsonify({"success": False, "message": "Please fill Seat Amount."}), 400
+    if not seat:
+        return jsonify({"success": False, "message": "Please fill Seat."}), 400
+    if not seat.isdigit():
+        return jsonify({"success": False, "message": "Seat must be a number."}), 400
     try:
+        exists = db.session.execute(text("""
+            SELECT COUNT(*) FROM CLFINSSEAT WITH(NOLOCK)
+            WHERE INS_CD=:ins AND SEAT_AMOUNT=:sa AND SEAT=:seat
+        """), {"ins": ins_cd, "sa": seat_amount, "seat": seat}).scalar() or 0
+        if exists:
+            return jsonify({"success": False, "message": "Seat Amount and Seat already exist."}), 409
+
         db.session.execute(text("""
             INSERT INTO CLFINSSEAT
                 (INS_CD, SEAT_AMOUNT, SEAT, SEAT_FEE_INS, SEAT_FEE_CUST)
             VALUES (:ins, :sa, :seat, :fi, :fc)
         """), {"ins":  ins_cd,
-               "sa":   d.get("seat_amount",  "0").replace(",", ""),
-               "seat": d.get("seat",         ""),
-               "fi":   d.get("seat_fee_ins", "0").replace(",", ""),
-               "fc":   d.get("seat_fee_cust","0").replace(",", "")})
+               "sa":   seat_amount,
+               "seat": seat,
+               "fi":   _amount(d.get("seat_fee_ins")),
+               "fc":   _amount(d.get("seat_fee_cust"))})
         db.session.commit()
         return jsonify({"success": True})
     except Exception:
@@ -545,18 +577,22 @@ def add_passenger(ins_cd):
         current_app.logger.exception("Passenger add error")
         return jsonify({"success": False, "message": "Save failed"}), 500
 
-@insurance_master_bp.route("/insurance/<string:ins_cd>/passenger/<string:seat_amount>/<string:seat>", methods=["PUT"])
+@insurance_master_bp.route("/insurance/<string:ins_cd>/passenger", methods=["PUT"])
 @login_required
-def update_passenger(ins_cd, seat_amount, seat):
+def update_passenger(ins_cd):
     d = request.get_json(force=True) or {}
+    seat_amount, seat = _passenger_key()
     try:
-        db.session.execute(text("""
+        res = db.session.execute(text("""
             UPDATE CLFINSSEAT
             SET SEAT_FEE_INS=:fi, SEAT_FEE_CUST=:fc
             WHERE INS_CD=:ins AND SEAT_AMOUNT=:sa AND SEAT=:seat
         """), {"ins": ins_cd, "sa": seat_amount, "seat": seat,
-               "fi":  d.get("seat_fee_ins", "0").replace(",", ""),
-               "fc":  d.get("seat_fee_cust","0").replace(",", "")})
+               "fi":  _amount(d.get("seat_fee_ins")),
+               "fc":  _amount(d.get("seat_fee_cust"))})
+        if res.rowcount == 0:
+            db.session.rollback()
+            return jsonify({"success": False, "message": "Data not found."}), 404
         db.session.commit()
         return jsonify({"success": True})
     except Exception:
@@ -564,14 +600,18 @@ def update_passenger(ins_cd, seat_amount, seat):
         current_app.logger.exception("Passenger update error")
         return jsonify({"success": False, "message": "Update failed"}), 500
 
-@insurance_master_bp.route("/insurance/<string:ins_cd>/passenger/<string:seat_amount>/<string:seat>", methods=["DELETE"])
+@insurance_master_bp.route("/insurance/<string:ins_cd>/passenger", methods=["DELETE"])
 @login_required
-def delete_passenger(ins_cd, seat_amount, seat):
+def delete_passenger(ins_cd):
+    seat_amount, seat = _passenger_key()
     try:
-        db.session.execute(text("""
+        res = db.session.execute(text("""
             DELETE FROM CLFINSSEAT
             WHERE INS_CD=:ins AND SEAT_AMOUNT=:sa AND SEAT=:seat
         """), {"ins": ins_cd, "sa": seat_amount, "seat": seat})
+        if res.rowcount == 0:
+            db.session.rollback()
+            return jsonify({"success": False, "message": "Data not found."}), 404
         db.session.commit()
         return jsonify({"success": True})
     except Exception:
@@ -595,8 +635,8 @@ def get_loading(ins_cd):
             "ID":       r["ID"],
             "model":    r["MODEL"]    or "",
             "model_nm": r["model_nm"] or "",
-            "lr_age":   str(r["LR_AGE"]  or ""),
-            "lr_next":  bool(r["LR_NEXT"]),
+            "lr_age":   _s(r["LR_AGE"]),
+            "lr_next":  _flag(r["LR_NEXT"]),
         } for r in rows]})
     except Exception:
         current_app.logger.exception("Loading list error")
@@ -611,7 +651,7 @@ def add_loading(ins_cd):
             "SELECT ISNULL(MAX(CONVERT(int, [ID])), 0)+1 FROM CLFINSLR WITH(NOLOCK)"
         )).scalar() or 1
 
-        lr_next = 1 if d.get("lr_next") else 0
+        lr_next = 1 if _flag(d.get("lr_next")) else 0
         db.session.execute(text("""
             INSERT INTO CLFINSLR ([ID], INS_CD, MODEL, LR_AGE, LR_NEXT)
             VALUES (:id, :ins, :model, :age, :next)
@@ -632,13 +672,16 @@ def add_loading(ins_cd):
 def update_loading(ins_cd, lr_id):
     d = request.get_json(force=True) or {}
     try:
-        lr_next = 1 if d.get("lr_next") else 0
-        db.session.execute(text("""
+        lr_next = 1 if _flag(d.get("lr_next")) else 0
+        res = db.session.execute(text("""
             UPDATE CLFINSLR SET LR_AGE=:age, LR_NEXT=:next
             WHERE INS_CD=:ins AND [ID]=:id
         """), {"ins": ins_cd, "id": lr_id,
-               "age":  d.get("lr_age", ""),
+               "age":  _s(d.get("lr_age")),
                "next": lr_next})
+        if res.rowcount == 0:
+            db.session.rollback()
+            return jsonify({"success": False, "message": "Data not found."}), 404
         db.session.commit()
         return jsonify({"success": True})
     except Exception:

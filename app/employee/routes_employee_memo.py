@@ -1,13 +1,26 @@
-import os
+import urllib.parse
+import urllib.request
 from datetime import datetime
+
 from flask import Blueprint, jsonify, request, current_app, session
+from sqlalchemy import text
+
 from app import db
 from app.auth.decorators import login_required
-from sqlalchemy import text
 
 employee_memo_bp = Blueprint("memo", __name__, url_prefix="/Employee")
 
+DIV_HR = "11"
+DIV_IT = "15"
+MEMO_TYPES = ("NW", "RL", "RS")
+
+def _s(value) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
 def _ddmm_to_iso(v: str) -> str:
+    v = _s(v)
     if not v:
         return ""
     try:
@@ -15,7 +28,61 @@ def _ddmm_to_iso(v: str) -> str:
     except ValueError:
         return ""
 
-@employee_memo_bp.route("/role")
+def _send_telegram(chat_id: str, message: str) -> None:
+    token = current_app.config.get("TELEGRAM_BOT_TOKEN", "")
+    if not token or not chat_id:
+        return
+    data = urllib.parse.urlencode({"chat_id": chat_id, "text": message}).encode()
+    try:
+        with urllib.request.urlopen(f"https://api.telegram.org/bot{token}/sendMessage", data=data, timeout=10) as resp:
+            resp.read()
+    except Exception:
+        current_app.logger.exception("Telegram send failed for %s", chat_id)
+
+def _notify_division(div_id: str, message: str) -> None:
+    try:
+        rows = db.session.execute(
+            text("SELECT TelegramID FROM EMPLOYEE_DATA WITH(NOLOCK) WHERE Div_Id = :div AND TelegramID <> ''"),
+            {"div": div_id},
+        ).mappings().all()
+    except Exception:
+        current_app.logger.exception("Telegram recipient lookup failed")
+        return
+    for r in rows:
+        chat_id = _s(r["TelegramID"])
+        if chat_id:
+            _send_telegram(chat_id, message)
+
+def _ddmm_to_sql(v: str) -> str:
+    v = _s(v)
+    if not v:
+        return ""
+    try:
+        return datetime.strptime(v, "%d-%m-%Y").strftime("%Y%m%d")
+    except ValueError:
+        return ""
+
+def _exec_proc_rows(sql: str, params: tuple) -> list:
+    raw = db.session.connection().connection
+    cursor = raw.cursor()
+    try:
+        cursor.execute(sql, params)
+        while cursor.description is None:
+            if not cursor.nextset():
+                return []
+        columns = [c[0] for c in cursor.description]
+        return [dict(zip(columns, r)) for r in cursor.fetchall()]
+    finally:
+        cursor.close()
+
+def _positions_by_div(div_id) -> list:
+    rows = db.session.execute(
+        text("SELECT Position_Id, Position_Desc FROM UMF_EMPOS WITH(NOLOCK) WHERE Div_Id = :div ORDER BY Position_Desc"),
+        {"div": div_id},
+    ).mappings().all()
+    return [{"position_id": _s(r["Position_Id"]), "position_desc": r["Position_Desc"]} for r in rows]
+
+@employee_memo_bp.route("/memo/role")
 @login_required
 def get_role():
     employee = session.get("emp_id", "")
@@ -24,75 +91,71 @@ def get_role():
             text("SELECT Div_Id FROM EMPLOYEE_DATA WITH(NOLOCK) WHERE Employee_ID = :emp"),
             {"emp": employee},
         ).mappings().first()
-        div_id = str(row["Div_Id"]).strip() if row else ""
-        return jsonify({"is_hr": div_id == "11", "is_it": div_id == "15"})
+        div_id = _s(row["Div_Id"]) if row else ""
+        return jsonify({"is_hr": div_id == DIV_HR, "is_it": div_id == DIV_IT})
     except Exception:
         current_app.logger.exception("Role error")
         return jsonify({"is_hr": False, "is_it": False})
 
-@employee_memo_bp.route("/memo-types")
+@employee_memo_bp.route("/memo/memo-types")
 @login_required
 def get_memo_types():
     try:
         rows = db.session.execute(
-            text("SELECT VALUE, DESC_VALUE FROM MSTCOMBO WITH(NOLOCK) WHERE CAT_VALUE = 'MEMO_EMPLOYEE_TYPE' ORDER BY VALUE")
+            text("SELECT VALUE, DESC_VALUE FROM MSTCOMBO WITH(NOLOCK) WHERE CAT_VALUE = 'MEMO_EMPLOYEE_TYPE'")
         ).mappings().all()
-        return jsonify([{"value": r["VALUE"], "label": r["DESC_VALUE"]} for r in rows])
+        return jsonify([{"value": _s(r["VALUE"]), "label": r["DESC_VALUE"]} for r in rows])
     except Exception:
         current_app.logger.exception("Memo types error")
         return jsonify([]), 500
 
-@employee_memo_bp.route("/employees")
+@employee_memo_bp.route("/memo/employees")
 @login_required
 def get_employees():
     try:
         rows = db.session.execute(
             text("SELECT EMPLOYEE_ID, EMPLOYEE_FULLNAME FROM EMPLOYEE_DATA WITH(NOLOCK) ORDER BY EMPLOYEE_FULLNAME")
         ).mappings().all()
-        return jsonify([{"employee_id": r["EMPLOYEE_ID"], "employee_fullname": r["EMPLOYEE_FULLNAME"]} for r in rows])
+        return jsonify([{"employee_id": _s(r["EMPLOYEE_ID"]), "employee_fullname": r["EMPLOYEE_FULLNAME"]} for r in rows])
     except Exception:
         current_app.logger.exception("Employees error")
         return jsonify([]), 500
 
-@employee_memo_bp.route("/branches")
+@employee_memo_bp.route("/memo/branches")
 @login_required
 def get_branches():
     try:
         rows = db.session.execute(
-            text("SELECT BRANCH_CD, BRANCH_NAME FROM UMFBRANCH WITH(NOLOCK) WHERE BRANCH_CD <> '000' ORDER BY BRANCH_NAME")
+            text("SELECT BRANCH_CD, BRANCH_NAME FROM UMFBRANCH WITH(NOLOCK) WHERE BRANCH_CD <> '000'")
         ).mappings().all()
-        return jsonify([{"branch_cd": r["BRANCH_CD"], "branch_name": r["BRANCH_NAME"]} for r in rows])
+        return jsonify([{"branch_cd": _s(r["BRANCH_CD"]), "branch_name": r["BRANCH_NAME"]} for r in rows])
     except Exception:
         current_app.logger.exception("Branches error")
         return jsonify([]), 500
 
-@employee_memo_bp.route("/divisions")
+@employee_memo_bp.route("/memo/divisions")
 @login_required
 def get_divisions():
     try:
         rows = db.session.execute(
             text("SELECT DIV_ID, DIV_DESC FROM UMF_DIV WITH(NOLOCK) ORDER BY DIV_DESC")
         ).mappings().all()
-        return jsonify([{"div_id": r["DIV_ID"], "div_desc": r["DIV_DESC"]} for r in rows])
+        return jsonify([{"div_id": _s(r["DIV_ID"]), "div_desc": r["DIV_DESC"]} for r in rows])
     except Exception:
         current_app.logger.exception("Divisions error")
         return jsonify([]), 500
 
-@employee_memo_bp.route("/positions")
+@employee_memo_bp.route("/memo/positions")
 @login_required
 def get_positions():
     div_id = request.args.get("div_id", "")
     try:
-        rows = db.session.execute(
-            text("SELECT Position_Id, Position_Desc FROM UMF_EMPOS WITH(NOLOCK) WHERE Div_Id = :div ORDER BY Position_Desc"),
-            {"div": div_id},
-        ).mappings().all()
-        return jsonify([{"position_id": r["Position_Id"], "position_desc": r["Position_Desc"]} for r in rows])
+        return jsonify(_positions_by_div(div_id))
     except Exception:
         current_app.logger.exception("Positions error")
         return jsonify([]), 500
 
-@employee_memo_bp.route("/positions-all")
+@employee_memo_bp.route("/memo/positions-all")
 @login_required
 def get_positions_all():
     try:
@@ -105,50 +168,47 @@ def get_positions_all():
                 ORDER BY b.Div_Desc, a.Position_Desc
             """)
         ).mappings().all()
-        return jsonify([{"position_id": r["Position_ID"], "position_desc": r["Position_Desc"]} for r in rows])
+        return jsonify([{"position_id": _s(r["Position_ID"]), "position_desc": r["Position_Desc"]} for r in rows])
     except Exception:
         current_app.logger.exception("Positions-all error")
         return jsonify([]), 500
 
-@employee_memo_bp.route("/search")
+@employee_memo_bp.route("/memo/search")
 @login_required
 def search_memos():
-    memo_from = request.args.get("memo_from", "")
-    memo_to   = request.args.get("memo_to",   "")
-    from_iso  = _ddmm_to_iso(memo_from)
-    to_iso    = _ddmm_to_iso(memo_to)
+    from_dt = _ddmm_to_sql(request.args.get("memo_from", ""))
+    to_dt = _ddmm_to_sql(request.args.get("memo_to", ""))
+    if not from_dt or not to_dt:
+        from_dt, to_dt = "", ""
     try:
-        rows = db.session.execute(
-            text("EXEC USP_MEMO_EMPLOYEE :from_dt, :to_dt"),
-            {"from_dt": from_iso or None, "to_dt": to_iso or None},
-        ).mappings().all()
+        rows = _exec_proc_rows("SET NOCOUNT ON; EXEC USP_MEMO_EMPLOYEE ?, ?", (from_dt, to_dt))
         return jsonify([
             {
-                "id":                str(r.get("Id",               "") or ""),
-                "memo_type":         str(r.get("Memo_Type",        "") or ""),
-                "memo_type_desc":    str(r.get("Memo_Type_Desc",   "") or ""),
-                "memo_date":         str(r.get("Memo_Date",        "") or ""),
-                "employee_id":       str(r.get("Employee_Id",      "") or ""),
-                "employee_fullname": str(r.get("Employee_Fullname","") or ""),
-                "branch_name":       str(r.get("BRANCH_NAME",      "") or ""),
-                "div_desc":          str(r.get("Div_Desc",         "") or ""),
-                "position_desc":     str(r.get("Position_Desc",    "") or ""),
-                "facility":          str(r.get("Facility",         "") or ""),
-                "email":             str(r.get("Email",            "") or ""),
-                "new_branch":        str(r.get("New_Branch",       "") or ""),
-                "new_position":      str(r.get("New_Position",     "") or ""),
-                "email_off":         str(r.get("Email_OffDate",    "") or ""),
-                "app_off":           str(r.get("App_OffDate",      "") or ""),
-                "lewat":             str(r.get("Lewat",            "0") or "0"),
-                "cancel":            str(r.get("Cancel",           "0") or "0"),
+                "id": _s(r.get("Id")),
+                "memo_type": _s(r.get("Memo_Type")),
+                "memo_type_desc": _s(r.get("Memo_Type_Desc")),
+                "memo_date": _s(r.get("Memo_Date")),
+                "employee_id": _s(r.get("Employee_Id")),
+                "employee_fullname": _s(r.get("Employee_Fullname")),
+                "branch_name": _s(r.get("BRANCH_NAME")),
+                "div_desc": _s(r.get("Div_Desc")),
+                "position_desc": _s(r.get("Position_Desc")),
+                "facility": _s(r.get("Facility")),
+                "email": _s(r.get("Email")),
+                "new_branch": _s(r.get("New_Branch")),
+                "new_position": _s(r.get("New_Position")),
+                "email_off": _s(r.get("Email_OffDate")),
+                "app_off": _s(r.get("App_OffDate")),
+                "lewat": _s(r.get("Lewat")) or "0",
+                "cancel": _s(r.get("Cancel")) or "0",
             }
             for r in rows
         ])
-    except Exception:
-        current_app.logger.exception("Memo search error")
-        return jsonify({"error": "Search failed"}), 500
+    except Exception as e:
+        current_app.logger.exception("Memo search error from=%s to=%s", from_dt, to_dt)
+        return jsonify({"error": str(e)}), 500
 
-@employee_memo_bp.route("/employee/<employee_id>")
+@employee_memo_bp.route("/memo/employee/<employee_id>")
 @login_required
 def get_employee_detail(employee_id: str):
     try:
@@ -165,29 +225,21 @@ def get_employee_detail(employee_id: str):
         ).mappings().first()
 
         if not row:
-            return jsonify({"error": "Not found"}), 404
-
-        positions = db.session.execute(
-            text("SELECT Position_Id, Position_Desc FROM UMF_EMPOS WITH(NOLOCK) WHERE Div_Id = :div ORDER BY Position_Desc"),
-            {"div": row["Div_Id"]},
-        ).mappings().all()
+            return jsonify({"error": "Data Not Found!"}), 404
 
         return jsonify({
-            "employee_id":       row["Employee_ID"]       or "",
-            "employee_fullname": row["Employee_fullname"] or "",
-            "branch_cd":         row["Branch_Cd"]         or "",
-            "div_id":            row["Div_Id"]            or "",
-            "position_id":       row["Position_Id"]       or "",
-            "positions": [
-                {"position_id": p["Position_Id"], "position_desc": p["Position_Desc"]}
-                for p in positions
-            ],
+            "employee_id": _s(row["Employee_ID"]),
+            "employee_fullname": _s(row["Employee_fullname"]),
+            "branch_cd": _s(row["Branch_Cd"]),
+            "div_id": _s(row["Div_Id"]),
+            "position_id": _s(row["Position_Id"]),
+            "positions": _positions_by_div(row["Div_Id"]),
         })
     except Exception:
         current_app.logger.exception("Employee detail error")
         return jsonify({"error": "Failed"}), 500
 
-@employee_memo_bp.route("/detail/<memo_id>")
+@employee_memo_bp.route("/memo/detail/<memo_id>")
 @login_required
 def get_memo_detail(memo_id: str):
     try:
@@ -209,61 +261,63 @@ def get_memo_detail(memo_id: str):
         ).mappings().first()
 
         if not row:
-            return jsonify({"error": "Not found"}), 404
-
-        positions = db.session.execute(
-            text("SELECT Position_Id, Position_Desc FROM UMF_EMPOS WITH(NOLOCK) WHERE Div_Id = :div ORDER BY Position_Desc"),
-            {"div": row["Div_Id"]},
-        ).mappings().all()
+            return jsonify({"error": "Data Not Found!"}), 404
 
         return jsonify({
-            "employee_id":       str(row["Employee_ID"]       or ""),
-            "employee_fullname": str(row["Employee_fullname"] or ""),
-            "branch_cd":         str(row["Branch_Cd"]         or ""),
-            "div_id":            str(row["Div_Id"]            or ""),
-            "position_id":       str(row["Position_Id"]       or ""),
-            "memo_type":         str(row["memo_type"]         or ""),
-            "memo_date":         str(row["memo_date"]         or ""),
-            "facility_laptop":   str(row["facility_laptop"]   or "0"),
-            "facility_email":    str(row["facility_email"]    or "0"),
-            "facility_app":      str(row["facility_app"]      or "0"),
-            "new_branch":        str(row["new_branch"]        or ""),
-            "new_position":      str(row["new_position"]      or ""),
-            "email_offdate":     str(row["email_offdate"]     or ""),
-            "app_offdate":       str(row["app_offdate"]       or ""),
-            "positions": [
-                {"position_id": p["Position_Id"], "position_desc": p["Position_Desc"]}
-                for p in positions
-            ],
+            "employee_id": _s(row["Employee_ID"]),
+            "employee_fullname": _s(row["Employee_fullname"]),
+            "branch_cd": _s(row["Branch_Cd"]),
+            "div_id": _s(row["Div_Id"]),
+            "position_id": _s(row["Position_Id"]),
+            "memo_type": _s(row["memo_type"]),
+            "memo_date": _s(row["memo_date"]),
+            "facility_laptop": _s(row["facility_laptop"]) or "0",
+            "facility_email": _s(row["facility_email"]) or "0",
+            "facility_app": _s(row["facility_app"]) or "0",
+            "new_branch": _s(row["new_branch"]),
+            "new_position": _s(row["new_position"]),
+            "email_offdate": _s(row["email_offdate"]),
+            "app_offdate": _s(row["app_offdate"]),
+            "positions": _positions_by_div(row["Div_Id"]),
         })
     except Exception:
         current_app.logger.exception("Memo detail error")
         return jsonify({"error": "Failed"}), 500
 
-@employee_memo_bp.route("/save", methods=["POST"])
+@employee_memo_bp.route("/memo/save", methods=["POST"])
 @login_required
 def save_memo():
     username = session.get("username", "")
-    b = request.get_json(force=True) or {}
+    b = request.get_json(force=True, silent=True) or {}
 
-    memo_id           = b.get("memo_id",           "0")
-    memo_type         = b.get("memo_type",         "")
-    memo_dt           = _ddmm_to_iso(b.get("memo_dt", ""))
-    employee_id       = b.get("employee_id",       "")
-    employee_fullname = b.get("employee_fullname", "")
-    branch_cd         = b.get("branch_cd",         "")
-    div_id            = b.get("div_id",            "")
-    position_id       = b.get("position_id",       "")
-    facility_laptop   = int(b.get("facility_laptop", 0))
-    facility_email    = int(b.get("facility_email",  0))
-    facility_app      = int(b.get("facility_app",    0))
-    new_branch        = b.get("new_branch",        "")
-    new_position      = b.get("new_position",      "")
-    email_off         = _ddmm_to_iso(b.get("email_off", "")) or None
-    app_off           = _ddmm_to_iso(b.get("app_off",   "")) or None
+    memo_id = _s(b.get("memo_id")) or "0"
+    memo_type = _s(b.get("memo_type"))
+    raw_dt = _s(b.get("memo_dt"))
+    memo_dt = _ddmm_to_iso(raw_dt)
+    employee_id = _s(b.get("employee_id"))
+    employee_fullname = _s(b.get("employee_fullname"))
+    branch_cd = _s(b.get("branch_cd"))
+    div_id = _s(b.get("div_id"))
+    position_id = _s(b.get("position_id"))
+    facility_laptop = 1 if _s(b.get("facility_laptop")) == "1" else 0
+    facility_email = 1 if _s(b.get("facility_email")) == "1" else 0
+    facility_app = 1 if _s(b.get("facility_app")) == "1" else 0
+    new_branch = _s(b.get("new_branch")) if memo_type == "RL" else ""
+    new_position = _s(b.get("new_position")) if memo_type == "RL" else ""
+    raw_email_off = _s(b.get("email_off")) if memo_type == "RS" else ""
+    raw_app_off = _s(b.get("app_off")) if memo_type == "RS" else ""
+    email_off = _ddmm_to_iso(raw_email_off) or None
+    app_off = _ddmm_to_iso(raw_app_off) or None
+    is_new = memo_id == "0"
+
+    if is_new and (memo_type not in MEMO_TYPES or not employee_id or not employee_fullname
+                   or not branch_cd or not div_id or not position_id):
+        return jsonify({"success": False, "message": "Please fill all required fields."}), 400
+    if not memo_dt:
+        return jsonify({"success": False, "message": "Please fill all required fields."}), 400
 
     try:
-        if memo_id == "0":
+        if is_new:
             db.session.execute(
                 text("""
                     INSERT INTO EMPLOYEE_MEMO (
@@ -276,8 +330,7 @@ def save_memo():
                         :memo_type, :memo_dt, :employee_id, :employee_fullname,
                         :branch_cd, :div_id, :position_id,
                         :facility_laptop, :facility_email, :facility_app,
-                        :new_branch, :new_position,
-                        NULLIF(:email_off, ''), NULLIF(:app_off, ''),
+                        :new_branch, :new_position, :email_off, :app_off,
                         :username, GETDATE()
                     )
                 """),
@@ -292,6 +345,21 @@ def save_memo():
                 },
             )
         else:
+            current = db.session.execute(
+                text("SELECT Memo_Type, Employee_ID, Employee_Fullname FROM EMPLOYEE_MEMO WITH(NOLOCK) WHERE Id = :id"),
+                {"id": memo_id},
+            ).mappings().first()
+            if not current:
+                return jsonify({"success": False, "message": "Data Not Found!"}), 404
+
+            memo_type = _s(current["Memo_Type"])
+            employee_id = _s(current["Employee_ID"])
+            employee_fullname = _s(current["Employee_Fullname"])
+            if memo_type != "RL":
+                new_branch, new_position = "", ""
+            if memo_type != "RS":
+                email_off, app_off = None, None
+
             db.session.execute(
                 text("""
                     UPDATE EMPLOYEE_MEMO SET
@@ -301,8 +369,8 @@ def save_memo():
                         Facility_App    = :facility_app,
                         New_Branch      = :new_branch,
                         New_Position    = :new_position,
-                        Email_OffDate   = NULLIF(:email_off, ''),
-                        App_OffDate     = NULLIF(:app_off,   ''),
+                        Email_OffDate   = :email_off,
+                        App_OffDate     = :app_off,
                         Update_By       = :username,
                         Update_Dt       = GETDATE()
                     WHERE Id = :memo_id
@@ -316,43 +384,52 @@ def save_memo():
                 },
             )
         db.session.commit()
-
-        raw_dt = b.get("memo_dt", "")
-        if memo_id == "0":
-            if memo_type == "NW":
-                fac = (
-                    ("Laptop"   if facility_laptop else "") +
-                    ("Email"    if facility_email  else "") +
-                    ("Aplikasi" if facility_app    else "")
-                )
-                msg = f"Memo On Boarding tgl {raw_dt} atas nama {employee_fullname} ({employee_id}) dengan fasilitas {fac}."
-            elif memo_type == "RL":
-                msg = f"Memo Relokasi tgl {raw_dt} atas nama {employee_fullname} ({employee_id}). Lebih jelasnya lihat di Employee Memo."
-            else:
-                msg = f"Memo Off Boarding tgl {raw_dt} atas nama {employee_fullname} ({employee_id}) dengan tgl off email {b.get('email_off')} dan tgl off aplikasi {b.get('app_off')}."
-        else:
-            jenis = "On Boarding" if memo_type == "NW" else ("Relokasi" if memo_type == "RL" else "Off Boarding")
-            msg = f"Terdapat perubahan pada Memo {jenis} atas nama {employee_fullname} ({employee_id}). Lebih jelasnya lihat di Employee Memo."
-
-        return jsonify({"success": True, "message": "Successful"})
-
     except Exception:
         db.session.rollback()
         current_app.logger.exception("Memo save error")
         return jsonify({"success": False, "message": "Save failed"}), 500
 
-@employee_memo_bp.route("/cancel", methods=["POST"])
+    if is_new:
+        if memo_type == "NW":
+            fasilitas = ", ".join(
+                label for flag, label in (
+                    (facility_laptop, "Laptop"), (facility_email, "Email"), (facility_app, "Aplikasi"),
+                ) if flag
+            )
+            message = f"Memo On Boarding tgl {raw_dt} atas nama {employee_fullname} ({employee_id}) dengan fasilitas {fasilitas}."
+        elif memo_type == "RL":
+            message = f"Memo Relokasi tgl {raw_dt} atas nama {employee_fullname} ({employee_id}). Lebih jelasnya lihat di Employee Memo."
+        else:
+            message = (
+                f"Memo Off Boarding tgl {raw_dt} atas nama {employee_fullname} ({employee_id}) "
+                f"dengan tgl off email {raw_email_off} dan tgl off aplikasi {raw_app_off}."
+            )
+    else:
+        jenis = "On Boarding" if memo_type == "NW" else ("Relokasi" if memo_type == "RL" else "Off Boarding")
+        message = f"Terdapat perubahan pada Memo {jenis} atas nama {employee_fullname} ({employee_id}). Lebih jelasnya lihat di Employee Memo."
+
+    _notify_division(DIV_IT, message)
+    return jsonify({"success": True, "message": "Successful"})
+
+@employee_memo_bp.route("/memo/cancel", methods=["POST"])
 @login_required
 def cancel_memo():
     username = session.get("username", "")
-    b        = request.get_json(force=True) or {}
-    memo_id       = b.get("memo_id",       "")
-    cancel_reason = b.get("cancel_reason", "")
+    b = request.get_json(force=True, silent=True) or {}
+    memo_id = _s(b.get("memo_id"))
+    cancel_reason = _s(b.get("cancel_reason"))
+
+    if not memo_id or not cancel_reason:
+        return jsonify({"success": False, "message": "Please enter a cancel reason."}), 400
+
     try:
-        db.session.execute(
+        result = db.session.execute(
             text("UPDATE EMPLOYEE_MEMO SET Cancel_Reason = :reason, Cancel_By = :by, Cancel_Dt = GETDATE() WHERE Id = :id"),
             {"reason": cancel_reason, "by": username, "id": memo_id},
         )
+        if result.rowcount == 0:
+            db.session.rollback()
+            return jsonify({"success": False, "message": "Failed"}), 404
         db.session.commit()
 
         row = db.session.execute(
@@ -366,49 +443,57 @@ def cancel_memo():
             """),
             {"id": memo_id},
         ).mappings().first()
-
-        if row:
-            msg = (
-                f"Cancel Memo {row['Memo_Type']} tgl {row['Memo_Date']} "
-                f"atas nama {row['Employee_Fullname']} ({row['Employee_ID']}) "
-                f"dengan alasan {cancel_reason}."
-            )
-
-        return jsonify({"success": True, "message": "Successful"})
     except Exception:
         db.session.rollback()
         current_app.logger.exception("Memo cancel error")
         return jsonify({"success": False, "message": "Failed"}), 500
 
-@employee_memo_bp.route("/email", methods=["POST"])
+    if row:
+        _notify_division(DIV_IT, (
+            f"Cancel Memo {row['Memo_Type']} tgl {row['Memo_Date']} "
+            f"atas nama {row['Employee_Fullname']} ({row['Employee_ID']}) "
+            f"dengan alasan {cancel_reason}."
+        ))
+    return jsonify({"success": True, "message": "Successful"})
+
+@employee_memo_bp.route("/memo/email", methods=["POST"])
 @login_required
 def update_email():
-    b       = request.get_json(force=True) or {}
-    memo_id = b.get("memo_id", "")
-    email   = b.get("email",   "")
+    b = request.get_json(force=True, silent=True) or {}
+    memo_id = _s(b.get("memo_id"))
+    email = _s(b.get("email"))
+
+    if not memo_id or not email:
+        return jsonify({"success": False, "message": "Please enter an email."}), 400
+
     try:
-        db.session.execute(
+        result = db.session.execute(
             text("UPDATE EMPLOYEE_MEMO SET Email = :email WHERE Id = :id"),
             {"email": email, "id": memo_id},
         )
+        if result.rowcount == 0:
+            db.session.rollback()
+            return jsonify({"success": False, "message": "Failed"}), 404
         db.session.commit()
 
         row = db.session.execute(
             text("""
                 SELECT a.Employee_ID, a.Employee_Fullname, a.Email
                 FROM EMPLOYEE_MEMO a WITH(NOLOCK)
-                INNER JOIN MSTCOMBO b WITH(NOLOCK)
-                    ON a.Memo_Type = b.VALUE AND b.CAT_VALUE = 'MEMO_EMPLOYEE_TYPE'
+                    INNER JOIN MSTCOMBO b WITH(NOLOCK)
+                        ON a.Memo_Type = b.VALUE AND b.CAT_VALUE = 'MEMO_EMPLOYEE_TYPE'
                 WHERE a.Id = :id
             """),
             {"id": memo_id},
         ).mappings().first()
-
-        if row:
-            msg = f"Alamat email dari karyawan baru atas nama {row['Employee_Fullname']} ({row['Employee_ID']}) adalah {row['Email']}."
-
-        return jsonify({"success": True, "message": "Successful"})
     except Exception:
         db.session.rollback()
         current_app.logger.exception("Memo email error")
         return jsonify({"success": False, "message": "Failed"}), 500
+
+    if row:
+        _notify_division(DIV_HR, (
+            f"Alamat email dari karyawan baru atas nama {row['Employee_Fullname']} "
+            f"({row['Employee_ID']}) adalah {row['Email']}."
+        ))
+    return jsonify({"success": True, "message": "Successful"})

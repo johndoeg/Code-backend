@@ -1,11 +1,13 @@
-from flask import Blueprint, jsonify, request, current_app, send_file, Response
+from flask import Blueprint, jsonify, request, current_app, send_file, Response, session
 from app import db
 from app.auth.decorators import login_required
 from sqlalchemy import text
-from html import escape
 import io
 import pandas as pd
 from datetime import datetime
+from openpyxl import Workbook
+from openpyxl.styles import Font, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
 
 dealer_report_bp = Blueprint('dealer_report', __name__, url_prefix='/MasterData')
 
@@ -32,109 +34,6 @@ def get_branches():
         current_app.logger.exception("Failed to load branches")
         return jsonify([]), 500
     
-@dealer_report_bp.route('/dealer-list')
-@login_required
-def get_dealer_list():
-    page = request.args.get('page', 1, type=int)
-    limit = request.args.get('limit', 25, type=int)
-    branch_cd = request.args.get('branch_cd', '').strip()
-    
-    if not branch_cd:
-        return jsonify({"data": [], "total": 0})
-
-    try:
-        where_clause = ""
-        params = {}
-        if branch_cd == '000':
-            where_clause = "1=1"
-        else:
-            where_clause = "a.BRANCH_CD = :branch_cd"
-            params["branch_cd"] = branch_cd
-
-        count_query = text(f"""
-            SELECT COUNT(*) as total
-            FROM CLFSUPP a WITH(NOLOCK)
-                LEFT JOIN BeneficiaryAccount b WITH(NOLOCK) 
-                    ON a.SUPP = b.BeneficiaryID AND b.Category = 'Dealer'
-                LEFT JOIN BeneficiaryTax d WITH(NOLOCK) 
-                    ON a.SUPP = d.BeneficiaryID AND d.Category = 'Dealer'
-            WHERE {where_clause}
-        """)
-        
-        count_result = db.session.execute(count_query, params)
-        total = count_result.fetchone().total
-
-        offset = (page - 1) * limit
-
-        data_query = text(f"""
-            SELECT 
-                t.NAME,
-                t.NICKNAME,
-                t.ADDRESS,
-                t.CITY,
-                t.PHONE,
-                t.CONTACT,
-                t.POSITION,
-                t.Acc_NO,
-                t.isActive
-            FROM (
-                SELECT 
-                    ROW_NUMBER() OVER(ORDER BY a.NAME) as RowNr,
-                    a.NAME,
-                    a.NICKNAME,
-                    a.ADDRESS,
-                    a.CITY,
-                    a.PHONE,
-                    a.CONTACT,
-                    a.POSITION,
-                    a.isActive,
-                    b.Acc_NO
-                FROM CLFSUPP a WITH(NOLOCK)
-                    LEFT JOIN BeneficiaryAccount b WITH(NOLOCK) 
-                        ON a.SUPP = b.BeneficiaryID AND b.Category = 'Dealer' AND b.AccountType = 'D'
-                    LEFT JOIN UMFBANK c WITH(NOLOCK) 
-                        ON b.Acc_Bank = c.Bank_Code
-                WHERE {where_clause}
-            ) t
-            WHERE t.RowNr BETWEEN :start_row AND :end_row
-            ORDER BY t.RowNr
-        """)
-        
-        data_params = {
-            **params,
-            "start_row": offset + 1,
-            "end_row": offset + limit
-        }
-        
-        result = db.session.execute(data_query, data_params)
-        records = []
-        start_no = offset + 1
-
-        for row in result:
-            status_text = "Active" if row.isActive == True else "Inactive"
-            records.append({
-                "no": start_no,
-                "name": row.NAME or "",
-                "nickname": row.NICKNAME or "",
-                "address": row.ADDRESS or "",
-                "city": row.CITY or "",
-                "phone": row.PHONE or "",
-                "contact": row.CONTACT or "",
-                "position": row.POSITION or "",
-                "accNo": row.Acc_NO or "",
-                "status": status_text,
-            })
-            start_no += 1
-        
-        return jsonify({
-            "data": records,
-            "total": total
-        })
-
-    except Exception as e:
-        current_app.logger.exception("Dealer list report error")
-        return jsonify({"data": [], "total": 0}), 500
-
 @dealer_report_bp.route('/sales-list/print')
 @login_required
 def print_sales_list():
@@ -325,174 +224,198 @@ MAX_PAGE_LIMIT = 200
 
 DEALER_FROM = """
     FROM CLFSUPP a WITH(NOLOCK)
-        LEFT JOIN BeneficiaryAccount b WITH(NOLOCK)
-            ON a.SUPP = b.BeneficiaryID AND b.Category = 'Dealer' AND b.AccountType = 'D'
-        LEFT JOIN UMFBANK c WITH(NOLOCK)
-            ON b.Acc_Bank = c.Bank_Code
-        LEFT JOIN BeneficiaryTax d WITH(NOLOCK)
-            ON a.SUPP = d.BeneficiaryID AND d.Category = 'Dealer'
+        LEFT JOIN BeneficiaryAccount c WITH(NOLOCK)
+            ON a.SUPP = c.BeneficiaryID AND c.Category = 'Dealer' AND c.AccountType = 'D'
+        LEFT JOIN UMFBANK b WITH(NOLOCK)
+            ON c.Acc_Bank = b.BANK_CODE
 """
 
 DEALER_COLUMNS = """
-    a.SUPP,
-    a.NAME,
-    a.ADDRESS,
-    a.isActive,
-    b.Acc_No,
-    c.[Desc] AS bank_name,
-    b.Acc_BankBranch,
-    d.NPWP_No
+    a.NAME, a.NICKNAME, a.ADDRESS, a.CITY, a.PHONE, a.CONTACT, a.POSITION,
+    c.Acc_NO AS AccNo, c.Acc_BankBranch AS BankBranch, b.[DESC] AS BankDesc
 """
+
+DEALER_ORDER = "ORDER BY a.NAME, a.SUPP"
+
+DEALER_FIELDS = (
+    ("No.", "no", 5),
+    ("Name", "name", 28),
+    ("Nickname", "nickname", 18),
+    ("Address", "address", 45),
+    ("City", "city", 16),
+    ("Phone", "phone", 18),
+    ("Contact", "contact", 20),
+    ("Position", "position", 14),
+    ("Acc No.", "accNo", 18),
+    ("Bank", "bank", 22),
+    ("Bank Branch", "bankBranch", 22),
+)
+
 
 def _branch_filter(branch_cd: str):
     if branch_cd == ALL_BRANCHES:
         return "1=1", {}
     return "a.BRANCH_CD = :branch_cd", {"branch_cd": branch_cd}
 
-def _branch_name(branch_cd: str) -> str:
-    if branch_cd == ALL_BRANCHES:
-        return "All Branches"
-    row = db.session.execute(
-        text("SELECT BRANCH_NAME FROM UMFBRANCH WITH(NOLOCK) WHERE BRANCH_CD = :branch_cd"),
-        {"branch_cd": branch_cd},
-    ).fetchone()
-    return row.BRANCH_NAME if row and row.BRANCH_NAME else branch_cd
+
+def _dash(value) -> str:
+    v = "" if value is None else str(value).strip()
+    return v if v else "-"
+
 
 def _to_record(no: int, row) -> dict:
     return {
         "no": no,
-        "dealerNo": row.SUPP or "",
-        "name": row.NAME or "",
-        "address": row.ADDRESS or "",
-        "accNo": row.Acc_No or "",
-        "bankName": row.bank_name or "",
-        "bankBranch": row.Acc_BankBranch or "",
-        "npwpNo": row.NPWP_No or "",
-        "status": "Active" if row.isActive else "Inactive",
+        "name": _dash(row.NAME),
+        "nickname": _dash(row.NICKNAME),
+        "address": _dash(row.ADDRESS),
+        "city": _dash(row.CITY),
+        "phone": _dash(row.PHONE),
+        "contact": _dash(row.CONTACT),
+        "position": _dash(row.POSITION),
+        "accNo": _dash(row.AccNo),
+        "bank": _dash(row.BankDesc),
+        "bankBranch": _dash(row.BankBranch),
     }
+
 
 def _fetch_all_dealers(branch_cd: str) -> list:
     where, params = _branch_filter(branch_cd)
     rows = db.session.execute(
-        text(f"SELECT {DEALER_COLUMNS} {DEALER_FROM} WHERE {where} ORDER BY a.NAME, a.SUPP"),
+        text(f"SELECT {DEALER_COLUMNS} {DEALER_FROM} WHERE {where} {DEALER_ORDER}"),
         params,
     ).fetchall()
     return [_to_record(i, r) for i, r in enumerate(rows, 1)]
+
+
+def _print_by_line() -> str:
+    return f"Print By - Date : {session.get('username', '')} - {datetime.now().strftime('%d/%m/%Y')}"
+
+
+@dealer_report_bp.route('/dealer-list')
+@login_required
+def get_dealer_list():
+    page = max(request.args.get('page', 1, type=int), 1)
+    limit = min(max(request.args.get('limit', 25, type=int), 1), MAX_PAGE_LIMIT)
+    branch_cd = request.args.get('branch_cd', '').strip()
+
+    if not branch_cd:
+        return jsonify({"data": [], "total": 0})
+
+    try:
+        where, params = _branch_filter(branch_cd)
+
+        total = db.session.execute(
+            text(f"SELECT COUNT(*) AS total {DEALER_FROM} WHERE {where}"),
+            params,
+        ).fetchone().total
+
+        offset = (page - 1) * limit
+        rows = db.session.execute(
+            text(f"""
+                SELECT {DEALER_COLUMNS} {DEALER_FROM}
+                WHERE {where}
+                {DEALER_ORDER}
+                OFFSET :offset ROWS FETCH NEXT :limit ROWS ONLY
+            """),
+            {**params, "offset": offset, "limit": limit},
+        ).fetchall()
+
+        return jsonify({
+            "data": [_to_record(offset + i, r) for i, r in enumerate(rows, 1)],
+            "total": total,
+        })
+    except Exception:
+        current_app.logger.exception("Dealer list report error")
+        return jsonify({"data": [], "total": 0}), 500
+
 
 @dealer_report_bp.route('/dealer-list/print')
 @login_required
 def print_dealer_list():
     branch_cd = request.args.get('branch_cd', '').strip()
     if not branch_cd:
-        return Response("Branch parameter required", status=400, mimetype='text/plain')
+        return jsonify({"error": "Please Fill The Field"}), 400
 
     try:
         records = _fetch_all_dealers(branch_cd)
-        branch_name = escape(_branch_name(branch_cd))
-        generated = datetime.now().strftime('%d-%m-%Y %H:%M:%S')
-
-        if records:
-            body_rows = "".join(
-                "<tr>"
-                f"<td class='c'>{r['no']}</td>"
-                f"<td>{escape(r['dealerNo'])}</td>"
-                f"<td>{escape(r['name'])}</td>"
-                f"<td>{escape(r['address'] or '-')}</td>"
-                f"<td>{escape(r['accNo'] or '-')}</td>"
-                f"<td>{escape(r['bankName'] or '-')}</td>"
-                f"<td>{escape(r['bankBranch'] or '-')}</td>"
-                f"<td>{escape(r['npwpNo'] or '-')}</td>"
-                f"<td class=\"{'active' if r['status'] == 'Active' else 'inactive'}\">{r['status']}</td>"
-                "</tr>"
-                for r in records
-            )
-        else:
-            body_rows = "<tr><td colspan='9' class='c'>No Dealer records found</td></tr>"
-
-        html = f"""<!DOCTYPE html>
-                    <html>
-                    <head>
-                        <meta charset="utf-8">
-                        <title>List of Dealer - {branch_name}</title>
-                        <style>
-                            body {{ font-family: Arial, sans-serif; margin: 20px; font-size: 12px; }}
-                            h1 {{ text-align: center; margin: 0 0 6px; font-size: 18px; }}
-                            .meta {{ text-align: center; margin-bottom: 16px; color: #444; }}
-                            table {{ width: 100%; border-collapse: collapse; }}
-                            th, td {{ border: 1px solid #000; padding: 5px 6px; text-align: left; vertical-align: top; }}
-                            th {{ background: #f2f2f2; }}
-                            thead {{ display: table-header-group; }}
-                            tr {{ page-break-inside: avoid; }}
-                            .c {{ text-align: center; }}
-                            .active {{ color: green; }}
-                            .inactive {{ color: red; }}
-                            @page {{ size: landscape; margin: 10mm; }}
-                        </style>
-                    </head>
-                    <body onload="window.print()">
-                        <h1>List of Dealer</h1>
-                        <div class="meta">Branch: {branch_name} &nbsp;|&nbsp; Total: {len(records)} &nbsp;|&nbsp; Generated: {generated}</div>
-                        <table>
-                            <thead>
-                                <tr>
-                                    <th class="c">No.</th>
-                                    <th>Dealer No.</th>
-                                    <th>Name</th>
-                                    <th>Address</th>
-                                    <th>Acc No.</th>
-                                    <th>Bank</th>
-                                    <th>Bank Branch</th>
-                                    <th>NPWP</th>
-                                    <th>Status</th>
-                                </tr>
-                            </thead>
-                            <tbody>{body_rows}</tbody>
-                        </table>
-                    </body>
-                    </html>"""
-                    
-        return Response(html, mimetype='text/html')
-
+        return jsonify({
+            "data": records,
+            "total": len(records),
+            "print_by": session.get("username", ""),
+            "print_date": datetime.now().strftime('%d/%m/%Y'),
+        })
     except Exception:
         current_app.logger.exception("Dealer print report error")
-        return Response("Error generating report", status=500, mimetype='text/plain')
+        return jsonify({"error": "Error generating report"}), 500
+
 
 @dealer_report_bp.route('/dealer-list/excel')
 @login_required
 def export_dealer_excel():
     branch_cd = request.args.get('branch_cd', '').strip()
     if not branch_cd:
-        return Response("Branch parameter required", status=400, mimetype='text/plain')
+        return Response("Please Fill The Field", status=400, mimetype='text/plain')
 
     try:
         records = _fetch_all_dealers(branch_cd)
-        df = pd.DataFrame(
-            [{
-                "No.": r["no"],
-                "Dealer No.": r["dealerNo"],
-                "Name": r["name"],
-                "Address": r["address"],
-                "Acc No.": r["accNo"],
-                "Bank": r["bankName"],
-                "Bank Branch": r["bankBranch"],
-                "NPWP": r["npwpNo"],
-                "Status": r["status"],
-            } for r in records],
-            columns=["No.", "Dealer No.", "Name", "Address", "Acc No.", "Bank", "Bank Branch", "NPWP", "Status"],
-        )
+        col_count = len(DEALER_FIELDS)
+        last_col = get_column_letter(col_count)
+        thin = Side(style='thin', color='000000')
+        border = Border(left=thin, right=thin, top=thin, bottom=thin)
+        font = Font(name='Tahoma', size=9)
+        top_wrap = Alignment(vertical='top', wrap_text=True)
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = 'ListofDealer'
+
+        ws.merge_cells(f'A1:{last_col}1')
+        ws['A1'] = 'List of Dealer'
+        ws['A1'].font = Font(name='Tahoma', size=15, bold=True)
+        ws['A1'].alignment = Alignment(horizontal='center', vertical='center')
+        ws.row_dimensions[1].height = 24
+
+        ws.merge_cells(f'A2:{last_col}2')
+        ws['A2'] = _print_by_line()
+        ws['A2'].font = font
+        ws['A2'].alignment = Alignment(horizontal='center')
+
+        header_row = 4
+        for idx, (label, _, width) in enumerate(DEALER_FIELDS, start=1):
+            c = ws.cell(row=header_row, column=idx, value=label)
+            c.font = font
+            c.border = border
+            c.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+            ws.column_dimensions[get_column_letter(idx)].width = width
+
+        if records:
+            for r_idx, r in enumerate(records, start=header_row + 1):
+                for c_idx, (_, key, _) in enumerate(DEALER_FIELDS, start=1):
+                    c = ws.cell(row=r_idx, column=c_idx, value=r[key])
+                    c.font = font
+                    c.border = border
+                    c.alignment = Alignment(horizontal='center', vertical='top') if key == 'no' else top_wrap
+        else:
+            row = header_row + 1
+            ws.merge_cells(f'A{row}:{last_col}{row}')
+            c = ws.cell(row=row, column=1, value='Data Not Found..')
+            c.font = Font(name='Tahoma', size=12, color='EE0000')
+            c.alignment = Alignment(horizontal='center')
+            for c_idx in range(1, col_count + 1):
+                ws.cell(row=row, column=c_idx).border = border
+
+        ws.freeze_panes = f'A{header_row + 1}'
 
         output = io.BytesIO()
-        df.to_excel(output, index=False, sheet_name='Dealer List')
+        wb.save(output)
         output.seek(0)
-
-        branch_part = _branch_name(branch_cd).replace(' ', '')
-        filename = f"DealerList_{branch_part}_{datetime.now().strftime('%Y%m%d')}.xlsx"
 
         return send_file(
             output,
             mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
             as_attachment=True,
-            download_name=filename,
+            download_name='ListofDealer.xlsx',
         )
 
     except Exception:

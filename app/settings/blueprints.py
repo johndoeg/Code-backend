@@ -73,7 +73,7 @@ BLUEPRINT_REGISTRY: List[BlueprintEntry] = [
     BlueprintEntry("app.cam.reportview.listapprovedcam.routes_summary_approved_cam",                    "summary_approved_cam_bp",               "/CAM/Approved"),
     BlueprintEntry("app.cam.reportview.listapprovedcam.routes_all_cam_data",                            "all_cam_data_bp",                       "/CAM/Approved"),
     BlueprintEntry("app.cam.reportview.listapprovedcam.routes_list_cam_by_disbursement_date",           "cam_by_disbursement_date_bp",           "/CAM/Approved"),
-    BlueprintEntry("app.cam.reportview.listapprovedcam.routes_list_cam_by_customer_group",               "cam_by_cust_group_bp",                 "/CAM/Approved"),
+    BlueprintEntry("app.cam.reportview.listapprovedcam.routes_list_cam_by_customer_group",              "cam_by_cust_group_bp",                 "/CAM/Approved"),
     BlueprintEntry("app.cam.reportview.listapprovedcam.routes_all_insurance_data",                      "all_insurance_data_bp",                 "/CAM/Approved"),
 
     BlueprintEntry("app.cam.reportview.cmoproductivityreport.routes_cmo_daily_productivity",            "cmo_daily_productivity_bp",             "/CAM/CMO"),
